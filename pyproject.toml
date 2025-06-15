@@ -1,0 +1,20 @@
+[project]
+name = "pyMSI"
+version = "0.1.0"
+authors = [
+  { name="Andrew Kuzin", email="Kuzya-90@bk.ru" },
+]
+description = "A package for proccesing and aligning peaklist Mass-spectrometry imaging data from .imzml files"
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Development Status :: 4 - Beta",
+]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+
+[project.urls]
+Homepage = "https://github.com/pypa/sampleproject"
+Issues = "https://github.com/pypa/sampleproject/issues"
