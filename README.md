@@ -9,7 +9,7 @@
 
 The processing of mass spectra includes several steps:
 - **Data resampling** — This process allows you to bring data to a uniform scale between points on the `mz` and to a single scale on the `mz`.
-- **Alignment of spectra relative to reference peaks** using the [`msalign`](attachmnet:https://github.com/lukasz-migas/msalign) tool. It should be noted that `msalign` does a worse job with non-continuous and non-uniform data, so it is strongly recommended to perform a resampling process before using it. Also `msalign` is modified in this package for correct work with other steps.
+- **Alignment of spectra relative to reference peaks** using the [`msalign`](https://github.com/lukasz-migas/msalign) tool. It should be noted that `msalign` does a worse job with non-continuous and non-uniform data, so it is strongly recommended to perform a resampling process before using it. Also `msalign` is modified in this package for correct work with other steps.
 - **Baseline correction** using the [pybaselines](https://pybaselines.readthedocs.io) package.
 - **Smoothing** — based on code snippets from the [mMass](https://github.com/xxao/mMass) library, which provide smoothing using the moving average, Gaussian, and Savitsky-Goley algorithms.
 - **Peak-picking** — peaks in the spectrum are searched and filtered.
