@@ -1,6 +1,6 @@
-# Package pyMSI
+# Package pelmesha
 
-`pyMSI` is a Python package that allows users to process Mass Spectrometry Imaging (MSI) data from imzml files. It provides several features, including:
+`pelmesha` (Peak Extraction Library for Mass spectrometry Enhanced by Statistical High-throughput Analysis) is a Python package that allows users to process Mass Spectrometry Imaging (MSI) data from imzml files. It provides several features, including:
 1) Conversion of raw imzml data to the hdf5 format (function `imzml2hdf5` from module `pspectra`)
 2) Processing of mass spectra (function `Raw2proc` from module `pspectra`)
 3) Creation of peaklists from the data (functions `proc2peaklist` and `Raw2peaklist` from module `pspectra`)
