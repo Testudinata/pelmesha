@@ -1,7 +1,7 @@
 """
-ProcceMSI
+pelmesha
 
-ProcceMSI is a Python library for loading, preprocessing, processing and storage of mass spectra Mass Spectrometry Imaging (MSI) data.
+pelmesha is a Python library for loading, preprocessing, processing, storage and extracting peaklists of Mass Spectrometry Imaging (MSI) data.
 """
 
 __version__ = "0.1.0"

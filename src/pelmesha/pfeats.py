@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from itertools import product,pairwise
 from torch.multiprocessing import Pool, cpu_count
-from ProcceMSI.loaders import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger
+from pelmesha.loaders import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger
 import matplotlib.pyplot as plt
 from h5py import File
 from KDEpy import FFTKDE

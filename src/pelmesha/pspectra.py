@@ -6,8 +6,8 @@ from threading import Thread
 from pybaselines import Baseline
 from scipy.interpolate import interp1d
 from scipy.stats import median_abs_deviation
-from ProcceMSI import msalign
-from ProcceMSI.loaders import find_paths, logger
+from pelmesha import msalign
+from pelmesha.loaders import find_paths, logger
 from pyimzml.ImzMLParser import ImzMLParser
 from h5py import File
 import gc
