@@ -1,5 +1,5 @@
 [project]
-name = "pyMSI"
+name = "pelmesha"
 version = "0.1.0"
 authors = [
   { name="Andrew Kuzin", email="Kuzya-90@bk.ru" },
