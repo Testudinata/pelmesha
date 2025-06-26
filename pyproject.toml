@@ -12,7 +12,7 @@ classifiers = [
     "Operating System :: OS Independent",
     "Development Status :: 4 - Beta",
 ]
-license = "Apache 2.0"
+license = "Apache-2.0"
 license-files = ["LICEN[CS]E*"]
 [build-system]
 requires = ["setuptools >= 77.0.3"]
