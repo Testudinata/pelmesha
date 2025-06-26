@@ -12,9 +12,11 @@ classifiers = [
     "Operating System :: OS Independent",
     "Development Status :: 4 - Beta",
 ]
-license = "MIT"
+license = "Apache 2.0"
 license-files = ["LICEN[CS]E*"]
-
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
 [project.urls]
-Homepage = "https://github.com/pypa/sampleproject"
-Issues = "https://github.com/pypa/sampleproject/issues"
+Homepage = "https://github.com/Testudinata/pelmesha"
+Issues = "https://github.com/Testudinata/pelmesha/issues"
