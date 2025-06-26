@@ -8,6 +8,6 @@ __version__ = "0.1.0"
 __author__ = 'Andrey Kuzin'
 __credits__ = 'Moscow Institue of Physics and Technology'
 
-import loaders
-import pspectra
-import pfeats
+import .loaders
+import .pspectra
+import .pfeats
