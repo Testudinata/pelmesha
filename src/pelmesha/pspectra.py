@@ -20,10 +20,6 @@ from math import sqrt
 
 ### Code from __init__.py msalign (https://github.com/lukasz-migas/msalign)
 """Signal calibration and alignment by reference peaks - copy of MSALIGN function from MATLAB bioinformatics library."""
-try:
-    from ._version import version as __version__  # noqa: F401
-except ImportError:
-    __version__ = "unknown"
 from .align import Aligner
 from typing import List
 __all__ = ["msalign", "Aligner"]
