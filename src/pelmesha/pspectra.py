@@ -70,14 +70,6 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     """
     Description
     ----
-    Конвертация сырых данных из imzML в hdf5 по списку путей к файлам/корневым папкам из path_list. 
-
-    Если дан путь к папке, а не файлу, то проводится поиск файлов imzML в подпапках.
-
-    Запись данных конвертированных файлом imzML происходит в папке выше корневой для файла imzML, 
-    если папка выше является общей для нескольких файлов, то их данные записываются в один hdf5 файл, но в разные датасеты hdf5, 
-    где имя датасета берётся из названия папки, в которой находится файл imzML.
-    
     Conversion of raw data from imzML to hdf5 according to a list of file paths/root folders from path_list.
 
     If a folder path rather than a file path is provided, a search for imzML files in subfolders is performed.
