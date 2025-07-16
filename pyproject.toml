@@ -15,7 +15,7 @@ classifiers = [
 license = "Apache-2.0"
 license-files = ["LICEN[CS]E*"]
 [build-system]
-requires = ["setuptools >= 77.0.3"]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 [project.urls]
 Homepage = "https://github.com/Testudinata/pelmesha"
