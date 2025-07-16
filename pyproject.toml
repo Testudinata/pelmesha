@@ -1,6 +1,7 @@
 [project]
 name = "pelmesha"
-dynamic = ["version"]
+version = "0.0.2"
+# dynamic = ["version"]
 authors = [
   { name="Andrew Kuzin", email="Kuzya-90@bk.ru" },
 ]
@@ -23,4 +24,5 @@ Homepage = "https://github.com/Testudinata/pelmesha"
 Issues = "https://github.com/Testudinata/pelmesha/issues"
 [tool.setuptools_scm]
 version_file = "_version.py"
+version_scheme = 'python-simplified-semver'
 local_scheme  = 'no-local-version'
