@@ -68,7 +68,7 @@ msalign.__doc__ = Aligner.__doc__
 
 def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsize = 10000000, reconv = False):
     """
-    Общее описание
+    Description
     ----
     Конвертация сырых данных из imzML в hdf5 по списку путей к файлам/корневым папкам из path_list. 
 
