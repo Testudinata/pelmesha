@@ -20,3 +20,5 @@ build-backend = "setuptools.build_meta"
 [project.urls]
 Homepage = "https://github.com/Testudinata/pelmesha"
 Issues = "https://github.com/Testudinata/pelmesha/issues"
+[tool.setuptools_scm]
+version_file = "pelmesha/_version.py"
