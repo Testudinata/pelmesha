@@ -1,7 +1,7 @@
 [project]
 name = "pelmesha"
-version = "0.0.2"
-# dynamic = ["version"]
+#version = "0.0.2"
+dynamic = ["version"]
 authors = [
   { name="Andrew Kuzin", email="Kuzya-90@bk.ru" },
 ]
