@@ -78,6 +78,14 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     если папка выше является общей для нескольких файлов, то их данные записываются в один hdf5 файл, но в разные датасеты hdf5, 
     где имя датасета берётся из названия папки, в которой находится файл imzML.
     
+    Conversion of raw data from imzML to hdf5 according to a list of file paths/root folders from path_list.
+
+    If a folder path rather than a file path is provided, a search for imzML files in subfolders is performed.
+
+    The conversion of imzML file data is written to the folder above the root folder for the imzML file. 
+    If the upper folder is common for several files, their data is written to a single hdf5 file but into different hdf5 datasets.
+    The dataset name is taken from the name of the folder containing the imzML file.
+
     :param path_list: list of str or paths to folder or `imzML` file
     :param dtypeconv: convert data to `"double"`,`"single"` or `"half"` float type. The default is `"single"`
     :param chunk_rowsize: chunking hdf5 datasets for partial and efficient loading data to RAM. The default is `"Auto"`
