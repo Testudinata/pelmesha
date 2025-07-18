@@ -66,6 +66,7 @@
 #     #   with:
 #     #     repository-url: https://test.pypi.org/legacy/
 # # name: Publish Python 🐍 distribution 📦 to PyPI
+name: Publish Python 🐍 distribution 📦 to PyPI
 
 on:
   push:
