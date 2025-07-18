@@ -104,7 +104,7 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     imzmlpath_list = find_paths(path_list) ## Поиск файлов imzml и создание списка корневых папок с файлами ".imzml"
     sample_tot_num = len(imzmlpath_list)  # счётчик общего количества sample, используется для создания количества процессов не более этого значения (не критично, но оптимально вдруг, чтобы не создавать пул нерабочих процессов, что возможно ест ресурс компа)
     if sample_tot_num ==0:
-        Warning.warn("Sample total num is - 0. Couldn't find imzML files")
+        warning.warn("Sample total num is - 0. Couldn't find imzML files")
         return
     ##
     ## Создание списков наименований слайдов, roi и рассчёт общего количества roi
