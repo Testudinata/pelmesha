@@ -82,6 +82,7 @@ jobs:
     - uses: actions/checkout@v4
       with:
         persist-credentials: false
+        fetch-depth: 0  
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -103,7 +104,8 @@ jobs:
   publish-to-pypi:
     name: >-
       Publish Python 🐍 distribution 📦 to PyPI
-
+    if: startsWith(github.ref, 'refs/tags/')  # only publish to PyPI on tag pushes
+    
     needs:
     - build
     runs-on: ubuntu-latest
