@@ -1623,7 +1623,7 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
         poslog_err = sample_name
     else:
         sample = folder_name+"_"+sample_name        
-    
+    base_path = os.path.join(folder_path2imzml,sample_name)
     ## Определение байтового размера одной точки
     if dtypeconv =='single':
         bytes_flsize = 4

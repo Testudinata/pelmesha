@@ -1,13 +1,12 @@
 [project]
 name = "pelmesha"
-#version = "0.0.2"
 dynamic = ["version"]
 authors = [
   { name="Andrew Kuzin", email="Kuzya-90@bk.ru" },
 ]
 description = "A package for proccesing and aligning peaklist Mass-spectrometry imaging data from .imzml files"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -16,6 +15,7 @@ classifiers = [
 
 license = "Apache-2.0"
 license-files = ["LICEN[CS]E*"]
+
 [build-system]
 requires = ["setuptools>=72", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
@@ -23,6 +23,6 @@ build-backend = "setuptools.build_meta"
 Homepage = "https://github.com/Testudinata/pelmesha"
 Issues = "https://github.com/Testudinata/pelmesha/issues"
 [tool.setuptools_scm]
-# version_file = "_version.py"
+
 version_scheme = 'only-version'
 local_scheme  = 'no-local-version'
