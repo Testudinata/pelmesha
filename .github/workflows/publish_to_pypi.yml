@@ -3,7 +3,7 @@ name: Publish pelmesha distribution 📦 to PyPI
 on:
   push:
     tags:
-      - "*"
+      - "**"
     #    branches:
 #      - main
 
