@@ -117,7 +117,7 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
             sample_imzmlpath_list.append([Slides_path,path])
         else:
             if reconv:
-                os.remove(Slides_path+"\\"+Slide_name+"_rawdata.hdf5")
+                os.remove(os.path.join(Slides_path,Slide_name)+"_rawdata.hdf5")
                 sample_imzmlpath_list.append([Slides_path,path])
             else:
                 print(f"Data on the path {path} has hdf5 file for raw data. Change argument 'reconv' to True, if needed to reconvert")
@@ -254,7 +254,7 @@ def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #
     
     # Working with slides
     for file_path in path_dict.keys():
-        slide = file_path.split('\\')[-1]  
+        slide = os.path.basename(file_path)  
         print(f"The {slide} raw spectra data is on progress.")
         
         data_obj_coord={}
@@ -297,21 +297,19 @@ def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #
         
         if rewrite: # if TRUE - delete hdf5
             try:
-                os.remove(file_path+'\\'+slide+"_specdata.hdf5")
+                os.remove(os.path.join(file_path,slide)+"_specdata.hdf5")
             except:
                 pass
         ## 
-        if os.path.isfile(file_path+'\\'+slide+"_specdata.hdf5"): # if hdf5 exist
-            with File(file_path+'\\'+slide+"_specdata.hdf5","r") as data_obj_procc:
+        if os.path.isfile(os.path.join(file_path,slide)+"_specdata.hdf5"): # if hdf5 exist
+            with File(os.path.join(file_path,slide)+"_specdata.hdf5","r") as data_obj_procc:
 
-                #try:
-                    #data_obj_feat_new = File(file_path+'\\'+slide+"new.hdf5","a")
                 for sample in data_obj_procc.keys():
                     for roi in data_obj_procc[sample].keys():    
                         try:
                             data_obj_procc[sample][roi]['int']
                             data_obj_procc.close()
-                            os.remove(file_path+'\\'+slide+"_specdata.hdf5")
+                            os.remove(os.path.join(file_path,slide)+"_specdata.hdf5")
                             print("Old hdf5 file deleted")
                             
                             break
@@ -334,11 +332,9 @@ def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #
         p.join()
         ##III. Proccessing, peakpicking and writing to hdf5 - Done
         ##IV. Drawing example result
-
-        #data_obj_procc = File(file_path+'\\'+slide+"_specdata.hdf5","r")
         
         if draw and (resample_to_dots is not None or data_obj_coord[sample][roi]["continuous"]):
-            data_obj_procc = File(file_path+'\\'+slide+"_specdata.hdf5","r")
+            data_obj_procc = File(os.path.join(file_path,slide)+"_specdata.hdf5","r")
             print(f"Slide's {slide} spectra drawing results")
             for sample in data_obj_coord.keys():
                 for roi in data_obj_coord[sample].keys():
@@ -374,7 +370,7 @@ def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #
                 
                 gc.collect()
             data_obj_procc.close()
-        with open(file_path+"\\Processing_settings.txt", "w") as file:
+        with open(os.path.join(file_path,"Processing_settings.txt"), "w") as file:
             file.write("###Raw spectra proccessing\n##Spectra aligning(msalign function):\n")
             with pd.option_context('display.max_colwidth', None):
                 with pd.option_context('display.max_rows', None):
@@ -560,7 +556,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
     
     # Processing
     for file_path in path_list.keys():
-        slide = file_path.split('\\')[-1]  
+        slide = os.path.basename(file_path)  
         print(f"The {slide} raw spectra data is on progress.")
         
         data_obj_coord={}
@@ -586,19 +582,20 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
         args_batches=list(args_batch+(resample_to_dots,args2procc,args2peakpicking,queue, chunk_size) for args_batch in args_batches)
         ##II. Coordinates, metadata and organization of input arguments for parallelized and batched proccessing of spectra - DONE
         ## Deleting old hdf5 file if it has dataset with rawpeaklist
+        base_path = os.path.join(file_path,slide)
         if rewrite: # if TRUE - delete hdf5
             try:
-                os.remove(file_path+'\\'+slide+"_specdata.hdf5")
+                os.remove(base_path+"_specdata.hdf5")
             except:
                 pass
         ## 
-        if os.path.isfile(file_path+'\\'+slide+"_specdata.hdf5"): # if hdf5 exist
-            data_obj_feat = File(file_path+'\\'+slide+"_specdata.hdf5","r")
+        if os.path.isfile(base_path+"_specdata.hdf5"): # if hdf5 exist
+            data_obj_feat = File(base_path+"_specdata.hdf5","r")
 
             #try:
             flag_feat = False
             flag_mzint = True
-                #data_obj_feat_new = File(file_path+'\\'+slide+"new.hdf5","a")
+            
             for sample in data_obj_feat.keys():
                 for roi in data_obj_feat[sample].keys():
                     
@@ -608,7 +605,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
                     except:
                         data_obj_feat.close()
                         flag_mzint = False
-                        os.remove(file_path+'\\'+slide+"_specdata.hdf5")
+                        os.remove(base_path+"_specdata.hdf5")
                         #print("deleted")
                         break
                     try:
@@ -624,11 +621,13 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
             if flag_mzint:
                 data_obj_feat.close()
                 #print("closed")
+            
             if flag_feat and flag_mzint:
-                if os.path.exists(file_path+'\\'+slide+"new.hdf5"):
-                    os.remove(file_path+'\\'+slide+"new.hdf5")
-                data_obj_feat_new = File(file_path+'\\'+slide+"new.hdf5","a")
-                data_obj_feat = File(file_path+'\\'+slide+"_specdata.hdf5","r")
+                
+                if os.path.exists(base_path+"new.hdf5"):
+                    os.remove(base_path+"new.hdf5")
+                data_obj_feat_new = File(base_path+"new.hdf5","a")
+                data_obj_feat = File(base_path+"_specdata.hdf5","r")
                 for sample in data_obj_feat.keys():
                     for roi in data_obj_feat[sample].keys():    
                         data_obj_feat_new.create_dataset(sample+"/" + roi + "/" + "mz",data=data_obj_feat[sample][roi]["mz"][:], chunks = data_obj_feat[sample][roi]["mz"].chunks) 
@@ -636,15 +635,13 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
                 data_obj_feat_new.close()
                 data_obj_feat.close()
                 #print("repacked")
-                os.remove(file_path+'\\'+slide+"_specdata.hdf5")
-                os.rename(file_path+'\\'+slide+"new.hdf5",file_path+'\\'+slide+"_specdata.hdf5")
+                os.remove(base_path+"_specdata.hdf5")
+                os.rename(base_path+"new.hdf5",base_path+"_specdata.hdf5")
                 
-            data_obj_feat = File(file_path+'\\'+slide+"_specdata.hdf5","a")
-            #except:
-            #    os.remove(file_path+'\\'+slide+".hdf5")
-            #    pass
+            data_obj_feat = File(base_path+"_specdata.hdf5","a")
+
         else: # if hdf5 doesn't exist
-            data_obj_feat = File(file_path+'\\'+slide+"_specdata.hdf5","a")
+            data_obj_feat = File(base_path+"_specdata.hdf5","a")
         ## Deleting old hdf5 file - Done
         data_obj_feat.close()
 
@@ -659,7 +656,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
             p.starmap(int2proc2peaklist_parbatched,args_batches)
         p.join()
         ##IV. Proccessing, peakpicking and writing to hdf5 - Done
-        data_obj_feat = File(file_path+'\\'+slide+"_specdata.hdf5","r")
+        data_obj_feat = File(base_path+"_specdata.hdf5","r")
         if draw: #Секция для отрисовки полученных результатов
             args_batches=pd.DataFrame(args_batches)
             for sample in data_obj_coord.keys():
@@ -730,7 +727,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
        
         print_queue.put(0) #closing old tqdm bar
         data_obj_feat.close()            
-        with open(file_path+"\\Processing_settings.txt", "w") as file:
+        with open(os.path.join(file_path,"Processing_settings.txt"), "w") as file:
             file.write("###Raw spectra proccessing\n##Spectra aligning(msalign function):\n")
             file.write(f"Aligning peaks list:{align_peaks}\nPeaks weights: {weights_list}\nMax shift in mz scale: {max_shift_mz}\nOther align parametres:")
             for key in params2align.keys():
@@ -864,14 +861,13 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, hei
         ##II. Coordinates, metadata and organization of input arguments for parallelized and batched proccessing of spectra - DONE
 
         ## Deleting old hdf5 file if it has dataset with peaklists
-        directory_path = "\\".join(file_path.split("\\")[:-1])
-        slide = file_path.split('\\')[-1].replace('_specdata.hdf5','')
+        directory_path = os.path.dirname(file_path)
+        slide = os.path.basename(file_path).replace('_specdata.hdf5','')
         print(f"The {slide} processed spectra data is loaded from the hdf5 file.")
         data_obj_feat = File(file_path,"r")
         
         flag_feat = False
         flag_mzint = True
-                #data_obj_feat_new = File(file_path+'\\'+slide+"new.hdf5","a")
         for sample in data_obj_feat.keys():
             for roi in data_obj_feat[sample].keys():
                 
@@ -892,9 +888,9 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, hei
             data_obj_feat.close()
             #print("closed")
         if flag_feat and flag_mzint:
-            if os.path.exists(file_path+'\\'+slide+"new.hdf5"):
-                os.remove(file_path+'\\'+slide+"new.hdf5")
-            data_obj_feat_new = File("\\".join(file_path.split("\\")[:-1])+'\\'+slide+"new.hdf5","a")
+            if os.path.exists(os.path.join(file_path,slide)+"new.hdf5"):
+                os.remove(os.path.join(file_path,slide)+"new.hdf5")
+            data_obj_feat_new = File(os.path.join(directory_path,slide)+"new.hdf5","a")
             data_obj_feat = File(file_path,"r")
             for sample in data_obj_feat.keys():
                 for roi in data_obj_feat[sample].keys():    
@@ -912,7 +908,7 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, hei
             data_obj_feat.close()
             #print("repacked")
             os.remove(file_path)
-            os.rename("\\".join(file_path.split("\\")[:-1])+'\\'+slide+"new.hdf5",file_path)
+            os.rename(os.path.join(file_path,slide)+"new.hdf5",file_path)
         
         data_obj_feat = File(file_path,"r")
         
@@ -1033,12 +1029,12 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, hei
                     plt.show()
                     del diapold
         try:
-            with open(directory_path+"\\Processing_settings.txt", "r") as file:
+            with open(os.path.join(directory_path,"Processing_settings.txt"), "r") as file:
                 text = file.read()
         except:
             text = ''
             pass
-        with open(directory_path+"\\Processing_settings.txt", "w") as file:
+        with open(os.path.join(directory_path,"Processing_settings.txt"), "w") as file:
             file.write(text[:text.find("\n\n##Peak picking")])
             file.write("\n\n##Peak picking\n")
             if isinstance(oversegmentationfilter,str):
@@ -1363,18 +1359,6 @@ def int2procc_parbatched(sample_file_path, sample,roi,interval,dots_num,dtypecon
                 loc_args2procc["dots_shift"] = int(args2procc["dots_shift"]/(np.median(np.diff(data_mz))))
             data_int = DataProc_base(data_int,data_mz,Baseline(data_mz),**loc_args2procc)
     else:
-
-        # if resample_to_dots is not None:
-        #     dots_num  = resample_to_dots
-        #     data_int = np.empty((interval[-1]-interval[0],dots_num), dtype=dtypeconv)
-        #     data_mz = np.array(list(np.linspace(*discon_resample_range,resample_to_dots)))
-        #     loc_args2procc["smooth_window"] = int(args2procc["smooth_window"]/(data_mz[-1]-data_mz[-2]))
-        #     if loc_args2procc["params2align"]["only_shift"]: 
-        #         loc_args2procc["dots_shift"] = int(args2procc["dots_shift"]/(data_mz[-1]-data_mz[-2]))
-        #     for n,idx in enumerate(idx_range):
-        #         data_int[n,:] = interp1d(sample_imzml.getspectrum(idx)[0].astype(dtypeconv),sample_imzml.getspectrum(idx)[1].astype(dtypeconv),fill_value=0,bounds_error = False )(data_mz)
-
-        #     data_int = DataProc_base(data_int,data_mz,Baseline(data_mz),**loc_args2procc)
         
         if resample_to_dots:
             data_int={}
@@ -1403,7 +1387,8 @@ def int2procc_parbatched(sample_file_path, sample,roi,interval,dots_num,dtypecon
 
     ### Запись пиков в hdf5 очередью
     temp = queue.get()
-    hdf5 = File("\\".join(sample_file_path.split("\\")[:-2])+"\\"+sample_file_path.split("\\")[-3] +"_specdata.hdf5","a")
+    Slide_folder = os.path.dirname(os.path.dirname(sample_file_path))
+    hdf5 = File(os.path.join(Slide_folder,os.path.basename(Slide_folder)) +"_specdata.hdf5","a")
     idx_start,numspec = hdf5[sample][roi].attrs['idxroi']
     sl = range(interval[0]-idx_start,interval[1]-idx_start)
 
@@ -1464,7 +1449,8 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
     idx_range = range(interval[0],interval[1])
     sample_imzml=ImzMLParser(sample_file_path)
     temp = queue.get()
-    with File("\\".join(sample_file_path.split("\\")[:-2])+"\\"+sample_file_path.split("\\")[-3] +"_specdata.hdf5",'r', libver='latest') as hdf5:
+    Slide_folder = os.path.dirname(os.path.dirname(sample_file_path))
+    with File(os.path.join(Slide_folder,os.path.basename(Slide_folder)) +"_specdata.hdf5",'r', libver='latest') as hdf5:
         idx_start = hdf5[sample][roi].attrs['idxroi'][0]
     queue.put(True)
     nspec_range=range(interval[0]-idx_start,interval[1]-idx_start)
@@ -1528,7 +1514,7 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
     ### Запись пиков в hdf5 очередью
     temp = queue.get()
 
-    with File("\\".join(sample_file_path.split("\\")[:-2])+"\\"+sample_file_path.split("\\")[-3] +"_specdata.hdf5","a", libver='latest') as hdf5:
+    with File(os.path.join(Slide_folder,os.path.basename(Slide_folder)) +"_specdata.hdf5","a", libver='latest') as hdf5:
 
         try:
    
@@ -1627,18 +1613,16 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
 
     ### 1. Поиск пути к файлу imzml и составления их списка
     ### 1. Searching and opening imzml file
-    base_path=sample_file[:-6]
-    sample = base_path.split("\\")
     
-    root_dir = '\\'.join(sample[:-1])
-    if sample[-2] == sample[-1]:
-        poslog_err = sample[-1]
-        sample=sample[-1]
-        
+    folder_path2imzml = os.path.dirname(sample_file)
+    sample_name = os.path.splitext(os.path.basename(sample_file))[0]
+    folder_name = os.path.basename(folder_path2imzml)
+
+    if folder_name == sample_name:
+        sample=sample_name
+        poslog_err = sample_name
     else:
-        poslog_err = sample[-1]
-        sample = sample[-2]+"_"+sample[-1]
-        
+        sample = folder_name+"_"+sample_name        
     
     ## Определение байтового размера одной точки
     if dtypeconv =='single':
@@ -1653,7 +1637,7 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
         data_obj={} 
         data_obj[sample]={}
     except FileNotFoundError: #Если нет imzML файла в папке - пропуск
-        print_queue.put(f'No {sample+".imzML"} file in directory {root_dir}')
+        print_queue.put(f'No {sample+".imzML"} file in directory {folder_path2imzml}')
         return
     ### 1. Файл найден и открыт в sample_imzml файле - DONE
     ### 1. File found and opened in sample_imzml file - DONE
@@ -1763,7 +1747,7 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
         ### a. If there is no poslog file in the folder, take coordinates from imzml
     except FileNotFoundError: 
         #print_queue.put("Done 2")
-        print_queue.put(f'The {poslog_err+"_poslog.txt"} file is not in directory {root_dir}, the coordinate data is taken from the imzML file')
+        print_queue.put(f'The {poslog_err+"_poslog.txt"} file is not in directory {folder_path2imzml}, the coordinate data is taken from the imzML file')
         #print_queue.put("Done 2")
         roi = "00" # roi только один, так как там вроде нельзя настраивать и определять без poslog
         roi_list = []
@@ -1851,7 +1835,7 @@ def hdf5_coords(file_path,slide,data_obj_coord,chunk_size):
 
  
     for file_end in ["_specdata","_features"]:
-        data_obj = File(file_path+'\\'+slide+f"{file_end}.hdf5","a")
+        data_obj = File(os.path.join(file_path,slide)+f"{file_end}.hdf5","a")
         for sample in data_obj_coord.keys():
             for roi in data_obj_coord[sample].keys():
                 try:
@@ -2198,15 +2182,17 @@ def DataProc_resample1d(y,x,xnew,baseliner,baseliner_algo, params2baseliner_algo
 def find_imzml_roots(paths):
     path_dict={}
     for path in paths:
+        Sample_folder =os.path.dirname(path)
+        Slide_folder = os.path.dirname(Sample_folder)
         if path.lower().endswith('.imzml'):
-            path_dict.setdefault('\\'.join(path.split("\\")[:-2]),[])
-            path_dict['\\'.join(path.split("\\")[:-2])].append(path)
+            path_dict.setdefault(Slide_folder,[])
+            path_dict[Slide_folder].append(path)
         else:
             for root, dirs, files in os.walk(path):
                 for file in files: 
                     if file.lower().endswith('.imzml'):
-                        path_dict.setdefault('\\'.join(root.split("\\")[:-1]),[])
-                        path_dict['\\'.join(root.split("\\")[:-1])].append(os.path.join(root,file))
+                        path_dict.setdefault(Sample_folder,[])
+                        path_dict[Sample_folder].append(os.path.join(root,file))
             del root, dirs, files
     for key in path_dict.keys():
         path_dict[key]=list(set(path_dict[key]))

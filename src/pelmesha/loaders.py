@@ -474,7 +474,7 @@ class logger:
             logging.basicConfig(level=logging.INFO, filename=str(func_name)+"_log.log",filemode="w",
                         format="%(asctime)s %(levelname)s %(message)s")
         else:
-            logging.basicConfig(level=logging.INFO, filename=path+"\\"+str(func_name)+"_log.log",filemode="w",
+            logging.basicConfig(level=logging.INFO, filename=os.path.join(path,str(func_name))+"_log.log",filemode="w",
                         format="%(asctime)s %(levelname)s %(message)s")
         logger.name.append(func_name)
         logging.info(f"====================================Function {func_name} arguments========================================")

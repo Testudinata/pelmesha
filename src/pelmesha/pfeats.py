@@ -115,10 +115,10 @@ def Pgrouping_KD(ftable, columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_ke
         if path2save:
             logger.log(f"Starting saving grouped data")
             try:
-                if os.path.exists(path2save+f"\\{sample}_{roi}"+"_features.hdf5"):
-                    os.remove(path2save+f"\\{sample}_{roi}"+"_features.hdf5")
+                if os.path.exists(os.path.join(path2save,f"{sample}_{roi}")+"_features.hdf5"):
+                    os.remove(os.path.join(path2save,f"{sample}_{roi}")+"_features.hdf5")
                     logger.log(f"Old file deleted")
-                hdf5file = File(path2save+f"\\{sample}_{roi}"+"_features.hdf5", mode="a")
+                hdf5file = File(os.path.join(path2save,f"{sample}_{roi}")+"_features.hdf5", mode="a")
                 hdf5file.create_dataset(sample + "/" + roi + "/features",data = ftable)
                 logger.log(f"Grouped table data saved in hdf5")
                 hdf5file[sample][roi]["features"].attrs["Column headers"] = list(ftable.columns)
@@ -140,7 +140,7 @@ def Pgrouping_KD(ftable, columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_ke
                 num_bf_raredel = Pgrouping_KD_table.num_bf_raredel 
                 num_raredel = Pgrouping_KD_table.num_raredel 
                 num_res = Pgrouping_KD_table.num_res
-                with open(path2save+"\\Peaks_grouping_settings.txt", "a") as file:
+                with open(os.path.join(path2save,"Peaks_grouping_settings.txt"), "a") as file:
                     file.write(f"\n\n##Grouping results of {sample} roi: {roi}\n")
                     file.write(f"KDE bandwidth: {KD_bandwidth}\n")
                     file.write(f"Grouping results:\nNumber of unique peaks before grouping: {unique_num}\nNumber of unique peaks after grouping: {num_bf_raredel}\nNumber of excluded peaks by count filter({CountF}): {num_raredel} ({num_raredel*100/num_bf_raredel:.2f}%)\nResulted feature peaks is {num_res}")             
@@ -260,7 +260,7 @@ def Roi_Pgrouping_KD(Paths, extr_columns=None,path2save=None,**Pgrouping_KD_kwar
             for index in indexes:
                 slides.append(index[0])
             slides = list(set(slides)) 
-            hdf5file = File(path2save+"\\"+f"Images_{image_num}_grouped_MSIdata.hdf5", mode="a")
+            hdf5file = File(os.path.join(path2save,f"Images_{image_num}_grouped_MSIdata.hdf5"), mode="a")
             logger.log("Grouped features is saved in hdf5 file of images:")
             for index in indexes:
                 hdf5file.create_dataset(index[0] + "/" + index[1] + "/"+ index[2] + "/features",data = Aligned_rois.loc[index])
@@ -309,7 +309,7 @@ def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF,tol
     for slide in data.keys():
         Grouped_ftable[slide] = {}
     
-        with open('\\'.join(path[slide].split('\\')[:-1])+"\\Peaks_grouping_settings.txt", "w") as file:
+        with open(os.path.join(os.path.dirname(path[slide]),"Peaks_grouping_settings.txt"), "w") as file:
             file.write(f"##General grouping settings\n")
             file.write(f"KD_bandwidth estimation: {KD_bandwidth} (or value mz)\nBandwith coeff: {bwc} \nKD kernel: {KD_kernel}\n")    
             file.write(f"Peaks count filter: {CountF}\nduplicated peaks dropping: {dupl_drop}\n")
@@ -434,7 +434,7 @@ def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF,tol
                     num_bf_raredel = Pgrouping_KD_table.num_bf_raredel 
                     num_raredel = Pgrouping_KD_table.num_raredel 
                     num_res = Pgrouping_KD_table.num_res
-                    with open('\\'.join(path[slide].split('\\')[:-1])+"\\Peaks_grouping_settings.txt", "a") as file:
+                    with open(os.path.join(os.path.dirname(path[slide]),"Peaks_grouping_settings.txt"), "a") as file:
                         file.write(f"\n\n##Grouping results of {sample} roi: {roi}\n")
                         file.write(f"KDE bandwidth: {KD_bandwidth}\n")
                         file.write(f"Grouping results:\nNumber of unique peaks before grouping: {unique_num}\nNumber of unique peaks after grouping: {num_bf_raredel}\nNumber of excluded peaks by count filter({CountF}): {num_raredel} ({num_raredel*100/num_bf_raredel:.2f}%)\nResulted feature peaks is {num_res}")             
