@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: pelmesha
-Version: 0.1.0
+Version: 0.0.1.dev68
 Summary: A package for proccesing and aligning peaklist Mass-spectrometry imaging data from .imzml files
 Author-email: Andrew Kuzin <Kuzya-90@bk.ru>
 License-Expression: Apache-2.0

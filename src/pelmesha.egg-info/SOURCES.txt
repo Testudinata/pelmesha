@@ -1,6 +1,15 @@
 LICENSE.txt
+Pipfile
+Pipfile.lock
 README.md
 pyproject.toml
+.github/workflows/publish_to_pypi.yml
+Pipelines/MSI_Pipeline_peaklist_grouping.ipynb
+Pipelines/MSI_Pipeline_peaklist_grouping.pdf
+Pipelines/MSI_Pipeline_processing.ipynb
+Pipelines/MSI_Pipeline_processing.pdf
+Pipelines/MSI_Pipeline_raw_spectra.ipynb
+Pipelines/MSI_Pipeline_raw_spectra.pdf
 src/pelmesha/__init__.py
 src/pelmesha/align.py
 src/pelmesha/loaders.py

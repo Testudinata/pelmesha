@@ -104,18 +104,20 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     imzmlpath_list = find_paths(path_list) ## Поиск файлов imzml и создание списка корневых папок с файлами ".imzml"
     sample_tot_num = len(imzmlpath_list)  # счётчик общего количества sample, используется для создания количества процессов не более этого значения (не критично, но оптимально вдруг, чтобы не создавать пул нерабочих процессов, что возможно ест ресурс компа)
     if sample_tot_num ==0:
-        warning.warn("Sample total num is - 0. Couldn't find imzML files")
+        warnings.warn("Sample total num is - 0. Couldn't find imzML files")
         return
     ##
     ## Создание списков наименований слайдов, roi и рассчёт общего количества roi
-    for path in imzmlpath_list: 
-        splitted_path=path.split("\\")
-        Slides_path = '\\'.join(splitted_path[:-2]) #Определяем путь в root директорию. Это директория, где будут храниться данные обработки в hdf5 файле
+    for path in imzmlpath_list:
+
+        Slides_path=os.path.dirname(os.path.dirname(path)) #Определяем путь в root директорию. Это директория, где будут храниться данные обработки в hdf5 файле
+        Slide_name=os.path.basename(Slides_path) #Определяем имя слайда
+         
         if all('_rawdata.hdf5' not in item for item in os.listdir(Slides_path)): # условие для выгрузки из imzml и конвертации данных в hdf5     
             sample_imzmlpath_list.append([Slides_path,path])
         else:
             if reconv:
-                os.remove(Slides_path+"\\"+splitted_path[-3]+"_rawdata.hdf5")
+                os.remove(Slides_path+"\\"+Slide_name+"_rawdata.hdf5")
                 sample_imzmlpath_list.append([Slides_path,path])
             else:
                 print(f"Data on the path {path} has hdf5 file for raw data. Change argument 'reconv' to True, if needed to reconvert")
@@ -1117,8 +1119,12 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
     :return: None
     :rtype: Nonetype
     """
-    folder_path = foldersample_path[0]
-    sample = foldersample_path[1]
+    Slide_folder_path = foldersample_path[0]
+    Slide_name = os.path.basename(Slide_folder_path)
+    sample_path2imzml = foldersample_path[1]
+    folder_path2imzml = os.path.dirname(sample_path2imzml)
+    sample_name = os.path.splitext(os.path.basename(sample_path2imzml))[0]
+
     ## Извлечение из poslog физических координат
     sample_data={}
     count=0
@@ -1126,9 +1132,9 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
     roi_idx = {}
     
     try:
-        sample_imzml=ImzMLParser(sample)
+        sample_imzml=ImzMLParser(sample_path2imzml)
     except FileNotFoundError: #Если нет imzML файла в папке - пропуск
-        print_queue.put(f'No {sample} file in directory {folder_path}')
+        print_queue.put(f'No {sample_path2imzml} file in directory {Slide_folder_path}')
         return
     
     try:
@@ -1140,7 +1146,7 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
     roi_list = []
     dots_num={}
     try:
-        with open(sample[:-6]+"_poslog.txt") as f:
+        with open(os.path.join(folder_path2imzml,sample_name)+"_poslog.txt") as f:
             data = f.readlines()
             
             ##первая итерация записи координат начиная с третьей строки
@@ -1215,7 +1221,7 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
             for idx in range(numspectra):
                 sample_data[roi_num]["xy"][idx,:] = sample_imzml.get_physical_coordinates(idx)
         else:
-            print_queue.put(f"Sample: {sample}\nThe data in the imzml file is not continuous. It will not be recorded in HDF5 format.")
+            print_queue.put(f"Sample: {sample_path2imzml}\nThe data in the imzml file is not continuous. It will not be recorded in HDF5 format.")
             print_queue.put(True)
             return # Заглушка. Нет идей как грамотно впихнуть данные в hdf5, где надо пихать матрицы, а не листы с произвольным размером 
             sample_data[roi_num]["mz"] = [0]*numspectra
@@ -1242,23 +1248,22 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
     
     
     ## Автоматическое определение имени датасета
-    sample_names = sample.split("\\")
-    if sample_names[-1][:-6] == sample_names[-2]:
-        ds_name = sample_names[-2]
+    folder_name=os.path.basename(folder_path2imzml)
+    if sample_name == folder_name:
+        ds_name = folder_name
     else:
-        ds_name=sample_names[-2]+"_"+sample_names[-1][:-6]
+        ds_name=folder_name+"_"+sample_name
     ##
     ## Запись в hdf5
 
     temp = queue.get()
-    string_temp = "\\".join(sample_names[-3:])
-    print_queue.put(f"{string_temp} is waiting queue")
-    del string_temp
-    hdf5_raw=File(folder_path+'\\'+os.path.basename(folder_path)+"_rawdata.hdf5","a")
+    print_queue.put(f"Slide {Slide_name} with sample {sample_name} is waiting queue")
+
+    hdf5_raw=File(os.path.join(Slide_folder_path,Slide_name)+"_rawdata.hdf5","a")
 
     if chunk_rowsize == "Full":
         for roi in roi_list:
-            print_queue.put("\\".join(sample_names[-3:])+" roi "+roi+" data writing is in progress")
+            print_queue.put(f"Slide {Slide_name} with sample {sample_name}"+" roi "+roi+" data writing is in progress")
             #for type in ['/xy','/z']:
                 #hdf5.create_dataset(ds_name+'/'+roi+type, data=sample_data[roi][type.replace("/","")])
 
@@ -1285,7 +1290,7 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
             hdf5_raw[ds_name][roi].attrs['continues'] =dcont #Data points type       
         #hdf5.close()
         hdf5_raw.close()
-    print_queue.put(f"{sample} data writing is finished")
+    print_queue.put(f"{sample_path2imzml} data writing is finished")
     print_queue.put(True)
     queue.put(True)
 

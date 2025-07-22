@@ -37,7 +37,7 @@ def hdf5_Load(path_list, file_end=''):
     Slide_data={}
     for path in hdf5path_list:
         Slide_name=os.path.basename(os.path.dirname(path))
-        Slide_data[os.path.splitext(Slide_name)[0]] = File(path,"r")
+        Slide_data[Slide_name] = File(path,"r")
     if not hdf5path_list:
         warnings.warn(f"Data not readed due to missing hdf5 with spectra data (hdf5 with end \"{file_end}\" in the name is missing)", stacklevel=2)
     return Slide_data
@@ -420,11 +420,14 @@ def hdf5_close():
     """
     gc.collect()
     for obj in gc.get_objects():   # Browse through ALL objects
-        if isinstance(obj, File):   # Just HDF5 files
-            try:
-                obj.close()
-            except:
-                pass # Was already closed
+        try:
+            if isinstance(obj, File):   # Just HDF5 files
+                try:
+                    obj.close()
+                except:
+                    pass # Was already closed
+        except:
+            pass
 
 ### utils functions
 def find_paths(path_list,file_end = '.imzML'):
