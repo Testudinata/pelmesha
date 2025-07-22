@@ -70,8 +70,10 @@ name: Publish pelmesha distribution 📦 to PyPI
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "*"
+    #    branches:
+#      - main
 
 jobs:
   build:
@@ -104,7 +106,7 @@ jobs:
   publish-to-pypi:
     name: >-
       Publish Python 🐍 distribution 📦 to PyPI
-    if: startsWith(github.ref, 'refs/tags/')  # only publish to PyPI on tag pushes
+    #if: startsWith(github.ref, 'refs/tags/')  # only publish to PyPI on tag pushes
     
     needs:
     - build
