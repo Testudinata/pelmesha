@@ -2862,19 +2862,20 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
                 if file.lower().endswith('.imzml'):
                     sample_list.append(os.path.join(root,file))
 
-        for sample_path in sample_list:
-            base_path=sample_path[:-6]
-            sample = base_path.split("\\")
-            
-            if sample[-2] == sample[-1]:
+        for sample_path2imzml in sample_list:
+            folder_path2imzml = os.path.dirname(sample_path2imzml)
+            sample_name = os.path.splitext(os.path.basename(sample_path2imzml))[0]
+            folder_name = os.path.basename(folder_path2imzml)
 
-                sample=sample[-1]
+            if folder_name == sample_name:
+
+                sample=sample_name
                 
             else:
 
-                sample = sample[-2]+"_"+sample[-1]
+                sample = folder_name+"_"+sample_name
             logger.log('imzml opening')
-            sample_imzml=ImzMLParser(sample_path)
+            sample_imzml=ImzMLParser(sample_path2imzml)
             logger.log('imzml opened')
             ### 1. Файл найден и открыт в sample_imzml файле - DONE
             ### 1. File found and opened in sample_imzml file - DONE
@@ -2885,9 +2886,10 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
                 roi_idx = {} 
                 roi_idx[sample]={} # Информация sample по индексам спектров roi=(индекс первого спектра, кол-во спектров roi)
 
+                base_path_str = os.path.join(folder_path2imzml,sample_name)
                 roi_list = []
                 try:
-                    with open(base_path+"_info.txt") as f:
+                    with open(base_path_str+"_info.txt") as f:
                         data_info = f.readlines()
                         #raw_data_points = int(data_info[12].split(' ')[1]) # Информация по кол-ву точек спектра
                         spectra_num = int(data_info[2].split(' ')[-1]) # Информация по кол-ву спектров в sample
@@ -2904,7 +2906,7 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
                 ### Так как файлы imzml с poslog исключительно континуальные (одна шкала mz для всех спектров), то здесь работаем исключительно в таком варианте
                 ### Выгрузка данных с poslog
                 ### 4.b. and 5.b. Extraction data from "poslog" coordinates and roi references of spectra
-                with open(base_path+"_poslog.txt") as f:
+                with open(base_path_str+"_poslog.txt") as f:
                     data = f.readlines()
 
                     poslog_specdata = [None]*spectra_num #Данные строк в poslog с записью roi и координат снятого спектра.
