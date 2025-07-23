@@ -1,8 +1,8 @@
 
 import pandas as pd
 import numpy as np
-from itertools import product,pairwise
-from torch.multiprocessing import Pool, cpu_count
+from itertools import product
+from multiprocessing import Pool, cpu_count
 from pelmesha.loaders import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger
 import matplotlib.pyplot as plt
 from h5py import File
@@ -13,6 +13,22 @@ import gc
 import math
 import os
 import warnings
+## pairwise for python versions below 10 
+from sys import version_info
+if version_info[0] < 3:
+    raise Exception("Must be using Python 3")
+else:
+    if version_info[1]<10:
+        from itertools import tee
+
+        def pairwise(iterable):
+            "s -> (s0,s1), (s1,s2), (s2, s3), ..."
+            a, b = tee(iterable)
+            next(b, None)
+            return zip(a, b)
+    else:
+        from itertools import pairwise
+
 
 ### Base functions
 def Pgrouping_KD(ftable, columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10,tol = 500, norm = (None,None),draw_borders = 1.5,

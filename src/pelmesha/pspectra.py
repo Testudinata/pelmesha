@@ -1,12 +1,12 @@
 import pandas as pd
 import numpy as np
-from itertools import product, pairwise, zip_longest
-from torch.multiprocessing import Pool, cpu_count, Manager
+from itertools import product, zip_longest
+from multiprocessing import Pool, cpu_count, Manager
 from threading import Thread
 from pybaselines import Baseline
 from scipy.interpolate import interp1d
 from scipy.stats import median_abs_deviation
-from pelmesha.loaders import find_paths, logger
+from pelmesha.loaders import find_paths
 from pyimzml.ImzMLParser import ImzMLParser
 from h5py import File
 import gc
@@ -16,6 +16,22 @@ import re
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 from math import sqrt
+## pairwise for python versions below 10 
+from sys import version_info
+if version_info[0] < 3:
+    raise Exception("Must be using Python 3")
+else:
+    if version_info[1]<10:
+        from itertools import tee
+
+        def pairwise(iterable):
+            "s -> (s0,s1), (s1,s2), (s2, s3), ..."
+            a, b = tee(iterable)
+            next(b, None)
+            return zip(a, b)
+    else:
+        from itertools import pairwise
+
 
 ### Code from __init__.py msalign (https://github.com/lukasz-migas/msalign)
 """Signal calibration and alignment by reference peaks - copy of MSALIGN function from MATLAB bioinformatics library."""
@@ -274,7 +290,7 @@ def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #
         p.join()    
         args_batches=[]
         for data in data_obj_temp:
-            data_obj_coord=data_obj_coord|data[0]
+            data_obj_coord.update(data[0])
             args_batches = args_batches + data[1]
         del data_obj_temp
         gc.collect()
@@ -570,7 +586,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
         p.join()    
         args_batches=[]
         for data in data_obj_temp:
-            data_obj_coord=data_obj_coord|data[0]
+            data_obj_coord.update(data[0])
             args_batches = args_batches + data[1]
         del data_obj_temp
         gc.collect()
@@ -888,8 +904,8 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, hei
             data_obj_feat.close()
             #print("closed")
         if flag_feat and flag_mzint:
-            if os.path.exists(os.path.join(file_path,slide)+"new.hdf5"):
-                os.remove(os.path.join(file_path,slide)+"new.hdf5")
+            if os.path.exists(os.path.join(directory_path,slide)+"new.hdf5"):
+                os.remove(os.path.join(directory_path,slide)+"new.hdf5")
             data_obj_feat_new = File(os.path.join(directory_path,slide)+"new.hdf5","a")
             data_obj_feat = File(file_path,"r")
             for sample in data_obj_feat.keys():
@@ -908,7 +924,7 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, hei
             data_obj_feat.close()
             #print("repacked")
             os.remove(file_path)
-            os.rename(os.path.join(file_path,slide)+"new.hdf5",file_path)
+            os.rename(os.path.join(directory_path,slide)+"new.hdf5",file_path)
         
         data_obj_feat = File(file_path,"r")
         
@@ -1617,10 +1633,12 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
     folder_path2imzml = os.path.dirname(sample_file)
     sample_name = os.path.splitext(os.path.basename(sample_file))[0]
     folder_name = os.path.basename(folder_path2imzml)
+    poslog_err = sample_name
+
 
     if folder_name == sample_name:
         sample=sample_name
-        poslog_err = sample_name
+        
     else:
         sample = folder_name+"_"+sample_name        
     base_path = os.path.join(folder_path2imzml,sample_name)
@@ -1739,16 +1757,14 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
         for idx, (roi,x,y) in enumerate(poslog_specdata):            
             data_obj[sample][roi]["xy"][idx-roi_idx[sample][roi][0],:] = [x, y]
         ### 6. Preparing index parameters associated with sample, ROI and organizing them into argument list for parallel processing of spectra - Done
-        #print_queue.put(data_obj)
         del roi_num, coords, idx_first
-        #print_queue.put("Done")
         ###
         ### Если нет poslog файла в папке, берём координаты из imzml
         ### a. If there is no poslog file in the folder, take coordinates from imzml
     except FileNotFoundError: 
-        #print_queue.put("Done 2")
+
         print_queue.put(f'The {poslog_err+"_poslog.txt"} file is not in directory {folder_path2imzml}, the coordinate data is taken from the imzML file')
-        #print_queue.put("Done 2")
+
         roi = "00" # roi только один, так как там вроде нельзя настраивать и определять без poslog
         roi_list = []
         roi_list.append(roi_list)
@@ -2803,7 +2819,6 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
     :rtype: `NoneType`
     """
 
-    logger("draw_processing_example",{**locals()})
     # Process args
     #defaults parametres for align
     pars = list(set(["width","iterations"])-set(params2align.keys()))
@@ -2860,9 +2875,7 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
             else:
 
                 sample = folder_name+"_"+sample_name
-            logger.log('imzml opening')
             sample_imzml=ImzMLParser(sample_path2imzml)
-            logger.log('imzml opened')
             ### 1. Файл найден и открыт в sample_imzml файле - DONE
             ### 1. File found and opened in sample_imzml file - DONE
             ### Data extraction
@@ -2939,9 +2952,9 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
                     idx_spec = np.random.randint(idx_start,idx_start+numspec)
                     
                 print(f'Spectrum number: {idx_spec}')
-                logger.log('getting spectra for draw')
+
                 data_mz_old, data_int_old = sample_imzml.getspectrum(idx_spec)
-                logger.log('getting spectra for draw ended')
+
                 #data_int_old.shape = (1,data_int_old.shape[0])
                 roi_idx_spec = idx_spec-idx_start
                 loc_args2procc={"baseliner_algo": baseliner_algo, "params2baseliner_algo": params2baseliner_algo,"params2align":params2align, "align_peaks":align_peaks,"weights_list":weights_list,"smooth_algo":smooth_algo, "smooth_cycles":smooth_cycles}
