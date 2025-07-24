@@ -15,7 +15,7 @@ import warnings
 try:
     from torch.multiprocessing import Pool, cpu_count
 except Exception as error:
-    warning.warn(f"During import torch.multiprocessing package raised error {error}. Using python package multiprocessing instead")
+    warnings.warn(f"During import torch.multiprocessing package raised error {error}. Using python package multiprocessing instead")
     from multiprocessing import Pool, cpu_count
 ## pairwise for python versions below 10 
 from sys import version_info
