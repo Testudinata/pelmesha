@@ -18,7 +18,6 @@ license-files = ["LICEN[CS]E*"]
 
 [build-system]
 requires = ["setuptools>=72", "setuptools-scm>=8"]
-install_requires=['numpy', 'pandas', 'scipy','h5py','kdepy','matplotlib','numpy','pybaselines','pyimzML','torch','tqdm']
 build-backend = "setuptools.build_meta"
 [project.urls]
 Homepage = "https://github.com/Testudinata/pelmesha"

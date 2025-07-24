@@ -340,7 +340,9 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
     elif isinstance(paths,dict):
         path_list=paths.keys()
         samples = True
-    
+    elif isinstance(paths,str):
+        path_list = [paths]
+
     for path in path_list:
        
         ### hdf5 load
