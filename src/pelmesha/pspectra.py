@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 from itertools import product, zip_longest
-from torch.multiprocessing import Pool, cpu_count, Manager, current_process, Value
 from threading import Thread
 from pybaselines import Baseline
 from scipy.interpolate import interp1d
@@ -16,6 +15,13 @@ import re
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 from math import sqrt
+import warnings
+try:
+    from torch.multiprocessing import Pool, cpu_count, Manager, current_process, Value
+except Exception as error:
+    warning.warn(f"During import torch.multiprocessing package raised error {error}. Using python package multiprocessing instead")
+    from multiprocessing import Pool, cpu_count, Manager, current_process, Value
+
 
 ## pairwise for python versions below 10 
 from sys import version_info

@@ -2,7 +2,6 @@
 import pandas as pd
 import numpy as np
 from itertools import product
-from torch.multiprocessing import Pool, cpu_count
 from pelmesha.loaders import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger
 import matplotlib.pyplot as plt
 from h5py import File
@@ -13,6 +12,11 @@ import gc
 import math
 import os
 import warnings
+try:
+    from torch.multiprocessing import Pool, cpu_count
+except Exception as error:
+    warning.warn(f"During import torch.multiprocessing package raised error {error}. Using python package multiprocessing instead")
+    from multiprocessing import Pool, cpu_count
 ## pairwise for python versions below 10 
 from sys import version_info
 if version_info[0] < 3:
