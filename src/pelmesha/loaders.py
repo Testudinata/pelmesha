@@ -152,11 +152,19 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
         Source_path[slides] = Slide_data[slides].filename
         
         for sample in Slide_data[slides].keys():
-            
             DataFeat[slides][sample]={}
             for roi in Slide_data[slides][sample].keys():
+                try:
+                    headers = list(Slide_data[slides][sample][roi][feat_type].attrs['Column headers'])
+                except KeyError as error:
+                    warnings.warn(f"An error occurred on {slides} {sample} {roi}: {error}")
+                    try:
+                        warnings.warn(f'HDF5 file from source {Source_path[slides]} on {slides} {sample} {roi} has datasets: {Slide_data[slides][sample][roi].keys()}')
+                    except:
+                        pass
+                    continue
+
                 DataFeat[slides][sample][roi]={}
-                headers = list(Slide_data[slides][sample][roi][feat_type].attrs['Column headers'])
                 if "Peak" in headers:
                     mz_type = "Peak"
                 else:
@@ -196,11 +204,14 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
                 if pivoting4val:
                     
                     DataFeat[slides][sample][roi][feat_type] = DataFeat[slides][sample][roi][feat_type].pivot_table(index="spectra_ind", columns="Peak",fill_value = 0, values =pivoting4val)
-                    
-                    # if extract_coords:
-                        # DataFeat[slides][sample][roi]['features'].set_index(DataFeat[slides][sample][roi]["xy"].loc[DataFeat[slides][sample][roi]['features'].index].set_index(['x','y'],append=True).index,inplace=True)
-                        # del DataFeat[slides][sample][roi]["xy"]
+            if not DataFeat[slides][sample]:
+                DataFeat[slides].pop(sample,None)
+        if not DataFeat[slides]:
+            DataFeat.pop(slides,None)
         Slide_data[slides].close()
+    if not DataFeat:
+        warnings.warn(f"Warning. Any dataset doesn't have {feat_type} data")
+        return
     if return_source_path:
         return DataFeat, Source_path
     return DataFeat
@@ -471,12 +482,16 @@ class logger:
     name=[]
     def __init__(self,func_name,args,path = None):        
         if not path:
-            logging.basicConfig(level=logging.INFO, filename=str(func_name)+"_log.log",filemode="w",
+            try:
+                os.mkdir('logs')
+            except:
+                pass
+            logging.basicConfig(level=logging.INFO, filename=os.path.join("logs",str(func_name))+"_log.log",filemode="w",
                         format="%(asctime)s %(levelname)s %(message)s")
         else:
             logging.basicConfig(level=logging.INFO, filename=os.path.join(path,str(func_name))+"_log.log",filemode="w",
                         format="%(asctime)s %(levelname)s %(message)s")
-        logger.name.append(func_name)
+        self.name.append(func_name)
         logging.info(f"====================================Function {func_name} arguments========================================")
         for arg in args.keys():
             logging.info(f"{arg} = {args[arg]}")

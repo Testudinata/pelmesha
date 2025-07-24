@@ -2,7 +2,7 @@
 import pandas as pd
 import numpy as np
 from itertools import product
-from multiprocessing import Pool, cpu_count
+from torch.multiprocessing import Pool, cpu_count
 from pelmesha.loaders import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger
 import matplotlib.pyplot as plt
 from h5py import File
