@@ -155,13 +155,14 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     cpu_num = cpu_count()-1
     if cpu_num > sample_tot_num:
         cpu_num = sample_tot_num
-    logger.log(f"Num of CPU for usage{cpu_num}")
+    logger.log(f"Num of CPU for usage {cpu_num}")
     corenum_counter = Value('i',0) 
     ## Выгрузка данных с помощью ImzMLParser'a и их конвертация в hdf5 (в дальнейшем работаем с hdf5)
     logger.log(f"Creating Queue for controling processes for single process acessing hdf5")
     manager = Manager()
     print_queue = Manager().Queue()
     queue = manager.Queue()
+    logger.log(f"Putting True to queue")
     queue.put(True)
     logger.log(f"Creating thread for print and visualizing progress")
     t = Thread(target=printer,args=[print_queue])
