@@ -156,7 +156,7 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     if cpu_num > sample_tot_num:
         cpu_num = sample_tot_num
     logger.log(f"Num of CPU for usage{cpu_num}")
-
+    corenum_counter = Value('i',0) 
     ## Выгрузка данных с помощью ImzMLParser'a и их конвертация в hdf5 (в дальнейшем работаем с hdf5)
     logger.log(f"Creating Queue for controling processes for single process acessing hdf5")
     manager = Manager()
@@ -168,7 +168,7 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     t.start()
     print_queue.put(len(sample_imzmlpath_list))
     logger.log(f"Starting conversion imzml to hdf5")
-    with Pool(cpu_num) as p:
+    with Pool(cpu_num,initializer=init_worker,initargs=['hdf5_writer',corenum_counter]) as p:
         p.starmap(hdf5_writer,product(sample_imzmlpath_list,[queue],[print_queue],[dtypeconv],[chunk_rowsize],[chunk_bsize]))
     p.join()
     logger.log(f"Conversion ended")
@@ -1142,12 +1142,13 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
     :return: None
     :rtype: Nonetype
     """
+    logger(f"hdf5_writer_on_core_{hdf5_writer.name}",{**locals()})
     Slide_folder_path = foldersample_path[0]
     Slide_name = os.path.basename(Slide_folder_path)
     sample_path2imzml = foldersample_path[1]
     folder_path2imzml = os.path.dirname(sample_path2imzml)
     sample_name = os.path.splitext(os.path.basename(sample_path2imzml))[0]
-
+    logger.log(f"Path to slide folder {Slide_folder_path}\nPath to imzml {sample_path2imzml}\nSample name {sample_name}")
     ## Извлечение из poslog физических координат
     sample_data={}
     count=0
@@ -1168,6 +1169,7 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
     poslog_specdata = [None]*len(sample_imzml.coordinates) #Данные строк в poslog с записью roi и координат снятого спектра.
     roi_list = []
     dots_num={}
+    logger.log("Loading data and metadata")
     try:
         with open(os.path.join(folder_path2imzml,sample_name)+"_poslog.txt") as f:
             data = f.readlines()
@@ -1269,53 +1271,51 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
     del roi_num, dots_num
     ##
     
-    
+    logger.log("Sample dataset name estimation")
     ## Автоматическое определение имени датасета
     folder_name=os.path.basename(folder_path2imzml)
     if sample_name == folder_name:
         ds_name = folder_name
     else:
         ds_name=folder_name+"_"+sample_name
+    logger.log(f"Name is {ds_name}")
     ##
     ## Запись в hdf5
-
+    logger.log(f"Waiting queue for writing")
     temp = queue.get()
+    logger.log(f"Writing started")
     print_queue.put(f"Slide {Slide_name} with sample {sample_name} is waiting queue")
 
     hdf5_raw=File(os.path.join(Slide_folder_path,Slide_name)+"_rawdata.hdf5","a")
-
+    
     if chunk_rowsize == "Full":
+        
         for roi in roi_list:
+            logger.log(f"Writing data without chunks for roi {roi}")
             print_queue.put(f"Slide {Slide_name} with sample {sample_name}"+" roi "+roi+" data writing is in progress")
-            #for type in ['/xy','/z']:
-                #hdf5.create_dataset(ds_name+'/'+roi+type, data=sample_data[roi][type.replace("/","")])
-
-            for type in  ['/mz','/int']:
+            for type in  ['/mz','/int','/xy','/z']:
                 hdf5_raw.create_dataset(ds_name+'/'+roi+type, data=sample_data[roi][type.replace("/","")])
-            #hdf5[ds_name][roi].attrs['continues'] =dcont #Data points type    
-            hdf5_raw[ds_name][roi].attrs['continues'] =dcont #Data points type       
-        #hdf5.close()
+            hdf5_raw[ds_name][roi].attrs['continues'] =dcont   
         hdf5_raw.close()
     else:
+        
         for roi in roi_list:
+            logger.log(f"Writing data with chunks rowsize {chunk_rowsize} for roi {roi}")
             print_queue.put(ds_name+" roi "+roi+" data writing is in progress")
             
-                ### chunked version
+            ### chunked version
             
             hdf5_raw.create_dataset(ds_name+'/'+roi+'/int', data=sample_data[roi]['int'],chunks=(chunk_rowsize,sample_data[roi]['int'].shape[1]))
             hdf5_raw.create_dataset(ds_name+'/'+roi+'/xy', data=sample_data[roi]['xy'],chunks=(chunk_rowsize,sample_data[roi]['xy'].shape[1]))
-            #hdf5.create_dataset(ds_name+'/'+roi+'/xy', data=sample_data[roi]['xy'],chunks=(chunk_rowsize,sample_data[roi]['xy'].shape[1]))
-                ###
             hdf5_raw.create_dataset(ds_name+'/'+roi+'/mz', data=sample_data[roi]['mz'])
-            #hdf5.create_dataset(ds_name+'/'+roi+'/z', data=sample_data[roi]['z'])
             hdf5_raw.create_dataset(ds_name+'/'+roi+'/z', data=sample_data[roi]['z'])
-            #hdf5[ds_name][roi].attrs['continues'] = dcont #Data points type    
             hdf5_raw[ds_name][roi].attrs['continues'] =dcont #Data points type       
-        #hdf5.close()
         hdf5_raw.close()
+    logger.log(f"Writing ended")
     print_queue.put(f"{sample_path2imzml} data writing is finished")
     print_queue.put(True)
     queue.put(True)
+    logger.ended()
 
 def int2procc_parbatched(sample_file_path, sample,roi,interval,dots_num,dtypeconv,dcont,print_queue, discon_resample_range = (None,None),resample_to_dots = None,
                         args2procc={},queue = None, chunk_size = 100):
