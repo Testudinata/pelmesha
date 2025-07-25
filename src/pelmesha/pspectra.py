@@ -119,20 +119,23 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
 
     :return: None
     """
-
+    logger("imzml2hdf5",{**locals()})
     if isinstance(path_list, str):
         path_list=[path_list]
     sample_imzmlpath_list=[] # Словарь списка sample для каждого слайда (отдельный путь в path_list)
     
+    logger.log("Finding paths to imzml")
     imzmlpath_list = find_paths(path_list) ## Поиск файлов imzml и создание списка корневых папок с файлами ".imzml"
     sample_tot_num = len(imzmlpath_list)  # счётчик общего количества sample, используется для создания количества процессов не более этого значения (не критично, но оптимально вдруг, чтобы не создавать пул нерабочих процессов, что возможно ест ресурс компа)
+    logger.log(f"Paths to imzml:{imzmlpath_list}")
     if sample_tot_num ==0:
         warnings.warn("Sample total num is - 0. Couldn't find imzML files")
         return
     ##
     ## Создание списков наименований слайдов, roi и рассчёт общего количества roi
+    logger.log(f"Preparation paths for multiprocessing")
     for path in imzmlpath_list:
-
+        
         Slides_path=os.path.dirname(os.path.dirname(path)) #Определяем путь в root директорию. Это директория, где будут храниться данные обработки в hdf5 файле
         Slide_name=os.path.basename(Slides_path) #Определяем имя слайда
          
@@ -142,32 +145,37 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
             if reconv:
                 os.remove(os.path.join(Slides_path,Slide_name)+"_rawdata.hdf5")
                 sample_imzmlpath_list.append([Slides_path,path])
+                logger.log(f"Old data on {Slides_path} deleted")
             else:
+                logger.log(f"Data on the path {path} has hdf5 file for raw data. Change argument 'reconv' to True, if needed to reconvert")
                 print(f"Data on the path {path} has hdf5 file for raw data. Change argument 'reconv' to True, if needed to reconvert")
 
-    ##    
-    
+    ##
     ## Определение количества пула процессов
     cpu_num = cpu_count()-1
     if cpu_num > sample_tot_num:
         cpu_num = sample_tot_num
-    
+    logger.log(f"Num of CPU for usage{cpu_num}")
 
     ## Выгрузка данных с помощью ImzMLParser'a и их конвертация в hdf5 (в дальнейшем работаем с hdf5)
+    logger.log(f"Creating Queue for controling processes for single process acessing hdf5")
     manager = Manager()
     print_queue = Manager().Queue()
     queue = manager.Queue()
     queue.put(True)
+    logger.log(f"Creating thread for print and visualizing progress")
     t = Thread(target=printer,args=[print_queue])
     t.start()
     print_queue.put(len(sample_imzmlpath_list))
+    logger.log(f"Starting conversion imzml to hdf5")
     with Pool(cpu_num) as p:
         p.starmap(hdf5_writer,product(sample_imzmlpath_list,[queue],[print_queue],[dtypeconv],[chunk_rowsize],[chunk_bsize]))
     p.join()
-
+    logger.log(f"Conversion ended")
     print_queue.put(Sentinel()) # Остановка работы функции printer
     t.join() # Wait for all printing to complete
     ##
+    logger.ended()
     return None
 
 def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #penalized_poly - самый быстрый вариант. asls - меньше "отрицательных" точек по сравнению с penalized_poly, что лучше работает с пикпикингом с фильтрацией порогом по интенсивности, но в ~2 раза дольше считает
