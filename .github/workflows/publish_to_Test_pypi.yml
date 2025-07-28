@@ -6,23 +6,23 @@ on:
       - Enhance-compatobility
 
 jobs:
-  build-and-test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      # Define your steps here, e.g., checkout code, install dependencies, run tests
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-      - name: Install dependencies
-        run: npm install
-      - name: Run tests
-        run: npm test
+  # build-and-test:
+  #   strategy:
+  #     matrix:
+  #       os: [ubuntu-latest, windows-latest, macos-latest]
+  #   runs-on: ${{ matrix.os }}
+  #   steps:
+  #     # Define your steps here, e.g., checkout code, install dependencies, run tests
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #     - name: Setup Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '18'
+  #     - name: Install dependencies
+  #       run: npm install
+  #     - name: Run tests
+  #       run: npm test
   build:
     name: Build distribution 📦
     runs-on: ubuntu-latest

@@ -89,7 +89,7 @@ msalign.__doc__ = Aligner.__doc__
 
 ### Base functions
 
-def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsize = 10000000, reconv = False):
+def imzml2hdf5(path_list, dtypeconv='double', chunk_rowsize = "Auto", chunk_bsize = 10000000, reconv = False):
     """
     Description
     ----
@@ -102,7 +102,7 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     The dataset name is taken from the name of the folder containing the imzML file.
 
     :param path_list: list of str or paths to folder or `imzML` file
-    :param dtypeconv: convert data to `"double"`,`"single"` or `"half"` float type. The default is `"single"`
+    :param dtypeconv: convert data to `"double"`,`"single"` or `"half"` float type. The default is `"double"`
     :param chunk_rowsize: chunking hdf5 datasets for partial and efficient loading data to RAM. The default is `"Auto"`
 
         `"Auto"` - автоматический подбор кол-ва строк записи матрицы в hdf5 на основе размера chunk_bsize,
@@ -129,7 +129,7 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     sample_tot_num = len(imzmlpath_list)  # счётчик общего количества sample, используется для создания количества процессов не более этого значения (не критично, но оптимально вдруг, чтобы не создавать пул нерабочих процессов, что возможно ест ресурс компа)
     logger.log(f"Paths to imzml:{imzmlpath_list}")
     if sample_tot_num ==0:
-        warnings.warn("Sample total num is - 0. Couldn't find imzML files")
+        logger.warn("Sample total num is - 0. Couldn't find imzML files")
         return
     ##
     ## Создание списков наименований слайдов, roi и рассчёт общего количества roi
@@ -183,7 +183,7 @@ def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #
               align_peaks = None, weights_list=None, max_shift_mz=0.95, only_shift = True,params2align={},
               resample_to_dots = None, 
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
-              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
+              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='double',
               free_cores=1):
     """
     Общее описание
@@ -445,7 +445,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
               oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0, peaklocation=1,rel_heightfilter=0,
               SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
+              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='double',
               free_cores=1):
     """
     Общее описание
@@ -807,7 +807,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
 
 def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0.5, peaklocation=1,rel_heightfilter=0,
               SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              draw = True, mz_diap4draw = None, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
+              draw = True, mz_diap4draw = None, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='double',
               free_cores=1):
     """
     Общее описание
@@ -2772,7 +2772,7 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
               oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0, peaklocation=1,rel_heightfilter=0,
               SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              mz_diap4draw = None,dtypeconv='single'):
+              mz_diap4draw = None,dtypeconv='double'):
     """
     Общее описание
     ----

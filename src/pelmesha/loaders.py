@@ -1,3 +1,4 @@
+import logging.handlers
 import os
 from h5py import File
 import gc
@@ -481,28 +482,54 @@ class logger:
 
     `logger.ended()` - write message of successful end of function to log
     """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     name=[]
+    getted_log=logging.getLogger()
+    for handler in getted_log.handlers:
+        if isinstance(handler, logging.StreamHandler):
+            handler.setLevel(logging.WARN)
     def __init__(self,func_name,args,path = None):        
         if not path:
             try:
                 os.mkdir('logs')
             except:
                 pass
-            logging.basicConfig(level=logging.INFO, filename=os.path.join("logs",str(func_name))+"_log.log",filemode="w",
-                        format="%(asctime)s %(levelname)s %(message)s")
+            path_to_file_handler = os.path.join("logs",str(func_name))+"_log.log"
         else:
-            logging.basicConfig(level=logging.INFO, filename=os.path.join(path,str(func_name))+"_log.log",filemode="w",
-                        format="%(asctime)s %(levelname)s %(message)s")
+            path_to_file_handler = os.path.join(path,str(func_name))+"_log.log"
+        
+        h_not_exist = True
+        for handler in self.getted_log.handlers:
+            if isinstance(handler, logging.FileHandler):
+                h_not_exist = False
+                handler.setLevel(logging.INFO)
+            # if isinstance(handler, logging.StreamHandler):
+            #     handler.setLevel(logging.WARN)
+        if h_not_exist:
+            fhandler = logging.FileHandler(filename=path_to_file_handler, mode="w")
+            fhandler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            fhandler.setLevel(logging.INFO)
+            self.getted_log.addHandler(fhandler)
+
+            
         self.name.append(func_name)
-        logging.info(f"====================================Function {func_name} arguments========================================")
+        self.getted_log.info(f"====================================Function {func_name} arguments========================================")
         for arg in args.keys():
-            logging.info(f"{arg} = {args[arg]}")
-        logging.info(f"====================================Function {func_name} STARTED========================================")
+            self.getted_log.info(f"{arg} = {args[arg]}")
+        self.getted_log.info(f"====================================Function {func_name} STARTED========================================")
     def warn(text):
-        logging.warn(f"{text}")
+        logger.getted_log.warn(f"{text}")
     def log(text):
-        logging.info(f"{text}")
+        logger.getted_log.info(f"{text}")
     def ended():
-        logging.info(f"====================================Function {logger.name[-1]} ENDED==========================================")
-        del logger.name[-1]
+        logger.getted_log.info(f"====================================Function {logger.name[-1]} ENDED==========================================")
+        if len(logger.name)<2:
+            del logger.name[-1]
+
+            for handler in logger.getted_log.handlers:
+                if isinstance(handler, logging.FileHandler):
+                    handler.close()
+                    logger.getted_log.removeHandler(handler)
+        else:
+            del logger.name[-1]
     
