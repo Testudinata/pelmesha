@@ -162,7 +162,7 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     manager = Manager()
     print_queue = Manager().Queue()
     queue = manager.Queue()
-    logger.log(f"Putting True to queue")
+    logger.log(f"Puting True to queue")
     queue.put(True)
     logger.log(f"Creating thread for print and visualizing progress")
     t = Thread(target=printer,args=[print_queue])
