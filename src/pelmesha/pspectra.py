@@ -17,10 +17,10 @@ import matplotlib.pyplot as plt
 from math import sqrt
 import warnings
 try:
-    from torch.multiprocessing import Pool, cpu_count, Manager, current_process, Value
+    from torch.multiprocessing import Pool, cpu_count, Manager, Value
 except Exception as error:
     warnings.warn(f"During import torch.multiprocessing package raised error {error}. Using python package multiprocessing instead")
-    from multiprocessing import Pool, cpu_count, Manager, current_process, Value
+    from multiprocessing import Pool, cpu_count, Manager, Value
 
 
 ## pairwise for python versions below 10 
@@ -158,24 +158,25 @@ def imzml2hdf5(path_list, dtypeconv='double', chunk_rowsize = "Auto", chunk_bsiz
     logger.log(f"Num of CPU for usage {cpu_num}")
     corenum_counter = Value('i',0) 
     ## Выгрузка данных с помощью ImzMLParser'a и их конвертация в hdf5 (в дальнейшем работаем с hdf5)
-    logger.log(f"Creating Queue for getting information from processes")
-    print_queue = Manager().Queue()
-    logger.log(f"Creating Queue for controling processes for single process acessing to hdf5")
-    queue = Manager().Queue()
-    logger.log(f"Puting True to queue")
-    queue.put(True)
-    logger.log(f"Creating thread for print and visualizing progress")
-    t = Thread(target=printer,args=[print_queue])
-    t.start()
-    print_queue.put(len(sample_imzmlpath_list))
-    logger.log(f"Starting conversion imzml to hdf5")
-    with Pool(cpu_num,initializer=init_worker,initargs=['hdf5_writer',corenum_counter]) as p:
-        p.starmap(hdf5_writer,product(sample_imzmlpath_list,[queue],[print_queue],[dtypeconv],[chunk_rowsize],[chunk_bsize]))
-    p.join()
-    logger.log(f"Conversion ended")
-    print_queue.put(Sentinel()) # Остановка работы функции printer
-    t.join() # Wait for all printing to complete
-    ##
+    if __name__ == "__main__":
+        logger.log(f"Creating Queue for getting information from processes")
+        print_queue = Manager().Queue()
+        logger.log(f"Creating Queue for controling processes for single process acessing to hdf5")
+        queue = Manager().Queue()
+        logger.log(f"Puting True to queue")
+        queue.put(True)
+        logger.log(f"Creating thread for print and visualizing progress")
+        t = Thread(target=printer,args=[print_queue])
+        t.start()
+        print_queue.put(len(sample_imzmlpath_list))
+        logger.log(f"Starting conversion imzml to hdf5")
+        with Pool(cpu_num,initializer=init_worker,initargs=['hdf5_writer',corenum_counter]) as p:
+            p.starmap(hdf5_writer,product(sample_imzmlpath_list,[queue],[print_queue],[dtypeconv],[chunk_rowsize],[chunk_bsize]))
+        p.join()
+        logger.log(f"Conversion ended")
+        print_queue.put(Sentinel()) # Остановка работы функции printer
+        t.join() # Wait for all printing to complete
+        ##
     logger.ended()
     return None
 
