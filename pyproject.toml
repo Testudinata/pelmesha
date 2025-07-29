@@ -16,9 +16,9 @@ classifiers = [
 
 dependencies = [
   "h5py",
-  "kdepy>=1.1.11",
+  "kdepy",
   "matplotlib",
-  "numpy>=2.1",
+  "numpy",
   "pandas",
   "pybaselines",
   "pyimzML",
@@ -26,6 +26,7 @@ dependencies = [
   "scipy",
   "tqdm"
 ]
+
 license = "Apache-2.0"
 license-files = ["LICEN[CS]E*"]
 [project.optional-dependencies]
