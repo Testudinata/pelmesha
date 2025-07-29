@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
-from itertools import product, pairwise, zip_longest
-from torch.multiprocessing import Pool, cpu_count, Manager
+from itertools import product, zip_longest
 from threading import Thread
 from pybaselines import Baseline
 from scipy.interpolate import interp1d
@@ -16,6 +15,30 @@ import re
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 from math import sqrt
+import warnings
+try:
+    from torch.multiprocessing import Pool, cpu_count, Manager, Value
+except Exception as error:
+    warnings.warn(f"During import torch.multiprocessing package raised error {error}. Using python package multiprocessing instead")
+    from multiprocessing import Pool, cpu_count, Manager, Value
+
+
+## pairwise for python versions below 10 
+from sys import version_info
+if version_info[0] < 3:
+    raise Exception("Must be using Python 3")
+else:
+    if version_info[1]<10:
+        from itertools import tee
+
+        def pairwise(iterable):
+            "s -> (s0,s1), (s1,s2), (s2, s3), ..."
+            a, b = tee(iterable)
+            next(b, None)
+            return zip(a, b)
+    else:
+        from itertools import pairwise
+
 
 ### Code from __init__.py msalign (https://github.com/lukasz-migas/msalign)
 """Signal calibration and alignment by reference peaks - copy of MSALIGN function from MATLAB bioinformatics library."""
@@ -66,7 +89,7 @@ msalign.__doc__ = Aligner.__doc__
 
 ### Base functions
 
-def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsize = 10000000, reconv = False):
+def imzml2hdf5(path_list, dtypeconv='double', chunk_rowsize = "Auto", chunk_bsize = 10000000, reconv = False):
     """
     Description
     ----
@@ -79,7 +102,7 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     The dataset name is taken from the name of the folder containing the imzML file.
 
     :param path_list: list of str or paths to folder or `imzML` file
-    :param dtypeconv: convert data to `"double"`,`"single"` or `"half"` float type. The default is `"single"`
+    :param dtypeconv: convert data to `"double"`,`"single"` or `"half"` float type. The default is `"double"`
     :param chunk_rowsize: chunking hdf5 datasets for partial and efficient loading data to RAM. The default is `"Auto"`
 
         `"Auto"` - автоматический подбор кол-ва строк записи матрицы в hdf5 на основе размера chunk_bsize,
@@ -96,20 +119,23 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
 
     :return: None
     """
-
+    logger("imzml2hdf5",{**locals()})
     if isinstance(path_list, str):
         path_list=[path_list]
     sample_imzmlpath_list=[] # Словарь списка sample для каждого слайда (отдельный путь в path_list)
     
+    logger.log("Finding paths to imzml")
     imzmlpath_list = find_paths(path_list) ## Поиск файлов imzml и создание списка корневых папок с файлами ".imzml"
     sample_tot_num = len(imzmlpath_list)  # счётчик общего количества sample, используется для создания количества процессов не более этого значения (не критично, но оптимально вдруг, чтобы не создавать пул нерабочих процессов, что возможно ест ресурс компа)
+    logger.log(f"Paths to imzml:{imzmlpath_list}")
     if sample_tot_num ==0:
-        warnings.warn("Sample total num is - 0. Couldn't find imzML files")
+        logger.warn("Sample total num is - 0. Couldn't find imzML files")
         return
     ##
     ## Создание списков наименований слайдов, roi и рассчёт общего количества roi
+    logger.log(f"Preparation paths for multiprocessing")
     for path in imzmlpath_list:
-
+        
         Slides_path=os.path.dirname(os.path.dirname(path)) #Определяем путь в root директорию. Это директория, где будут храниться данные обработки в hdf5 файле
         Slide_name=os.path.basename(Slides_path) #Определяем имя слайда
          
@@ -119,39 +145,46 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
             if reconv:
                 os.remove(os.path.join(Slides_path,Slide_name)+"_rawdata.hdf5")
                 sample_imzmlpath_list.append([Slides_path,path])
+                logger.log(f"Old data on {Slides_path} deleted")
             else:
+                logger.log(f"Data on the path {path} has hdf5 file for raw data. Change argument 'reconv' to True, if needed to reconvert")
                 print(f"Data on the path {path} has hdf5 file for raw data. Change argument 'reconv' to True, if needed to reconvert")
 
-    ##    
-    
+    ##
     ## Определение количества пула процессов
     cpu_num = cpu_count()-1
     if cpu_num > sample_tot_num:
         cpu_num = sample_tot_num
-    
-
+    logger.log(f"Num of CPU for usage {cpu_num}")
+    corenum_counter = Value('i',0) 
     ## Выгрузка данных с помощью ImzMLParser'a и их конвертация в hdf5 (в дальнейшем работаем с hdf5)
+    logger.log(f"Creating Queue for getting information from processes")
     manager = Manager()
-    print_queue = Manager().Queue()
+    print_queue = manager.Queue()
+    logger.log(f"Creating Queue for controling processes for single process acessing to hdf5")
     queue = manager.Queue()
+    logger.log(f"Puting True to queue")
     queue.put(True)
+    logger.log(f"Creating thread for print and visualizing progress")
     t = Thread(target=printer,args=[print_queue])
     t.start()
     print_queue.put(len(sample_imzmlpath_list))
-    with Pool(cpu_num) as p:
+    logger.log(f"Starting conversion imzml to hdf5")
+    with Pool(cpu_num,initializer=init_worker,initargs=['hdf5_writer',corenum_counter]) as p:
         p.starmap(hdf5_writer,product(sample_imzmlpath_list,[queue],[print_queue],[dtypeconv],[chunk_rowsize],[chunk_bsize]))
     p.join()
-
+    logger.log(f"Conversion ended")
     print_queue.put(Sentinel()) # Остановка работы функции printer
     t.join() # Wait for all printing to complete
     ##
+    logger.ended()
     return None
 
 def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #penalized_poly - самый быстрый вариант. asls - меньше "отрицательных" точек по сравнению с penalized_poly, что лучше работает с пикпикингом с фильтрацией порогом по интенсивности, но в ~2 раза дольше считает
               align_peaks = None, weights_list=None, max_shift_mz=0.95, only_shift = True,params2align={},
               resample_to_dots = None, 
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
-              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
+              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='double',
               free_cores=1):
     """
     Общее описание
@@ -274,7 +307,7 @@ def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #
         p.join()    
         args_batches=[]
         for data in data_obj_temp:
-            data_obj_coord=data_obj_coord|data[0]
+            data_obj_coord.update(data[0])
             args_batches = args_batches + data[1]
         del data_obj_temp
         gc.collect()
@@ -413,7 +446,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
               oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0, peaklocation=1,rel_heightfilter=0,
               SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
+              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='double',
               free_cores=1):
     """
     Общее описание
@@ -496,7 +529,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
     :return: `None`
     :rtype: `NoneType`
     """
-    
+    logger("Raw2peaklist",{**locals()})
     # Process args
     #defaults parametres for align
     pars = list(set(["width","iterations"])-set(params2align.keys()))
@@ -546,8 +579,8 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
     chunk_size = np.ceil(h5chunk_size_MB*1e+6/(bytes_flsize*11))
 
     ###I. Finding slide directory for rawdata of samples (imzml)
-    path_list=find_imzml_roots(data_obj_path)
-
+    path_dict=find_imzml_roots(data_obj_path)
+    logger.log(f'Path to files dictionary: {path_dict}')
     ###I Finding slide directory with rawdata of samples (path_list) - DONE
     if noise_est == "MAD":
         noise_func= MAD
@@ -555,25 +588,27 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
         noise_func=np.std
     
     # Processing
-    for file_path in path_list.keys():
+    for file_path in path_dict.keys():
         slide = os.path.basename(file_path)  
         print(f"The {slide} raw spectra data is on progress.")
         
         data_obj_coord={}
-        sample_list = path_list[file_path]
+        sample_list = path_dict[file_path]
 
         ###II. Extracting spectra coordinates, roi indexes, other metadata for proccessing slide samples from poslog and _info text files. Input arguments organization for "intprocc_parbatched_imzml" function (spectra processing batched and parallelized)
         ###II. Вытаскивание данных координат точек и индексов для областей(roi), если их несколько, из poslog и _info. Организация входных параметров для функции "intprocc_parbatched_imzml", включая batch'ей для параллельной выгрузки
         print(f"Slide's {slide} spectra coordinates and metadata extraction for preparation parallel proccessing")
+        logger.log(f"Slide's {slide} spectra coordinates and metadata extraction for preparation parallel proccessing")
         with Pool(cpu_num) as p:
             data_obj_temp = p.starmap(poslog_parbatched,list(product(sample_list,[batch_bsize],[dtypeconv],[print_queue],[cpu_num],[resample_to_dots])))
         p.join()    
         args_batches=[]
         for data in data_obj_temp:
-            data_obj_coord=data_obj_coord|data[0]
+            data_obj_coord.update(data[0])
             args_batches = args_batches + data[1]
         del data_obj_temp
         gc.collect()
+        logger.log(f"Preparing arguments and data for parallelization")
         #### Подготовка аргументов для процессинга данных
         args2procc = Manager().dict({"baseliner_algo": baseliner_algo, "params2baseliner_algo": params2baseliner_algo,"params2align":params2align, "align_peaks":align_peaks,"weights_list":weights_list, "dots_shift":max_shift_mz,"smooth_algo":smooth_algo,"smooth_window":smooth_window, "smooth_cycles":smooth_cycles})
         args2peakpicking = Manager().dict({"oversegmentationfilter": oversegmentationfilter, "fwhhfilter": fwhhfilter, "heightfilter": heightfilter,"rel_heightfilter":rel_heightfilter, "peaklocation": peaklocation,
@@ -583,6 +618,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
         ##II. Coordinates, metadata and organization of input arguments for parallelized and batched proccessing of spectra - DONE
         ## Deleting old hdf5 file if it has dataset with rawpeaklist
         base_path = os.path.join(file_path,slide)
+        logger.log(f"Old hdf5 file rewrite/deleting and etc on {file_path}")
         if rewrite: # if TRUE - delete hdf5
             try:
                 os.remove(base_path+"_specdata.hdf5")
@@ -620,7 +656,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
                 break
             if flag_mzint:
                 data_obj_feat.close()
-                #print("closed")
+
             
             if flag_feat and flag_mzint:
                 
@@ -644,15 +680,16 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
             data_obj_feat = File(base_path+"_specdata.hdf5","a")
         ## Deleting old hdf5 file - Done
         data_obj_feat.close()
-
+        logger.log(f"Slide's {slide} spectra coordinates writing")
         ##III. Writing coordinates
         print(f"Slide's {slide} spectra coordinates writing")
         hdf5_coords(file_path,slide,data_obj_coord,chunk_size)
         ##IV. Proccessing, peakpicking and writing to hdf5
         print(f"Slide's {slide} spectra parallel proccessing")
-
+        logger.log(f"Data processing started")
         print_queue.put(len(args_batches))
-        with Pool(cpu_num) as p:
+        corenum_counter = Value('i',0) 
+        with Pool(cpu_num, initializer = init_worker, initargs=['int2proc2peaklist_parbatched',corenum_counter]) as p:
             p.starmap(int2proc2peaklist_parbatched,args_batches)
         p.join()
         ##IV. Proccessing, peakpicking and writing to hdf5 - Done
@@ -765,13 +802,13 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
     print_queue.put(Sentinel())
 
     t.join()
-
+    logger.ended()
     gc.collect()
     return
 
 def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0.5, peaklocation=1,rel_heightfilter=0,
               SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              draw = True, mz_diap4draw = None, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
+              draw = True, mz_diap4draw = None, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='double',
               free_cores=1):
     """
     Общее описание
@@ -848,15 +885,7 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, hei
 
     
     path_list=find_paths(data_obj_path,file_end = '_specdata.hdf5')
-    # path_list=[]
-    # for path in data_obj_path:
-    #     for root, dirs, files in os.walk(path):
-    #         for file in files: 
-    #             if file.endswith('_specdata.hdf5'):
-    #                 path_list.append(os.path.join(root,file))
-                #if file.endswith('.imzML'):
-                #    imzml_list.append(os.path.join(root,file))
-    
+
     for file_path in path_list:        
         ##II. Coordinates, metadata and organization of input arguments for parallelized and batched proccessing of spectra - DONE
 
@@ -888,8 +917,8 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, hei
             data_obj_feat.close()
             #print("closed")
         if flag_feat and flag_mzint:
-            if os.path.exists(os.path.join(file_path,slide)+"new.hdf5"):
-                os.remove(os.path.join(file_path,slide)+"new.hdf5")
+            if os.path.exists(os.path.join(directory_path,slide)+"new.hdf5"):
+                os.remove(os.path.join(directory_path,slide)+"new.hdf5")
             data_obj_feat_new = File(os.path.join(directory_path,slide)+"new.hdf5","a")
             data_obj_feat = File(file_path,"r")
             for sample in data_obj_feat.keys():
@@ -908,7 +937,7 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, hei
             data_obj_feat.close()
             #print("repacked")
             os.remove(file_path)
-            os.rename(os.path.join(file_path,slide)+"new.hdf5",file_path)
+            os.rename(os.path.join(directory_path,slide)+"new.hdf5",file_path)
         
         data_obj_feat = File(file_path,"r")
         
@@ -1115,12 +1144,13 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
     :return: None
     :rtype: Nonetype
     """
+    logger(f"hdf5_writer_on_core_{hdf5_writer.name}",{**locals()})
     Slide_folder_path = foldersample_path[0]
     Slide_name = os.path.basename(Slide_folder_path)
     sample_path2imzml = foldersample_path[1]
     folder_path2imzml = os.path.dirname(sample_path2imzml)
     sample_name = os.path.splitext(os.path.basename(sample_path2imzml))[0]
-
+    logger.log(f"Path to slide folder {Slide_folder_path}\nPath to imzml {sample_path2imzml}\nSample name {sample_name}")
     ## Извлечение из poslog физических координат
     sample_data={}
     count=0
@@ -1141,6 +1171,7 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
     poslog_specdata = [None]*len(sample_imzml.coordinates) #Данные строк в poslog с записью roi и координат снятого спектра.
     roi_list = []
     dots_num={}
+    logger.log("Loading data and metadata")
     try:
         with open(os.path.join(folder_path2imzml,sample_name)+"_poslog.txt") as f:
             data = f.readlines()
@@ -1242,53 +1273,51 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
     del roi_num, dots_num
     ##
     
-    
+    logger.log("Sample dataset name estimation")
     ## Автоматическое определение имени датасета
     folder_name=os.path.basename(folder_path2imzml)
     if sample_name == folder_name:
         ds_name = folder_name
     else:
         ds_name=folder_name+"_"+sample_name
+    logger.log(f"Name is {ds_name}")
     ##
     ## Запись в hdf5
-
+    logger.log(f"Waiting queue for writing")
     temp = queue.get()
+    logger.log(f"Writing started")
     print_queue.put(f"Slide {Slide_name} with sample {sample_name} is waiting queue")
 
     hdf5_raw=File(os.path.join(Slide_folder_path,Slide_name)+"_rawdata.hdf5","a")
-
+    
     if chunk_rowsize == "Full":
+        
         for roi in roi_list:
+            logger.log(f"Writing data without chunks for roi {roi}")
             print_queue.put(f"Slide {Slide_name} with sample {sample_name}"+" roi "+roi+" data writing is in progress")
-            #for type in ['/xy','/z']:
-                #hdf5.create_dataset(ds_name+'/'+roi+type, data=sample_data[roi][type.replace("/","")])
-
-            for type in  ['/mz','/int']:
+            for type in  ['/mz','/int','/xy','/z']:
                 hdf5_raw.create_dataset(ds_name+'/'+roi+type, data=sample_data[roi][type.replace("/","")])
-            #hdf5[ds_name][roi].attrs['continues'] =dcont #Data points type    
-            hdf5_raw[ds_name][roi].attrs['continues'] =dcont #Data points type       
-        #hdf5.close()
+            hdf5_raw[ds_name][roi].attrs['continues'] =dcont   
         hdf5_raw.close()
     else:
+        
         for roi in roi_list:
+            logger.log(f"Writing data with chunks rowsize {chunk_rowsize} for roi {roi}")
             print_queue.put(ds_name+" roi "+roi+" data writing is in progress")
             
-                ### chunked version
+            ### chunked version
             
             hdf5_raw.create_dataset(ds_name+'/'+roi+'/int', data=sample_data[roi]['int'],chunks=(chunk_rowsize,sample_data[roi]['int'].shape[1]))
             hdf5_raw.create_dataset(ds_name+'/'+roi+'/xy', data=sample_data[roi]['xy'],chunks=(chunk_rowsize,sample_data[roi]['xy'].shape[1]))
-            #hdf5.create_dataset(ds_name+'/'+roi+'/xy', data=sample_data[roi]['xy'],chunks=(chunk_rowsize,sample_data[roi]['xy'].shape[1]))
-                ###
             hdf5_raw.create_dataset(ds_name+'/'+roi+'/mz', data=sample_data[roi]['mz'])
-            #hdf5.create_dataset(ds_name+'/'+roi+'/z', data=sample_data[roi]['z'])
             hdf5_raw.create_dataset(ds_name+'/'+roi+'/z', data=sample_data[roi]['z'])
-            #hdf5[ds_name][roi].attrs['continues'] = dcont #Data points type    
             hdf5_raw[ds_name][roi].attrs['continues'] =dcont #Data points type       
-        #hdf5.close()
         hdf5_raw.close()
+    logger.log(f"Writing ended")
     print_queue.put(f"{sample_path2imzml} data writing is finished")
     print_queue.put(True)
     queue.put(True)
+    logger.ended()
 
 def int2procc_parbatched(sample_file_path, sample,roi,interval,dots_num,dtypeconv,dcont,print_queue, discon_resample_range = (None,None),resample_to_dots = None,
                         args2procc={},queue = None, chunk_size = 100):
@@ -1445,17 +1474,23 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
     :return: `None`
     :rtype: `NoneType`
     """
+    logger(f"Raw2peaklist_on_core_{int2proc2peaklist_parbatched.name}",{**locals()})
     ## Пояснение, что какого-то файла не удалось найти/открыть при массовой обработке данных
     idx_range = range(interval[0],interval[1])
     sample_imzml=ImzMLParser(sample_file_path)
     temp = queue.get()
     Slide_folder = os.path.dirname(os.path.dirname(sample_file_path))
-    with File(os.path.join(Slide_folder,os.path.basename(Slide_folder)) +"_specdata.hdf5",'r', libver='latest') as hdf5:
-        idx_start = hdf5[sample][roi].attrs['idxroi'][0]
+    logger.log(f"Reading data")
+    try:
+        with File(os.path.join(Slide_folder,os.path.basename(Slide_folder)) +"_specdata.hdf5",'r', libver='latest') as hdf5:
+            idx_start = hdf5[sample][roi].attrs['idxroi'][0]
+    except Exception as error:
+        logger.warn(f"During reading data raised folowing exception:{error}")
     queue.put(True)
     nspec_range=range(interval[0]-idx_start,interval[1]-idx_start)
     loc_args2procc = args2procc.copy()
 
+    logger.log(f"Processing data")
     if dcont:
         
         ## Preallocating int
@@ -1483,7 +1518,7 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
         ## Получение пиков
         
         peaklists = mspeaks_arrayopt(data_mz,data_int,nspec_range,**args2peakpicking)
-
+        logger.log(f"Processing continues data ended")
     else:
 
         peaklists={}
@@ -1511,29 +1546,31 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
                                            nspec_range[n], **args2peakpicking)
                
         peaklists = np.vstack(tuple(peaklists.values()))
+        logger.log(f"Processing discontinues data ended")
     ### Запись пиков в hdf5 очередью
     temp = queue.get()
-
+    logger.log(f"Writing data")
     with File(os.path.join(Slide_folder,os.path.basename(Slide_folder)) +"_specdata.hdf5","a", libver='latest') as hdf5:
-
+        logger.log(f"File opened")
         try:
-   
+            
             start_row = hdf5[sample][roi]["peaklists"].shape[0]
             hdf5[sample][roi]["peaklists"].resize(start_row + peaklists.shape[0],0)
             hdf5[sample][roi]["peaklists"][start_row:(start_row+peaklists.shape[0]),:] = peaklists
-
+            logger.log(f"Added peaklists data")
         except:
-
+            logger.log(f"Creating peaklist dataset for {sample} {roi}")
             hdf5.create_dataset(sample + "/" + roi + "/peaklists",peaklists.shape, maxshape = (None, 11), chunks=(chunk_size, 11))
 
             hdf5[sample][roi]["peaklists"][:] = peaklists
 
             hdf5[sample][roi]["peaklists"].attrs["Column headers"] = ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
-   #print_queue.put(f"{sample + " " + roi} batch {interval} data writing is finished")
-
+   
+    logger.log(f"Writing for {sample} {roi} ended succesfully")
+    
     print_queue.put(True)
     queue.put(True)
-    
+    logger.ended()
     return
             
 def proc2peaklist_parbatched(sl, sample ,roi ,sample_file_path,args2peakpicking={},dtypeconv='double',print_queue=None):
@@ -1617,10 +1654,12 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
     folder_path2imzml = os.path.dirname(sample_file)
     sample_name = os.path.splitext(os.path.basename(sample_file))[0]
     folder_name = os.path.basename(folder_path2imzml)
+    poslog_err = sample_name
+
 
     if folder_name == sample_name:
         sample=sample_name
-        poslog_err = sample_name
+        
     else:
         sample = folder_name+"_"+sample_name        
     base_path = os.path.join(folder_path2imzml,sample_name)
@@ -1739,16 +1778,14 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
         for idx, (roi,x,y) in enumerate(poslog_specdata):            
             data_obj[sample][roi]["xy"][idx-roi_idx[sample][roi][0],:] = [x, y]
         ### 6. Preparing index parameters associated with sample, ROI and organizing them into argument list for parallel processing of spectra - Done
-        #print_queue.put(data_obj)
         del roi_num, coords, idx_first
-        #print_queue.put("Done")
         ###
         ### Если нет poslog файла в папке, берём координаты из imzml
         ### a. If there is no poslog file in the folder, take coordinates from imzml
     except FileNotFoundError: 
-        #print_queue.put("Done 2")
+
         print_queue.put(f'The {poslog_err+"_poslog.txt"} file is not in directory {folder_path2imzml}, the coordinate data is taken from the imzML file')
-        #print_queue.put("Done 2")
+
         roi = "00" # roi только один, так как там вроде нельзя настраивать и определять без poslog
         roi_list = []
         roi_list.append(roi_list)
@@ -1812,6 +1849,11 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
         data_obj[sample][roi]["z"] = 0 #Заглушка, нигде z не узнать
     return (data_obj, intraw_par_args)
 ### Utility functions for processing
+
+def init_worker(func_name,corenum_counter):
+    with corenum_counter.get_lock():
+        eval(func_name).name = corenum_counter.value
+        corenum_counter.value += 1
 
 def hdf5_coords(file_path,slide,data_obj_coord,chunk_size):
     """
@@ -2182,18 +2224,17 @@ def DataProc_resample1d(y,x,xnew,baseliner,baseliner_algo, params2baseliner_algo
 def find_imzml_roots(paths):
     path_dict={}
     for path in paths:
-        Sample_folder =os.path.dirname(path)
-        Slide_folder = os.path.dirname(Sample_folder)
         if path.lower().endswith('.imzml'):
+            Slide_folder = os.path.dirname(os.path.dirname(path))
             path_dict.setdefault(Slide_folder,[])
             path_dict[Slide_folder].append(path)
         else:
             for root, dirs, files in os.walk(path):
                 for file in files: 
                     if file.lower().endswith('.imzml'):
-                        path_dict.setdefault(Sample_folder,[])
-                        path_dict[Sample_folder].append(os.path.join(root,file))
-            del root, dirs, files
+                        path_dict.setdefault(os.path.dirname(root),[])
+                        path_dict[os.path.dirname(root)].append(os.path.join(root,file))
+                del root, dirs, files
     for key in path_dict.keys():
         path_dict[key]=list(set(path_dict[key]))
     return path_dict
@@ -2732,7 +2773,7 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
               oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0, peaklocation=1,rel_heightfilter=0,
               SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              mz_diap4draw = None,dtypeconv='single'):
+              mz_diap4draw = None,dtypeconv='double'):
     """
     Общее описание
     ----
@@ -2803,7 +2844,6 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
     :rtype: `NoneType`
     """
 
-    logger("draw_processing_example",{**locals()})
     # Process args
     #defaults parametres for align
     pars = list(set(["width","iterations"])-set(params2align.keys()))
@@ -2860,9 +2900,7 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
             else:
 
                 sample = folder_name+"_"+sample_name
-            logger.log('imzml opening')
             sample_imzml=ImzMLParser(sample_path2imzml)
-            logger.log('imzml opened')
             ### 1. Файл найден и открыт в sample_imzml файле - DONE
             ### 1. File found and opened in sample_imzml file - DONE
             ### Data extraction
@@ -2939,9 +2977,9 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
                     idx_spec = np.random.randint(idx_start,idx_start+numspec)
                     
                 print(f'Spectrum number: {idx_spec}')
-                logger.log('getting spectra for draw')
+
                 data_mz_old, data_int_old = sample_imzml.getspectrum(idx_spec)
-                logger.log('getting spectra for draw ended')
+
                 #data_int_old.shape = (1,data_int_old.shape[0])
                 roi_idx_spec = idx_spec-idx_start
                 loc_args2procc={"baseliner_algo": baseliner_algo, "params2baseliner_algo": params2baseliner_algo,"params2align":params2align, "align_peaks":align_peaks,"weights_list":weights_list,"smooth_algo":smooth_algo, "smooth_cycles":smooth_cycles}

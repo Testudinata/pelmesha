@@ -1,3 +1,4 @@
+import logging.handlers
 import os
 from h5py import File
 import gc
@@ -152,11 +153,19 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
         Source_path[slides] = Slide_data[slides].filename
         
         for sample in Slide_data[slides].keys():
-            
             DataFeat[slides][sample]={}
             for roi in Slide_data[slides][sample].keys():
+                try:
+                    headers = list(Slide_data[slides][sample][roi][feat_type].attrs['Column headers'])
+                except KeyError as error:
+                    warnings.warn(f"An error occurred on {slides} {sample} {roi}: {error}")
+                    try:
+                        warnings.warn(f'HDF5 file from source {Source_path[slides]} on {slides} {sample} {roi} has datasets: {Slide_data[slides][sample][roi].keys()}')
+                    except:
+                        pass
+                    continue
+
                 DataFeat[slides][sample][roi]={}
-                headers = list(Slide_data[slides][sample][roi][feat_type].attrs['Column headers'])
                 if "Peak" in headers:
                     mz_type = "Peak"
                 else:
@@ -196,11 +205,14 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
                 if pivoting4val:
                     
                     DataFeat[slides][sample][roi][feat_type] = DataFeat[slides][sample][roi][feat_type].pivot_table(index="spectra_ind", columns="Peak",fill_value = 0, values =pivoting4val)
-                    
-                    # if extract_coords:
-                        # DataFeat[slides][sample][roi]['features'].set_index(DataFeat[slides][sample][roi]["xy"].loc[DataFeat[slides][sample][roi]['features'].index].set_index(['x','y'],append=True).index,inplace=True)
-                        # del DataFeat[slides][sample][roi]["xy"]
+            if not DataFeat[slides][sample]:
+                DataFeat[slides].pop(sample,None)
+        if not DataFeat[slides]:
+            DataFeat.pop(slides,None)
         Slide_data[slides].close()
+    if not DataFeat:
+        warnings.warn(f"Warning. Any dataset doesn't have {feat_type} data")
+        return
     if return_source_path:
         return DataFeat, Source_path
     return DataFeat
@@ -329,7 +341,9 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
     elif isinstance(paths,dict):
         path_list=paths.keys()
         samples = True
-    
+    elif isinstance(paths,str):
+        path_list = [paths]
+
     for path in path_list:
        
         ### hdf5 load
@@ -468,24 +482,54 @@ class logger:
 
     `logger.ended()` - write message of successful end of function to log
     """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     name=[]
+    getted_log=logging.getLogger()
+    for handler in getted_log.handlers:
+        if isinstance(handler, logging.StreamHandler):
+            handler.setLevel(logging.WARN)
     def __init__(self,func_name,args,path = None):        
         if not path:
-            logging.basicConfig(level=logging.INFO, filename=str(func_name)+"_log.log",filemode="w",
-                        format="%(asctime)s %(levelname)s %(message)s")
+            try:
+                os.mkdir('logs')
+            except:
+                pass
+            path_to_file_handler = os.path.join("logs",str(func_name))+"_log.log"
         else:
-            logging.basicConfig(level=logging.INFO, filename=os.path.join(path,str(func_name))+"_log.log",filemode="w",
-                        format="%(asctime)s %(levelname)s %(message)s")
-        logger.name.append(func_name)
-        logging.info(f"====================================Function {func_name} arguments========================================")
+            path_to_file_handler = os.path.join(path,str(func_name))+"_log.log"
+        
+        h_not_exist = True
+        for handler in self.getted_log.handlers:
+            if isinstance(handler, logging.FileHandler):
+                h_not_exist = False
+                handler.setLevel(logging.INFO)
+            # if isinstance(handler, logging.StreamHandler):
+            #     handler.setLevel(logging.WARN)
+        if h_not_exist:
+            fhandler = logging.FileHandler(filename=path_to_file_handler, mode="w")
+            fhandler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            fhandler.setLevel(logging.INFO)
+            self.getted_log.addHandler(fhandler)
+
+            
+        self.name.append(func_name)
+        self.getted_log.info(f"====================================Function {func_name} arguments========================================")
         for arg in args.keys():
-            logging.info(f"{arg} = {args[arg]}")
-        logging.info(f"====================================Function {func_name} STARTED========================================")
+            self.getted_log.info(f"{arg} = {args[arg]}")
+        self.getted_log.info(f"====================================Function {func_name} STARTED========================================")
     def warn(text):
-        logging.warn(f"{text}")
+        logger.getted_log.warn(f"{text}")
     def log(text):
-        logging.info(f"{text}")
+        logger.getted_log.info(f"{text}")
     def ended():
-        logging.info(f"====================================Function {logger.name[-1]} ENDED==========================================")
-        del logger.name[-1]
+        logger.getted_log.info(f"====================================Function {logger.name[-1]} ENDED==========================================")
+        if len(logger.name)<2:
+            del logger.name[-1]
+
+            for handler in logger.getted_log.handlers:
+                if isinstance(handler, logging.FileHandler):
+                    handler.close()
+                    logger.getted_log.removeHandler(handler)
+        else:
+            del logger.name[-1]
     

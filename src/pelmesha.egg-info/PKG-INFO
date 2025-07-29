@@ -1,16 +1,19 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: pelmesha
-Version: 0.1.5
+Version: 0.2.3
 Summary: A package for proccesing and aligning peaklist Mass-spectrometry imaging data from .imzml files
 Author-email: Andrew Kuzin <Kuzya-90@bk.ru>
+License-Expression: Apache-2.0
 Project-URL: Homepage, https://github.com/Testudinata/pelmesha
 Project-URL: Issues, https://github.com/Testudinata/pelmesha/issues
 Classifier: Programming Language :: Python :: 3
 Classifier: Operating System :: OS Independent
 Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
 Requires-Python: >=3.8
 Description-Content-Type: text/markdown
 License-File: LICENSE.txt
+Dynamic: license-file
 
 # Package pelmesha
 

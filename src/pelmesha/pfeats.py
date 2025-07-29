@@ -1,8 +1,7 @@
 
 import pandas as pd
 import numpy as np
-from itertools import product,pairwise
-from torch.multiprocessing import Pool, cpu_count
+from itertools import product
 from pelmesha.loaders import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger
 import matplotlib.pyplot as plt
 from h5py import File
@@ -13,6 +12,27 @@ import gc
 import math
 import os
 import warnings
+try:
+    from torch.multiprocessing import Pool, cpu_count
+except Exception as error:
+    warnings.warn(f"During import torch.multiprocessing package raised error {error}. Using python package multiprocessing instead")
+    from multiprocessing import Pool, cpu_count
+## pairwise for python versions below 10 
+from sys import version_info
+if version_info[0] < 3:
+    raise Exception("Must be using Python 3")
+else:
+    if version_info[1]<10:
+        from itertools import tee
+
+        def pairwise(iterable):
+            "s -> (s0,s1), (s1,s2), (s2, s3), ..."
+            a, b = tee(iterable)
+            next(b, None)
+            return zip(a, b)
+    else:
+        from itertools import pairwise
+
 
 ### Base functions
 def Pgrouping_KD(ftable, columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10,tol = 500, norm = (None,None),draw_borders = 1.5,
@@ -97,9 +117,9 @@ def Pgrouping_KD(ftable, columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_ke
     if isinstance(ftable, pd.DataFrame):
         ftableISAPATH=False
         median_dist = ftable['mz'].sort_values().diff().loc[ftable['mz'].sort_values().diff()>0].median()
-        plot_start = ftable['mz'].min()-1
-        plot_end = ftable['mz'].max()+1
-        logger.log(f"Peaks are in range {plot_start}-{plot_end}. Median distance: {median_dist}")
+        plot_start = np.float64(ftable['mz'].min()-1)
+        plot_end = np.float64(ftable['mz'].max()+1)
+        logger.log(f"Peaks are in range {plot_start}-{plot_end} with dtype{type(plot_start)}. Median distance: {median_dist}")
 
     if ftableISAPATH:
         logger.log(f"Data proccessed from file")
@@ -183,8 +203,10 @@ def Getrefpeaks(ref_rois_paths,step=100,num_peaks_per_step=5, min_occurence = 0.
     ref_peaklist = list(ref_peaks.columns)
     
     align_list = []
+    ## Getting list of a most common peaks in step 
     for lim in pairwise(np.arange(min(ref_peaklist),max(ref_peaklist)+step+1,step)):
-        align_list+=list(ref_peaks.loc[:,(ref_peaks.columns>lim[0]) & (ref_peaks.columns<lim[1])].sort_values(by="P_occurence",axis=1).T.tail(num_peaks_per_step).index)
+        align_list+=list(ref_peaks.loc[:,(ref_peaks.columns>=lim[0]) & (ref_peaks.columns<lim[1])].sort_values(by="P_occurence",axis=1).T.tail(num_peaks_per_step).index)
+    ## Getting weights of choosed peaks
     if return_weight:
         weight_list=ref_peaks.loc["P_occurence",align_list]
         logger.log("Output weight list:")
@@ -244,7 +266,6 @@ def Roi_Pgrouping_KD(Paths, extr_columns=None,path2save=None,**Pgrouping_KD_kwar
         pivoting4val = Pgrouping_KD_kwargs["pivoting4val"]
         del Pgrouping_KD_kwargs["pivoting4val"]
         logger.warn(f"'pivoting4val'= {pivoting4val}. Data saved in hdf5 is not pivoted")
-        warnings.warn(f"'pivoting4val'= {pivoting4val}. Data saved in hdf5 is not pivoted")
     else:
         pivoting4val = None
 
@@ -468,18 +489,28 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
 
         ftable=pd.concat(ftable)
         ftable.reset_index(level='spectra_ind', inplace=True)
-    ### Нормализация
+    ### Нормализация end
     ftable_colarrange = ftable.rename(columns={'mz':'Peak'}, inplace=False).columns
     
     if median_dist<min_res*(plot_start+plot_end)/2:
         median_dist=min_res*(plot_start+plot_end)/2
         #logging.warning(f'Warning. The value of {min_res*1e+6} ppm is used as the minimum distance between points to build the density distribution. If you want to build a more accurate probability distribution, change the "min_res" parameter. (Example: accuracy of Orbitrap ~ 10 ppm)')
-        textw=f'Warning. The value of {min_res*1e+6} ppm is used as the minimum distance between points to build the density distribution. If you want to build a more accurate probability distribution, change the "min_res" parameter. (Example: accuracy of Orbitrap ~ 10 ppm)'
+        textw=f'The value of {min_res*1e+6} ppm is used as the minimum distance between points to build the density distribution. If you want to build a more accurate probability distribution, change the "min_res" parameter. (Example: accuracy of Orbitrap ~ 10 ppm)'
         logger.warn(textw)
-        warnings.warn(textw)
-    #X_plot = np.arange(plot_start,plot_end+1,median_dist/10)
-    X_plot = np.linspace(plot_start,plot_end,int((plot_end-plot_start)*10/median_dist)+1)
-    #assert np.allclose(np.ones_like(diffs) * diffs[0], diffs)
+    logger.log(f'median_dist is {median_dist}')
+    num_of_dots = int((plot_end-plot_start)*10/median_dist)+1
+    X_plot = np.linspace(plot_start,plot_end,num_of_dots)
+    diffs = np.diff(X_plot)
+    while not np.allclose(np.ones_like(diffs) * diffs[0], diffs):
+        logger.warn(f"X_plot is not uniform between {plot_start} and {plot_end} with num of dots: {num_of_dots} and distances between points {np.unique_values(diffs)}. Reducing number of dots for X_plot by 2 times")
+        num_of_dots=int(num_of_dots/2)
+        X_plot = np.linspace(plot_start,plot_end,num_of_dots)
+        diffs = np.diff(X_plot)
+        if num_of_dots<=1:
+            raise AssertionError("Cannot get uniform data for KDE. See logs for info")
+        
+    logger.log(f"X_plot is uniform between {plot_start} and {plot_end} with dtype {type(plot_start)} and num of dots: {num_of_dots} and distances between points {np.unique(diffs, equal_nan=False)}.")
+
     logger.log(f"KD bandwith value or estimation method = {KD_bandwidth}")
     if KD_bandwidth == "mz_discret":
         #KD_bandwidth = min_dist*bwc
@@ -549,7 +580,6 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     if len(idx_level_diff)>0 and not (len(idx_level_diff)==1 and not grftable.index.names[0]):
         textw = f'The indexes of the data frame is not the default names:{idx_level_diff}\nThe removal of duplicate peaks in spectra can have unpredictable results.'
         logger.warn(textw)
-        warnings.warn(textw)
     #results.set_index(pd.Index(range(results.shape[0]),name='idx'),append=True,inplace=True)## Обязательно в этом месте добавляем индекс к таблице, чтобы temp_pivo смог подсчитать одинаковые пики из-за одинаковой индексации
     logger.log("Table pivoting ended")
     Total_num_spec=len(temp_pivo.droplevel('Peak').index.unique()) #Количество спектров имаджа
@@ -560,10 +590,8 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
         logger.log("Drawing graphs")
         
         num_of_uniq_spectras = len(temp_pivo.droplevel('Peak').index.unique()) #Определяем кол-во спектров, где обнаружены дубликаты чисто для справки
-        logger.log(f"{temp_pivo.droplevel('Peak').index.unique()}") 
-        textw=f"\nWarning! At the specified peak grouping settings in the peak list of {sample} {roi}, {temp_pivo['count']['mz'].sum()-temp_pivo.shape[0]} duplicates were identified, of which {duplicated_num} were unique peaks in {num_of_uniq_spectras} of mass spectra ({num_of_uniq_spectras*100/(Total_num_spec):.2f}% of the total spectra)."
+        textw=f"At the specified peak grouping settings in the peak list of {sample} {roi}, {temp_pivo['count']['mz'].sum()-temp_pivo.shape[0]} duplicates were identified, of which {duplicated_num} were unique peaks in {num_of_uniq_spectras} of mass spectra ({num_of_uniq_spectras*100/(Total_num_spec):.2f}% of the total spectra)."
         logger.warn(textw)
-        warnings.warn(textw)
         if temp_pivo['count']["mz"].value_counts().index.max() > 2 and draw:
             plt.figure(figsize=(3, 2))
             plt.bar(temp_pivo['count']["mz"].value_counts().index.astype(str),temp_pivo['count']["mz"].value_counts().astype(int))
