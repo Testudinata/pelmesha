@@ -18,7 +18,7 @@ dependencies = [
   "h5py==3.11.0",
   "kdepy==1.1.12",
   "matplotlib==3.8.2",
-  "numpy==2.3.1",
+  "numpy==2.1",
   "pandas==2.3.1",
   "pybaselines==1.1.0",
   "pyimzML==1.5.3",
