@@ -15,24 +15,24 @@ classifiers = [
 ]
 
 dependencies = [
-  "h5py>=3.10.0",
-  "kdepy>=1.1.12",
-  "matplotlib>=3.8.2",
-  "numpy>=2.1",
-  "pandas>=2.3.1",
-  "pybaselines>=1.1.0",
-  "pyimzML>=1.5.3",
-  "scikit_learn>=1.4.2",
-  "scipy>=1.16.0",
-  "tqdm>=4.66.2"
+  "h5py==3.10.0",
+  "kdepy==1.1.12",
+  "matplotlib==3.8.2",
+  "numpy==2.3.1",
+  "pandas==2.3.1",
+  "pybaselines==1.1.0",
+  "pyimzML==1.5.3",
+  "scikit_learn==1.4.2",
+  "scipy==1.16.0",
+  "tqdm==4.66.2"
 ]
-
+license = "Apache-2.0"
+license-files = ["LICEN[CS]E*"]
 [project.optional-dependencies]
 dev = [
     "torch"
 ]
-license = "Apache-2.0"
-license-files = ["LICEN[CS]E*"]
+
 
 [build-system]
 requires = ["setuptools>=72", "setuptools-scm>=8"]
