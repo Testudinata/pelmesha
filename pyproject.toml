@@ -40,7 +40,7 @@ build-backend = "setuptools.build_meta"
 [project.urls]
 Homepage = "https://github.com/Testudinata/pelmesha"
 Issues = "https://github.com/Testudinata/pelmesha/issues"
+
 [tool.setuptools_scm]
-version_scheme = 'no-guess-dev'
+version_scheme = 'only-version'
 local_scheme  = 'no-local-version'
-exact = "True"

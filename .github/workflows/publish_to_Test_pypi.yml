@@ -3,7 +3,8 @@ name: Publish to TestPyPI
 on:
   push:
     branches:
-      - Enhance-compatobility
+      - main
+      #- Enhance-compatobility
 
 jobs:
   # build-and-test:
