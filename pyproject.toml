@@ -24,7 +24,7 @@ dependencies = [
   "pyimzML==1.5.3",
   "scikit_learn==1.4.2",
   "scipy==1.16.0",
-  "tqdm==4.66.2"
+  "tqdm==4.66.2",
 ]
 license = "Apache-2.0"
 license-files = ["LICEN[CS]E*"]
@@ -37,6 +37,7 @@ dev = [
 [build-system]
 requires = ["setuptools>=72", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
+
 [project.urls]
 Homepage = "https://github.com/Testudinata/pelmesha"
 Issues = "https://github.com/Testudinata/pelmesha/issues"
