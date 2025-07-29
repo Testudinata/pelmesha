@@ -25,5 +25,5 @@ Homepage = "https://github.com/Testudinata/pelmesha"
 Issues = "https://github.com/Testudinata/pelmesha/issues"
 [tool.setuptools_scm]
 
-version_scheme = 'release-by-tag'
+version_scheme = 'no-guess-dev'
 local_scheme  = 'no-local-version'
