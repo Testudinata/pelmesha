@@ -1,9 +1,13 @@
 name: Publish pelmesha distribution 📦 to PyPI
 
+# on:
+#   push:
+#     tags:
+#       - "*.*.*"
 on:
   push:
-    tags:
-      - "*.*.*"
+    branches:
+      - 'main'
 
 jobs:
   build:
