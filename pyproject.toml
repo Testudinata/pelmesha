@@ -16,9 +16,9 @@ classifiers = [
 
 dependencies = [
   "h5py",
-  "kdepy",
+  "kdepy>=1.1.11",
   "matplotlib",
-  "numpy",
+  "numpy>=2.1",
   "pandas",
   "pybaselines",
   "pyimzML",
