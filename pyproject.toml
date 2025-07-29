@@ -43,3 +43,4 @@ Issues = "https://github.com/Testudinata/pelmesha/issues"
 [tool.setuptools_scm]
 version_scheme = 'no-guess-dev'
 local_scheme  = 'no-local-version'
+exact = "True"
