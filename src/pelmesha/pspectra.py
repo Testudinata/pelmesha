@@ -158,25 +158,25 @@ def imzml2hdf5(path_list, dtypeconv='double', chunk_rowsize = "Auto", chunk_bsiz
     logger.log(f"Num of CPU for usage {cpu_num}")
     corenum_counter = Value('i',0) 
     ## Выгрузка данных с помощью ImzMLParser'a и их конвертация в hdf5 (в дальнейшем работаем с hdf5)
-    if __name__ == "pspectra":
-        logger.log(f"Creating Queue for getting information from processes")
-        print_queue = Manager().Queue()
-        logger.log(f"Creating Queue for controling processes for single process acessing to hdf5")
-        queue = Manager().Queue()
-        logger.log(f"Puting True to queue")
-        queue.put(True)
-        logger.log(f"Creating thread for print and visualizing progress")
-        t = Thread(target=printer,args=[print_queue])
-        t.start()
-        print_queue.put(len(sample_imzmlpath_list))
-        logger.log(f"Starting conversion imzml to hdf5")
-        with Pool(cpu_num,initializer=init_worker,initargs=['hdf5_writer',corenum_counter]) as p:
-            p.starmap(hdf5_writer,product(sample_imzmlpath_list,[queue],[print_queue],[dtypeconv],[chunk_rowsize],[chunk_bsize]))
-        p.join()
-        logger.log(f"Conversion ended")
-        print_queue.put(Sentinel()) # Остановка работы функции printer
-        t.join() # Wait for all printing to complete
-        ##
+    logger.log(f"Creating Queue for getting information from processes")
+    manager = Manager()
+    print_queue = manager.Queue()
+    logger.log(f"Creating Queue for controling processes for single process acessing to hdf5")
+    queue = manager.Queue()
+    logger.log(f"Puting True to queue")
+    queue.put(True)
+    logger.log(f"Creating thread for print and visualizing progress")
+    t = Thread(target=printer,args=[print_queue])
+    t.start()
+    print_queue.put(len(sample_imzmlpath_list))
+    logger.log(f"Starting conversion imzml to hdf5")
+    with Pool(cpu_num,initializer=init_worker,initargs=['hdf5_writer',corenum_counter]) as p:
+        p.starmap(hdf5_writer,product(sample_imzmlpath_list,[queue],[print_queue],[dtypeconv],[chunk_rowsize],[chunk_bsize]))
+    p.join()
+    logger.log(f"Conversion ended")
+    print_queue.put(Sentinel()) # Остановка работы функции printer
+    t.join() # Wait for all printing to complete
+    ##
     logger.ended()
     return None
 
