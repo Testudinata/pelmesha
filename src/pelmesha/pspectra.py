@@ -158,7 +158,7 @@ def imzml2hdf5(path_list, dtypeconv='double', chunk_rowsize = "Auto", chunk_bsiz
     logger.log(f"Num of CPU for usage {cpu_num}")
     corenum_counter = Value('i',0) 
     ## Выгрузка данных с помощью ImzMLParser'a и их конвертация в hdf5 (в дальнейшем работаем с hdf5)
-    if __name__ == "__main__":
+    if __name__ == "pspectra":
         logger.log(f"Creating Queue for getting information from processes")
         print_queue = Manager().Queue()
         logger.log(f"Creating Queue for controling processes for single process acessing to hdf5")
