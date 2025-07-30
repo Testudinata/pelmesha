@@ -29,6 +29,7 @@ def hdf5_Load(path_list, file_end=''):
     :return: dictionary with hdf5 file objects
     :rtype: dict
     """
+    logger("hdf5_Load",**{locals()})
     file_end=file_end+".hdf5"
     if isinstance(path_list, str):
         path_list=[path_list]
@@ -40,7 +41,8 @@ def hdf5_Load(path_list, file_end=''):
         Slide_name=os.path.basename(os.path.dirname(path))
         Slide_data[Slide_name] = File(path,"r")
     if not hdf5path_list:
-        warnings.warn(f"Data not readed due to missing hdf5 with spectra data (hdf5 with end \"{file_end}\" in the name is missing)", stacklevel=2)
+        logger.warn(f"Data not readed due to missing hdf5 with spectra data (hdf5 with end \"{file_end}\" in the name is missing)", stacklevel=2)
+    logger.ended()
     return Slide_data
 
 def specdata_Load(path_list):
@@ -92,7 +94,7 @@ def peakl2DF(batch_path, extr_columns=None,extract_coords = True, return_source_
     :rtype: `dict` or `tuple`
     """
     
-    
+    logger("peakl2DF",**{locals()})
     if isinstance(batch_path, str):
         batch_path=[batch_path]
 
@@ -101,8 +103,10 @@ def peakl2DF(batch_path, extr_columns=None,extract_coords = True, return_source_
     Slide_data = specdata_Load(batch_path)
     if return_source_path:
         table,sourcse_path = table2DF(Slide_data,feat_type,extr_columns,extract_coords, return_source_path, pivoting4val)
+        logger.ended()
         return table,sourcse_path
     else:
+        logger.ended()
         return table2DF(Slide_data,feat_type,extr_columns,extract_coords, return_source_path, pivoting4val) 
 
 def feat2DF(batch_path, extr_columns=None,extract_coords = True, return_source_path = False, pivoting4val = None):
@@ -128,7 +132,7 @@ def feat2DF(batch_path, extr_columns=None,extract_coords = True, return_source_p
 
     :rtype: `dict` or `tuple`
     """
-    
+    logger("feat2DF",**{locals()})
     
     if isinstance(batch_path, str):
         batch_path=[batch_path]
@@ -138,12 +142,14 @@ def feat2DF(batch_path, extr_columns=None,extract_coords = True, return_source_p
     Slide_data = features_Load(batch_path)
     if return_source_path:
         table,sourcse_path = table2DF(Slide_data,feat_type,extr_columns,extract_coords, return_source_path, pivoting4val)
+        logger.ended()
         return table,sourcse_path
     else:
+        logger.ended()
         return table2DF(Slide_data,feat_type,extr_columns,extract_coords, return_source_path, pivoting4val) 
     
 def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, return_source_path = False, pivoting4val = None):
-
+    logger("table2DF",**{locals()})
     headlist = {0:"spectra_ind",1:None,2:"Intensity",3:"Area",4:"SNR",5:"PextL",6:"PextR",7:"FWHML",8:"FWHMR",9:"Noise",10:"Mean noise"}
 
     DataFeat ={}
@@ -158,9 +164,9 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
                 try:
                     headers = list(Slide_data[slides][sample][roi][feat_type].attrs['Column headers'])
                 except KeyError as error:
-                    warnings.warn(f"An error occurred on {slides} {sample} {roi}: {error}")
+                    logger.warn(f"An error occurred on {slides} {sample} {roi}: {error}")
                     try:
-                        warnings.warn(f'HDF5 file from source {Source_path[slides]} on {slides} {sample} {roi} has datasets: {Slide_data[slides][sample][roi].keys()}')
+                        logger.warn(f'HDF5 file from source {Source_path[slides]} on {slides} {sample} {roi} has datasets: {Slide_data[slides][sample][roi].keys()}')
                     except:
                         pass
                     continue
@@ -181,7 +187,7 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
                         try:
                             column_list.append(headers.index(head))
                         except:
-                            print(f"{head} doesn't founded in hdf5 column headers")
+                            logger.warn(f"{head} doesn't founded in hdf5 column headers of {slides} {sample} {roi}")
                 if Slide_data[slides][sample][roi][feat_type].shape[1] == len(headers):
 
                     DataFeat[slides][sample][roi][feat_type]=pd.DataFrame(Slide_data[slides][sample][roi][feat_type], columns= headers).sort_values(['spectra_ind',mz_type])[Slide_data[slides][sample][roi][feat_type].attrs['Column headers'][column_list]]
@@ -190,16 +196,16 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
                 try:
                     DataFeat[slides][sample][roi][feat_type]=DataFeat[slides][sample][roi][feat_type].astype({"spectra_ind": int})
                 except:
-                    print("spectra_ind to int is unsuccessful")
+                    logger.warn("spectra_ind to int is unsuccessful")
                     pass
                 if extract_coords:
                     try:
                         #print(Slide_data[slides][sample][roi]['xy'][:])
                         DataFeat[slides][sample][roi]["xy"] = pd.DataFrame(Slide_data[slides][sample][roi]['xy'][:],columns=["x","y"], index=pd.Index(range(Slide_data[slides][sample][roi]['xy'].shape[0]),name="spectra_ind"))
                         
-                        print(f"{slides}, {sample} and roi {roi}. x and y coordinates were extracted")
+                        logger.info(f"{slides}, {sample} and roi {roi}. x and y coordinates were extracted")
                         DataFeat[slides][sample][roi]["z"] = pd.Series(Slide_data[slides][sample][roi]['z'][:],columns=['z'], index=pd.Index(range(Slide_data[slides][sample][roi]['z'].shape[0]),name="spectra_ind"))
-                        print(f"{slides}, {sample} and roi {roi}. z coordinates were extracted")
+                        logger.info(f"{slides}, {sample} and roi {roi}. z coordinates were extracted")
                     except:
                         pass#print(f"{slides}, {sample} and roi {roi}. The extraction of other coordinates was unsuccessful")
                 if pivoting4val:
@@ -212,9 +218,12 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
         Slide_data[slides].close()
     if not DataFeat:
         warnings.warn(f"Warning. Any dataset doesn't have {feat_type} data")
+        logger.ended()
         return
     if return_source_path:
+        logger.ended()
         return DataFeat, Source_path
+    logger.ended()
     return DataFeat
 
 def grouped_feat2DF(path, extr_columns=None,extract_coords = True, pivoting4val = None):
@@ -459,6 +468,7 @@ def find_paths(path_list,file_end = '.imzML'):
     :return: list with full paths to files
     :rtype: list
     """
+    logger("find_paths",{**locals()})
     file_end = file_end.lower()
     files_path_list = []
     for path in path_list:
@@ -469,7 +479,7 @@ def find_paths(path_list,file_end = '.imzML'):
                 for file in files: 
                     if file.lower().endswith(file_end):
                         files_path_list.append(os.path.join(root,file))
-   
+    logger.ended()
     return files_path_list
 
 class logger:
