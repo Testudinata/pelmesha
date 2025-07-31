@@ -38,7 +38,7 @@ def hdf5_Load(path_list, file_end=''):
     
     Slide_data={}
     for path in hdf5path_list:
-        Slide_name=os.path.basename(os.path.dirname(path))
+        Slide_name=os.path.basename(path.replace(file_end,""))
         Slide_data[Slide_name] = File(path,"r")
     if not hdf5path_list:
         logger.warn(f"Data not readed due to missing hdf5 with spectra data (hdf5 with end \"{file_end}\" in the name is missing)", stacklevel=2)
