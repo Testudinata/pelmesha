@@ -89,7 +89,7 @@ msalign.__doc__ = Aligner.__doc__
 
 ### Base functions
 
-def imzml2hdf5(path_list, dtypeconv='double', chunk_rowsize = "Auto", chunk_bsize = 10000000, reconv = False):
+def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsize = 10000000, reconv = False):
     """
     Description
     ----
@@ -184,7 +184,7 @@ def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #
               align_peaks = None, weights_list=None, max_shift_mz=0.95, only_shift = True,params2align={},
               resample_to_dots = None, 
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
-              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='double',
+              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
               free_cores=1):
     """
     Общее описание
@@ -446,7 +446,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
               oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0, peaklocation=1,rel_heightfilter=0,
               SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='double',
+              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
               free_cores=1):
     """
     Общее описание
@@ -808,7 +808,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
 
 def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0.5, peaklocation=1,rel_heightfilter=0,
               SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              draw = True, mz_diap4draw = None, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='double',
+              draw = True, mz_diap4draw = None, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
               free_cores=1):
     """
     Общее описание
@@ -1573,7 +1573,7 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
     logger.ended()
     return
             
-def proc2peaklist_parbatched(sl, sample ,roi ,sample_file_path,args2peakpicking={},dtypeconv='double',print_queue=None):
+def proc2peaklist_parbatched(sl, sample ,roi ,sample_file_path,args2peakpicking={},dtypeconv='single',print_queue=None):
     """
     Общее описание
     ----
@@ -2345,7 +2345,6 @@ def savgol(y, window, cycles, order=3): #Не работает!!!!!!!!!!!!!!!!!!
 def MAD(y,nan_policy):
     return sqrt(2*math.log(len(y)))*median_abs_deviation(y,nan_policy)/0.6745 # from matlab "mad" algorithm noise description (but this is for y_h to filter out noisy components in the first high-band decomposition of DCWT peak picking)
 
-
 ### Utility functions for peakpicking
 def mspeaks_opt(X, Y,spectra_ind, fwhhfilter=0,oversegmentationfilter=0,heightfilter=0,rel_heightfilter=0,peaklocation=1,noise_func = np.std ,noise_est_iterations = 3, SNR_threshold = 3.5,print_queue = None):
     """
@@ -2773,7 +2772,7 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
               oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0, peaklocation=1,rel_heightfilter=0,
               SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              mz_diap4draw = None,dtypeconv='double'):
+              mz_diap4draw = None,dtypeconv='single'):
     """
     Общее описание
     ----

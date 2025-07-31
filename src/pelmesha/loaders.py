@@ -29,7 +29,7 @@ def hdf5_Load(path_list, file_end=''):
     :return: dictionary with hdf5 file objects
     :rtype: dict
     """
-    logger("hdf5_Load",**{locals()})
+    logger("hdf5_Load",{**locals()})
     file_end=file_end+".hdf5"
     if isinstance(path_list, str):
         path_list=[path_list]
@@ -94,7 +94,7 @@ def peakl2DF(batch_path, extr_columns=None,extract_coords = True, return_source_
     :rtype: `dict` or `tuple`
     """
     
-    logger("peakl2DF",**{locals()})
+    logger("peakl2DF",{**locals()})
     if isinstance(batch_path, str):
         batch_path=[batch_path]
 
@@ -132,7 +132,7 @@ def feat2DF(batch_path, extr_columns=None,extract_coords = True, return_source_p
 
     :rtype: `dict` or `tuple`
     """
-    logger("feat2DF",**{locals()})
+    logger("feat2DF",{**locals()})
     
     if isinstance(batch_path, str):
         batch_path=[batch_path]
@@ -149,7 +149,7 @@ def feat2DF(batch_path, extr_columns=None,extract_coords = True, return_source_p
         return table2DF(Slide_data,feat_type,extr_columns,extract_coords, return_source_path, pivoting4val) 
     
 def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, return_source_path = False, pivoting4val = None):
-    logger("table2DF",**{locals()})
+    logger("table2DF",{**locals()})
     headlist = {0:"spectra_ind",1:None,2:"Intensity",3:"Area",4:"SNR",5:"PextL",6:"PextR",7:"FWHML",8:"FWHMR",9:"Noise",10:"Mean noise"}
 
     DataFeat ={}
