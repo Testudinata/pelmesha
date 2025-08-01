@@ -290,8 +290,8 @@ def Roi_Pgrouping_KD(Paths, extr_columns=None,path2save=None,**Pgrouping_KD_kwar
             hdf5file.attrs["Column headers"] = list(Aligned_rois.columns)
             print(f"Grouped features is saved in hdf5 file")
             hdf5file.close()
-    except:
-        logger.warn(f"Error on {index}")
+    except Exception as error:
+        logger.warn(f"Error on {index}: \n{error}")
 
     ########## under construction
     if pivoting4val:

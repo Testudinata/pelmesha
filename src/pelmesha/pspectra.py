@@ -2677,6 +2677,7 @@ def mspeaks_arrayopt(X, Y_array,spectra_ind, fwhhfilter=0,oversegmentationfilter
             val_max[j] = np.maximum(val_max[j], val_max[j + 1])
             val_max = np.delete(val_max, j + 1)
         signal_num = len(val_max)
+        
         ## Area calculation
         pkA = np.empty((signal_num,))
         for idx in range(signal_num):
