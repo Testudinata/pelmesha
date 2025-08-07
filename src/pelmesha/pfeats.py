@@ -43,8 +43,8 @@ def Pgrouping_KD(ftable, columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_ke
     Функция группирует близкостоящие значения пиков mz к определённому значению Peak на основе оценки плотности вероятности встречаемости mz.  
 
     :param ftable: Источник данных. Может быть уже таблицей/датафреймом, а может быть ссылкой на папку с данными, которые надо выгрузить
-    :param columns: Лист номеров столбцов, которые войдут в датафрейм фич, где 0 и 1 - экстрагируются всегда (`"spectra_ind"` и `"mz"` или `"Peak"`). Default: `None` - экстракция всех столбцов
-    2 - `"Intensity"`, 3 -`"Area"`, 4 - `"SNR"`, 5 - `"PextL"`, 6 - `"PextR"`, 7 - `"FWHML"`, 8 - `"FWHMR"`, 9-`"Noise"`, 10-`"Mean noise"`
+    :param columns: Лист столбцов, которые войдут в датафрейм фич, где `"spectra_ind"` и `"mz"` или `"Peak"` - экстрагируются всегда. Default: `None` - экстракция всех столбцов
+    `"Intensity"`, `"Area"`, `"SNR"`, `"PextL"`, `"PextR"`, `"FWHML"`, `"FWHMR"`,`"Noise"`, `"Mean noise"`
     :param KD_bandwidth: {`"med_FWHM"`,`"mz_discret"`,`"ISJ"`,`"silverman"`,`"scott"`, `float`} - выбор полосы пропускания, либо алгоритм её определения.
     
         `"med_FWHM"` - полоса пропускания - медианное значение дисперсии пиков, которая определяется из медианы ширины на полувысоте. 
@@ -94,19 +94,17 @@ def Pgrouping_KD(ftable, columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_ke
     """
     
     logger("Pgrouping_KD",{**locals()},path2save)
-    if not columns:
-        columns=list(range(11))
-    if not isinstance(columns,list):
+
+    if not isinstance(columns,list) and columns:
         columns = [columns]
     cpu_num = cpu_count()-cpu_free
     tol = tol/1e+6
     min_res = min_res/1e+6
     if KD_bandwidth.lower() =='med_fwhm':
-        columns=columns+[7,8]
+        columns=columns+["FWHML", "FWHMR"]
         
     # Вариация для рассчётов для уже готовой таблицы или путей к таблицам features 
-
-    columns=list(set([0,1]+columns))
+    columns=list(set(columns))
 
     if isinstance(ftable, str):
         ftableISAPATH=True
@@ -755,13 +753,11 @@ def mspeaks_KD(X, Y,oversegmentationfilter=0,peaklocation=1):
     """
     n = X.size
     # Robust valley finding
-    h = np.concatenate(([-1], np.where(np.diff(Y) != 0)[0], [n-1]))
-    g = (np.diff(Y[[h[1],*h[1:]]]) <= 0) & (np.diff(Y[[*h[1:],h[-1]]]) >= 0)
-    
-    left_min = h[np.concatenate([g, [False]])] + 1
-    right_min = h[np.concatenate([[False], g])]
-    left_min = left_min[:-1]
-    right_min = right_min[1:]
+    valley_dots = np.concatenate((np.where(np.diff(Y) != 0)[0], [n-1]))    
+    loc_min = np.diff(Y[valley_dots])
+    loc_min = (np.array([True,*(loc_min < 0)])) & np.array(([*(loc_min > 0),True]))
+    left_min = np.concatenate([[-1],valley_dots[:-1]])[loc_min][:-1] + 1
+    right_min = valley_dots[loc_min][1:]
     # Compute max and min for every peak
     size = left_min.shape
     val_max = np.empty(size)

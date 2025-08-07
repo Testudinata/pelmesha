@@ -444,9 +444,9 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
               align_peaks = None, weights_list=None, max_shift_mz=0.95,only_shift = True,params2align={},
               resample_to_dots = None, 
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
-              oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0, peaklocation=1,rel_heightfilter=0,
-              SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
+              oversegmentationfilter = None, fwhhfilter = None, heightfilter=None, peaklocation=1,rel_heightfilter=None,
+              SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3, Calc_peak_area = True,
+              draw = True, mz_diap4draw = None, rewrite = False, Ram_GB = 3, h5chunk_size_MB = 10,dtypeconv='single',
               free_cores=1):
     """
     Общее описание
@@ -540,20 +540,25 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
     params2align["only_shift"]=only_shift
     
     if not isinstance(peaklocation, (int, float)) or not np.isscalar(peaklocation) or peaklocation < 0 or peaklocation > 1:
-        raise ValueError("mspeaks: Invalid peak location")
+        raise ValueError("peaks_prop: Invalid peak location")
     if not isinstance(fwhhfilter, (int, float)) or not np.isscalar(fwhhfilter) or fwhhfilter < 0:
-        raise ValueError("mspeaks: Invalid FWHH filter")
+        if not isinstance(fwhhfilter,type(None)):
+            raise ValueError("peaks_prop: Invalid FWHH filter")
     if not isinstance(oversegmentationfilter, (int, float)) or not np.isscalar(oversegmentationfilter):
         if isinstance(oversegmentationfilter, str):
             oversegmentationfilter=oversegmentationfilter.lower()
+        elif isinstance(oversegmentationfilter, type(None)):
+            pass
         else:
-            raise ValueError("mspeaks: Invalid oversegmentation filter")
+            raise ValueError("peaks_prop: Invalid oversegmentation filter")
     elif oversegmentationfilter < 0:
-        raise ValueError("mspeaks: Invalid oversegmentation filter")
+        raise ValueError("peaks_prop: Invalid oversegmentation filter")
     if not isinstance(heightfilter, (int, float)) or not np.isscalar(heightfilter) or heightfilter < 0:
-        raise ValueError("mspeaks: Invalid height filter")
+        if not isinstance(heightfilter, type(None)):
+            raise ValueError("peaks_prop: Invalid height filter")
     if not isinstance(rel_heightfilter, (int, float)) or not np.isscalar(rel_heightfilter) or rel_heightfilter < 0 or rel_heightfilter > 100:
-        raise ValueError("mspeaks: Invalid relative height filter")
+        if not isinstance(rel_heightfilter, type(None)):
+            raise ValueError("peaks_prop: Invalid relative height filter")
 
 
     #Create thread for printing text in multiprocessing
@@ -612,7 +617,7 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
         #### Подготовка аргументов для процессинга данных
         args2procc = Manager().dict({"baseliner_algo": baseliner_algo, "params2baseliner_algo": params2baseliner_algo,"params2align":params2align, "align_peaks":align_peaks,"weights_list":weights_list, "dots_shift":max_shift_mz,"smooth_algo":smooth_algo,"smooth_window":smooth_window, "smooth_cycles":smooth_cycles})
         args2peakpicking = Manager().dict({"oversegmentationfilter": oversegmentationfilter, "fwhhfilter": fwhhfilter, "heightfilter": heightfilter,"rel_heightfilter":rel_heightfilter, "peaklocation": peaklocation,
-                        "SNR_threshold": SNR_threshold,"noise_func": noise_func, "noise_est_iterations": noise_est_iterations, "print_queue":print_queue})
+                        "SNR_threshold": SNR_threshold,"noise_func": noise_func, "noise_est_iterations": noise_est_iterations, "Calc_peak_area": Calc_peak_area})
             ## Определение байтового размера одной точки
         args_batches=list(args_batch+(resample_to_dots,args2procc,args2peakpicking,queue, chunk_size) for args_batch in args_batches)
         ##II. Coordinates, metadata and organization of input arguments for parallelized and batched proccessing of spectra - DONE
@@ -761,7 +766,6 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
                     plt.show()
                     del diapold
                 
-       
         print_queue.put(0) #closing old tqdm bar
         data_obj_feat.close()            
         with open(os.path.join(file_path,"Processing_settings.txt"), "w") as file:
@@ -806,9 +810,9 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
     gc.collect()
     return
 
-def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0.5, peaklocation=1,rel_heightfilter=0,
-              SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
-              draw = True, mz_diap4draw = None, Ram_GB = 1, h5chunk_size_MB = 10,dtypeconv='single',
+def proc2peaklist(data_obj_path, oversegmentationfilter = None, fwhhfilter = None, heightfilter=None, peaklocation=1,rel_heightfilter=None,
+              SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3, Calc_peak_area = True,
+              draw = True, mz_diap4draw = None, Ram_GB = 3, h5chunk_size_MB = 10,dtypeconv='single',
               free_cores=1):
     """
     Общее описание
@@ -881,7 +885,7 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = 0, fwhhfilter = 0, hei
     elif noise_est == "std":
         noise_func=np.std
     args2peakpicking = Manager().dict({"oversegmentationfilter": oversegmentationfilter, "fwhhfilter": fwhhfilter, "heightfilter": heightfilter,"rel_heightfilter":rel_heightfilter, "peaklocation": peaklocation,
-                        "SNR_threshold": SNR_threshold,"noise_func": noise_func, "noise_est_iterations": noise_est_iterations, "print_queue":print_queue})
+                        "SNR_threshold": SNR_threshold,"noise_func": noise_func, "noise_est_iterations": noise_est_iterations, "print_queue":print_queue, "Calc_peak_area":Calc_peak_area})
 
     
     path_list=find_paths(data_obj_path,file_end = '_specdata.hdf5')
@@ -1491,6 +1495,16 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
     loc_args2procc = args2procc.copy()
 
     logger.log(f"Processing data")
+    if args2peakpicking["SNR_threshold"] and args2peakpicking["Calc_peak_area"]:
+        headers = ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
+    elif args2peakpicking["SNR_threshold"] :
+        headers = ["spectra_ind","mz","Intensity","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
+    elif args2peakpicking["Calc_peak_area"]:
+        headers = ["spectra_ind","mz","Intensity","Area","PextL","PextR","FWHML","FWHMR"]
+    else: 
+        headers = ["spectra_ind","mz","Intensity","PextL","PextR","FWHML","FWHMR"]
+    peaks_prop_infunc.headers = headers[3:]
+    
     if dcont:
         
         ## Preallocating int
@@ -1516,21 +1530,22 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
                 loc_args2procc["dots_shift"] = int(args2procc["dots_shift"]/(np.median(np.diff(data_mz))))
             data_int = DataProc_base(data_int,data_mz,Baseline(data_mz),**loc_args2procc)
         ## Получение пиков
-        
-        peaklists = mspeaks_arrayopt(data_mz,data_int,nspec_range,**args2peakpicking)
+  
+        peaklists = peaks_prop_array(data_mz,data_int,nspec_range,**args2peakpicking)
+        # peaklists = mspeaks_arrayopt(data_mz,data_int,nspec_range,**args2peakpicking)
         logger.log(f"Processing continues data ended")
     else:
-
+        
         peaklists={}
         if resample_to_dots:
             data_mz = np.array(list(np.linspace(*discon_resample_range,resample_to_dots)))
-            loc_args2procc["smooth_window"] = int(args2procc["smooth_window"]/(np.median(np.diff(data_mz))))
+            loc_args2procc["smooth_window"] = int(args2procc["smooth_window"]/(np.median(np.diff(data_mz)))) #conversion of window size from m/z to dots
             if loc_args2procc["params2align"]["only_shift"]:
                 loc_args2procc["dots_shift"] = int(args2procc["dots_shift"]/(np.median(np.diff(data_mz))))
             baseliner = Baseline(data_mz)
             for n, idx in enumerate(idx_range):
                 data_mz_old,data_int=sample_imzml.getspectrum(idx)
-                peaklists[n] = mspeaks_opt(data_mz, DataProc_resample1d(data_int,data_mz_old,data_mz,baseliner,**loc_args2procc), 
+                peaklists[n] = peaks_prop_infunc(data_mz, DataProc_resample1d(data_int,data_mz_old,data_mz,baseliner,**loc_args2procc), 
                                            nspec_range[n], **args2peakpicking)
          
         else:
@@ -1542,9 +1557,8 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
                 if loc_args2procc["params2align"]["only_shift"]:
                     loc_args2procc["dots_shift"] = int(args2procc["dots_shift"]/(np.median(np.diff(data_mz))))
                
-                peaklists[n] = mspeaks_opt(data_mz, DataProc_base1d(sample_imzml.getspectrum(idx)[1],data_mz,Baseline(data_mz),**loc_args2procc), 
+                peaklists[n] = peaks_prop_infunc(data_mz, DataProc_base1d(sample_imzml.getspectrum(idx)[1],data_mz,Baseline(data_mz),**loc_args2procc), 
                                            nspec_range[n], **args2peakpicking)
-               
         peaklists = np.vstack(tuple(peaklists.values()))
         logger.log(f"Processing discontinues data ended")
     ### Запись пиков в hdf5 очередью
@@ -1561,10 +1575,9 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
         except:
             logger.log(f"Creating peaklist dataset for {sample} {roi}")
             hdf5.create_dataset(sample + "/" + roi + "/peaklists",peaklists.shape, maxshape = (None, 11), chunks=(chunk_size, 11))
-
             hdf5[sample][roi]["peaklists"][:] = peaklists
 
-            hdf5[sample][roi]["peaklists"].attrs["Column headers"] = ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
+            hdf5[sample][roi]["peaklists"].attrs["Column headers"] = headers
    
     logger.log(f"Writing for {sample} {roi} ended succesfully")
     
@@ -1613,10 +1626,18 @@ def proc2peaklist_parbatched(sl, sample ,roi ,sample_file_path,args2peakpicking=
     :rtype: `NoneType`
     """
     ## Пояснение, что какого-то файла не удалось найти/открыть при массовой обработке данных
-    
+    if args2peakpicking["SNR_threshold"] and args2peakpicking["Calc_peak_area"]:
+        headers = ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
+    elif args2peakpicking["SNR_threshold"] :
+        headers = ["spectra_ind","mz","Intensity","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
+    elif args2peakpicking["Calc_peak_area"]:
+        headers = ["spectra_ind","mz","Intensity","Area","PextL","PextR","FWHML","FWHMR"]
+    else: 
+        headers = ["spectra_ind","mz","Intensity","PextL","PextR","FWHML","FWHMR"]
+    peaks_prop_infunc.headers = headers[3:]
     with File(sample_file_path,'r', libver='latest', swmr=True) as data_obj:
         idx_range = range(sl.start,sl.stop)
-        peaklists = mspeaks_arrayopt(data_obj[sample][roi]['mz'][:].astype(dtypeconv), data_obj[sample][roi]['int'][idx_range,:].astype(dtypeconv),idx_range,**args2peakpicking)
+        peaklists = peaks_prop_array(data_obj[sample][roi]['mz'][:].astype(dtypeconv), data_obj[sample][roi]['int'][idx_range,:].astype(dtypeconv),idx_range,**args2peakpicking)
     print_queue.put(True)
     return peaklists
 
@@ -2346,7 +2367,7 @@ def MAD(y,nan_policy):
     return sqrt(2*math.log(len(y)))*median_abs_deviation(y,nan_policy)/0.6745 # from matlab "mad" algorithm noise description (but this is for y_h to filter out noisy components in the first high-band decomposition of DCWT peak picking)
 
 ### Utility functions for peakpicking
-def mspeaks_opt(X, Y,spectra_ind, fwhhfilter=0,oversegmentationfilter=0,heightfilter=0,rel_heightfilter=0,peaklocation=1,noise_func = np.std ,noise_est_iterations = 3, SNR_threshold = 3.5,print_queue = None):
+def peaks_prop_array(X, Y_array,spectra_ind, fwhhfilter=None,oversegmentationfilter=None,heightfilter=None,rel_heightfilter=None,peaklocation=1,noise_func = np.std ,noise_est_iterations = 3, SNR_threshold = None, Calc_peak_area = True):
     """
     Общее описание
     ----
@@ -2354,12 +2375,13 @@ def mspeaks_opt(X, Y,spectra_ind, fwhhfilter=0,oversegmentationfilter=0,heightfi
 
     :param X: mz
     :param Y: Intensity
-    :param oversegmentationfilter: фильтр для близких друг к другу пиков. Default `0`
-    :param fwhhfilter: Фильтр пиков по ширине на полувысоте пиков больше указанного значения. Default is `0`
-    :param heightfilter: Фильтр пиков по абсолютному значению интенсивности ниже указанного значения. Default is `0`
+    :param spectra_ind: индекс спектра
+    :param oversegmentationfilter: фильтр для близких друг к другу пиков. Default `None`
+    :param fwhhfilter: Фильтр пиков по ширине на полувысоте пиков больше указанного значения. Default is `None`
+    :param heightfilter: Фильтр пиков по абсолютному значению интенсивности ниже указанного значения. Default is `None`
     :param peaklocation: Параметр фильтрации пиков с oversegmentationfilter. Default is `1`
-    :param rel_heightfilter: Фильтр пиков по относительному значению интенсивности. Default is `0`
-    :param SNR_threshold: Фильтр пиков по их SNR. Default is `3.5`
+    :param rel_heightfilter: Фильтр пиков по относительному значению интенсивности. Default is `None`
+    :param SNR_threshold: Фильтр пиков по их SNR. Default is `None`
     :param noise_func: функция оценки шума. Пока только `std` и `mad` и для ускорения рассчётов, подсчёт идёт сразу по всему спектру в несколько итераций, где после каждой итерации определяются какие точки относятся к шуму, а какие к сигналу. Default is `np.std`
     :param noise_est_iterations: количество итераций определения шума. Оптимально более 3 итераций. Default is `3`
     
@@ -2377,162 +2399,34 @@ def mspeaks_opt(X, Y,spectra_ind, fwhhfilter=0,oversegmentationfilter=0,heightfi
     :return: peaklist with peak properties
     :rtype: `np.array`
     """
-    nY =Y.shape[0]
-    # Robust valley finding
-    h = np.concatenate(([-1], np.where(np.diff(Y) != 0)[0], [nY-1]))
-    g = (np.diff(Y[[h[1],*h[1:]]]) <= 0) & (np.diff(Y[[*h[1:],h[-1]]]) >= 0)
     
-    left_min = h[np.concatenate([g, [False]])] + 1
-    right_min = h[np.concatenate([[False], g])]
-    #print_queue.put('base')
-    left_min = left_min[:-1]
-    right_min = right_min[1:]
-    # Compute max, and min for every peak
-    size = left_min.shape
-    #lfwhh = np.empty(size)
-    #rfwhh = np.empty(size)
-    val_max = np.empty(size)
-    #pos_peak = np.empty(size)
-    for idx, [lm, rm] in enumerate(zip(left_min, right_min)):
-        #pp = lm + np.argmax(Y[lm:rm])
-        vm = np.max(Y[lm:rm])
-        #valmin = np.min(Y[lm:rm+1])
-        val_max[idx] = vm 
-        #pos_peak[idx] = pp
-        
-        #lfwhh[idx] = interp1d(Y[lm:pp+1]-valmin, X[lm:pp+1], kind='linear',fill_value='extrapolate')((vm-valmin)/2)
-        #rfwhh[idx] = interp1d(Y[pp:rm+1][::-1]-valmin, X[pp:rm+1][::-1], kind='linear',fill_value="extrapolate")((vm-valmin)/ 2)
+    xsize = X.size
+    peaklists = {}     
+    for ns, ind in enumerate(spectra_ind):
+        Y=Y_array[ns,:]
+        peaklists[ns]=peaks_prop_infunc(X,Y,np.where(np.diff(Y) !=0)[0],xsize, ind,fwhhfilter,oversegmentationfilter,heightfilter,rel_heightfilter,peaklocation,noise_func,noise_est_iterations, SNR_threshold, Calc_peak_area)
+    return np.vstack(tuple(peaklists.values()))
 
-
-# Handle NaN values
-#lfwhh = np.where(np.isnan(lfwhh), X[left_min], lfwhh)
-#rfwhh = np.where(np.isnan(rfwhh), X[right_min], rfwhh)
-
-    
-    #print_queue.put('filt')
-    # Remove peaks below the height, relative height
-    k = (val_max >= heightfilter) & (val_max/max(Y) >= rel_heightfilter)
-    val_max = val_max[k]
-    #lfwhh = lfwhh[k]
-    #rfwhh = rfwhh[k]
-    left_min = left_min[k]
-    right_min = right_min[k]
-    
-    # Remove peaks below the SNR thresholds
-    
-    noise_points = np.array([True]*nY) # Zero iteration
-
-    for it in range(noise_est_iterations):
-        
-        for idx in np.where(((val_max-np.mean(Y[noise_points]))/noise_func(Y[noise_points])>=SNR_threshold))[0]:
-            sl = slice(left_min[idx],right_min[idx]+1)
-            noise_points[sl] = False
-    
-    noise = noise_func(Y[noise_points])
-    mean_noise = np.mean(Y[noise_points])
-    k = (val_max-mean_noise)/noise>=SNR_threshold
-
-    val_max=val_max[k]
-    #lfwhh=lfwhh[k] 
-    #rfwhh=rfwhh[k]
-    left_min=left_min[k]
-    right_min=right_min[k]
-    #print_queue.put('FWHM')
-
-    # Compute FWHH for every peak
-    size = left_min.shape
-    lfwhh = np.empty(size)
-    rfwhh = np.empty(size)
-    pos_peak = np.empty(size)
-    for idx, [lm, rm, vm] in enumerate(zip(left_min, right_min,val_max)):
-        # pp = lm + np.argmax(Y[lm:rm])
-        
-        # valmin = np.min(Y[lm:rm+1]) 
-        # pos_peak[idx] = pp
-        
-        # lfwhh[idx] = interp1d(Y[lm:pp+1]-valmin, X[lm:pp+1], kind='linear',fill_value='extrapolate')((vm-valmin)/2)
-        # rfwhh[idx] = interp1d(Y[pp:rm+1][::-1]-valmin, X[pp:rm+1][::-1], kind='linear',fill_value="extrapolate")((vm-valmin)/ 2)
-        pp = lm + np.argmax(Y[lm:rm])
-        
-        #valmin = np.min(Y[lm:rm+1])
-        pos_peak[idx] = pp
-        
-        # lfwhh[idx] = interp1d(Y[lm:pp+1]-valmin, X[lm:pp+1], kind='linear',fill_value=X[lm])((vm-valmin)/2)
-        # rfwhh[idx] = interp1d(Y[pp:rm+1][::-1]-valmin, X[pp:rm+1][::-1], kind='linear',fill_value=X[rm])((vm-valmin)/ 2)
-        lfwhh[idx] = interp1d(Y[lm:pp+1], X[lm:pp+1], kind='linear',fill_value=X[lm],bounds_error=False)(vm/2)
-        rfwhh[idx] = interp1d(Y[pp:rm+1][::-1], X[pp:rm+1][::-1], kind='linear',fill_value=X[rm],bounds_error=False)(vm/ 2)
-
-    # Remove peaks with FWHH thresholds
-    if fwhhfilter>0:
-        if isinstance(fwhhfilter,tuple):
-            k = ((rfwhh - lfwhh) >= fwhhfilter[0]) & ((rfwhh - lfwhh) <= fwhhfilter[1])
-        else:
-            k = (rfwhh - lfwhh) >= fwhhfilter
-        val_max = val_max[k]
-        lfwhh = lfwhh[k]
-        rfwhh = rfwhh[k]
-        left_min = left_min[k]
-        right_min = right_min[k]
-    # Remove oversegmented peaks
-    if isinstance(oversegmentationfilter,str):
-        oversegmentationfilter = np.median(rfwhh-lfwhh)
-        #print(oversegmentationfilter)
-    #val_max=np.array(val_max)
-    while True:
-        peak_thld = val_max * peaklocation - math.sqrt(np.finfo(float).eps)
-        pkX = np.empty(left_min.shape)
-        
-        for idx, [lm, rm, th] in enumerate(zip(left_min, right_min, peak_thld)):
-            mask = Y[lm:rm] >= th
-            if np.sum(mask) == 0:
-                pkX[idx]=np.nan
-            else:
-                pkX[idx] = np.sum(Y[lm:rm][mask] * X[lm:rm][mask]) / np.sum(Y[lm:rm][mask])
-        dpkX = np.concatenate(([np.inf], np.diff(pkX), [np.inf]))
-        
-        j = np.where((dpkX[1:-1] <= oversegmentationfilter) & (dpkX[1:-1] <= dpkX[:-2]) & (dpkX[1:-1] < dpkX[2:]))[0]
-        if j.size == 0:
-            break
-        left_min = np.delete(left_min, j + 1)
-        right_min = np.delete(right_min, j)
-        lfwhh = np.delete(lfwhh, j + 1)
-        rfwhh = np.delete(rfwhh, j)
-        
-        val_max[j] = np.maximum(val_max[j], val_max[j + 1])
-        val_max = np.delete(val_max, j + 1)
-    signal_num = len(val_max)
-
-    ## Area calculation
-    pkA = np.empty((signal_num,))
-    for idx in range(signal_num):
-        sl = slice(left_min[idx],right_min[idx]+1,1)
-        if min(Y[sl])<0:
-            pkA[idx] = np.trapz(Y[sl] - min(Y[sl]),X[sl])
-        else:
-            pkA[idx] = np.trapz(Y[sl],X[sl])
-    #print_queue.put(f"{[spectra_ind]*signal_num},{pkX},{val_max},{pkA},{val_max/noise},{X[left_min+1]},{X[right_min-1]},{lfwhh}, {rfwhh},{[noise]*signal_num},{[mean_noise]*signal_num}")
-    #return np.column_stack(([spectra_ind]*signal_num,pkX, val_max, pkA,val_max/noise,X[left_min], X[right_min],lfwhh, rfwhh,[noise]*signal_num,[mean_noise]*signal_num))
-    return np.column_stack(([spectra_ind]*signal_num,pkX, val_max, pkA,val_max/noise,X[left_min+1], X[right_min-1],lfwhh, rfwhh,[noise]*signal_num,[mean_noise]*signal_num))
-
-def mspeaks_arrayopt(X, Y_array,spectra_ind, fwhhfilter=0,oversegmentationfilter=0,heightfilter=0,rel_heightfilter=0,peaklocation=1,noise_func = np.std ,noise_est_iterations = 3, SNR_threshold = 3.5,print_queue = None):
+def peaks_prop_infunc(X,Y,valley_dots,xsize, spectra_ind,fwhhfilter,oversegmentationfilter,heightfilter,rel_heightfilter,peaklocation,noise_func,noise_est_iterations, SNR_threshold, Calc_peak_area):
     """
     Общее описание
     ----
-    Функция для получения пиклиста с характеристиками пиков из континуальных или обработанных resample'ом данных. Оптимизирована под использование в получении пиклистов в континуальных данных.
-
+    Функция для получения характеристик пиков спектра. Если в каком-то параметре стоит `None`, то функция не будет производить фильтрацию или расчёты и не будет добавлять свойство пиков на выходе, что может экономить время и память.
     :param X: mz
-    :param Y_array: Intensity array
-    :param oversegmentationfilter: фильтр для близких друг к другу пиков. Default `0`
-    :param fwhhfilter: Фильтр пиков по ширине на полувысоте пиков больше указанного значения. Default is `0`
-    :param heightfilter: Фильтр пиков по абсолютному значению интенсивности ниже указанного значения. Default is `0`
+    :param Y: Intensity
+    :param valley_dots: numpy array того какие точки спектра явлюятся наклонными. На входе подаётся как `np.where(np.diff(Y) != 0)[0]` или как строка этого результата, если Y матрица. Этот параметр нужен скорее для универсальности функции и оптимизации кол-ва расчётов/обращений. 
+    :param oversegmentationfilter: фильтр для близких друг к другу пиков. Default `None`
+    :param fwhhfilter: Фильтр пиков по ширине на полувысоте пиков больше указанного значения. Default is `None`
+    :param heightfilter: Фильтр пиков по абсолютному значению интенсивности ниже указанного значения. Default is `None`
     :param peaklocation: Параметр фильтрации пиков с oversegmentationfilter. Default is `1`
-    :param rel_heightfilter: Фильтр пиков по относительному значению интенсивности. Default is `0`
-    :param SNR_threshold: Фильтр пиков по их SNR. Default is `3.5`
+    :param rel_heightfilter: Фильтр пиков по относительному значению интенсивности. Default is `None`
+    :param SNR_threshold: Фильтр пиков по их SNR. Default is `None`
     :param noise_func: функция оценки шума. Пока только `std` и `mad` и для ускорения рассчётов, подсчёт идёт сразу по всему спектру в несколько итераций, где после каждой итерации определяются какие точки относятся к шуму, а какие к сигналу. Default is `np.std`
     :param noise_est_iterations: количество итераций определения шума. Оптимально более 3 итераций. Default is `3`
     
     :type X: `np.array`
     :type Y: `np.array`
+    :type valley_dots: `np.array`
     :type oversegmentationfilter: `float`
     :type fwhhfilter: `float`
     :type heightfilter: `float`
@@ -2545,115 +2439,80 @@ def mspeaks_arrayopt(X, Y_array,spectra_ind, fwhhfilter=0,oversegmentationfilter
     :return: peaklist with peak properties
     :rtype: `np.array`
     """
-
-    auto_oversegmfilter_bool = isinstance(oversegmentationfilter,str)
-    nspec, nY  = Y_array.shape
-    peaklists = {}     
+    props={}
     # Robust valley finding
+    valley_dots = np.concatenate((valley_dots, [xsize-1]))    
+    loc_min = np.diff(Y[valley_dots])
+    loc_min = (np.array([True,*(loc_min < 0)])) & np.array(([*(loc_min > 0),True]))
+    left_min = np.concatenate([[-1],valley_dots[:-1]])[loc_min][:-1] + 1
+    right_min = valley_dots[loc_min][1:]
 
-    valley_bool = np.diff(Y_array) != 0
-    for ns in range(nspec):
-        ind =spectra_ind[ns]
-        Y=Y_array[ns,:]
-        
-        h = np.concatenate(([-1], np.where(valley_bool[ns,:])[0], [nY-1]))
-        g = (np.diff(Y[[h[1],*h[1:]]]) <= 0) & (np.diff(Y[[*h[1:],h[-1]]]) >= 0)
+    # Compute max for every peak
+    size = left_min.shape
+    val_max = np.empty(size)
+    for idx, [lm, rm] in enumerate(zip(left_min, right_min)):
+        val_max[idx] = np.max(Y[lm:rm])
     
-        left_min = h[np.concatenate([g, [False]])] + 1
-        right_min = h[np.concatenate([[False], g])]
-        left_min = left_min[:-1]
-        right_min = right_min[1:]
-
-    # Compute max and min for every peak
-        size = left_min.shape
-        #lfwhh = np.empty(size)
-        #rfwhh = np.empty(size)
-        val_max = np.empty(size)
-        #pos_peak = np.empty(size)
-        for idx, [lm, rm] in enumerate(zip(left_min, right_min)):
-            #pp = lm + np.argmax(Y[lm:rm])
-            vm = np.max(Y[lm:rm])
-            #valmin = np.min(Y[lm:rm+1])
-            val_max[idx] = vm 
-            #pos_peak[idx] = pp
-            
-            #lfwhh[idx] = interp1d(Y[lm:pp+1]-valmin, X[lm:pp+1], kind='linear',fill_value='extrapolate')((vm-valmin)/2)
-            #rfwhh[idx] = interp1d(Y[pp:rm+1][::-1]-valmin, X[pp:rm+1][::-1], kind='linear',fill_value="extrapolate")((vm-valmin)/ 2)
-
-
-    # Handle NaN values
-    #lfwhh = np.where(np.isnan(lfwhh), X[left_min], lfwhh)
-    #rfwhh = np.where(np.isnan(rfwhh), X[right_min], rfwhh)
-
-        
-
-        # Remove peaks below the height, relative height
+    # Remove peaks below the height, relative height
+    if heightfilter and rel_heightfilter:
         k = (val_max >= heightfilter) & (val_max/max(Y) >= rel_heightfilter)
         val_max = val_max[k]
-        #lfwhh = lfwhh[k]
-        #rfwhh = rfwhh[k]
         left_min = left_min[k]
         right_min = right_min[k]
-        
-        # Remove peaks below the SNR thresholds
-        
-        noise_points = np.array([True]*nY) # Zero iteration
+    elif heightfilter:
+        k = (val_max >= heightfilter)
+        val_max = val_max[k]
+        left_min = left_min[k]
+        right_min = right_min[k]
+    elif rel_heightfilter:
+        k = (val_max/max(Y) >= rel_heightfilter)
+        val_max = val_max[k]
+        left_min = left_min[k]
+        right_min = right_min[k]
+
+    # Remove peaks below the SNR thresholds
+    if SNR_threshold:
+        noise_points = np.array([True]*xsize) # Zero iteration
 
         for it in range(noise_est_iterations):
             
             for idx in np.where(((val_max-np.mean(Y[noise_points]))/noise_func(Y[noise_points])>=SNR_threshold))[0]:
-                
-                #try:
-                #    sl = slice(left_min[idx],right_min[idx]+1)
-                #    noise_points[sl] = False
-                #except:
-                #    print_queue.put(f"{[left_min[idx],right_min[idx],idx]} and {slice(left_min[idx],right_min[idx]+1)} in spectra num {ind}")
                 sl = slice(left_min[idx],right_min[idx]+1)
                 noise_points[sl] = False
-                #noise_points = [True]*nY #regenerate noise points (for this type of SNR estimation this step is ?useless?)
         
-        noise = noise_func(Y[noise_points])
-        mean_noise = np.mean(Y[noise_points])
-        k = (val_max-mean_noise)/noise>=SNR_threshold
-
+        props["Noise"] = noise_func(Y[noise_points])
+        props["Mean noise"]= np.mean(Y[noise_points])
+        k = (val_max-props["Mean noise"])/props["Noise"]>=SNR_threshold
+        
         val_max=val_max[k]
-        #lfwhh=lfwhh[k] 
-        #rfwhh=rfwhh[k]
         left_min=left_min[k]
         right_min=right_min[k]
 
-        # Compute FWHH for every peak
-        size = left_min.shape
-        lfwhh = np.empty(size)
-        rfwhh = np.empty(size)
-        pos_peak = np.empty(size)
-        for idx, [lm, rm, vm] in enumerate(zip(left_min, right_min,val_max)):
-            pp = lm + np.argmax(Y[lm:rm])
-            
-            #valmin = np.min(Y[lm:rm+1])
-            pos_peak[idx] = pp
-            
-            # lfwhh[idx] = interp1d(Y[lm:pp+1]-valmin, X[lm:pp+1], kind='linear',fill_value=X[lm])((vm-valmin)/2)
-            # rfwhh[idx] = interp1d(Y[pp:rm+1][::-1]-valmin, X[pp:rm+1][::-1], kind='linear',fill_value=X[rm])((vm-valmin)/ 2)
-            lfwhh[idx] = interp1d(Y[lm:pp+1], X[lm:pp+1], kind='linear',fill_value=X[lm],bounds_error=False)(vm/2)
-            rfwhh[idx] = interp1d(Y[pp:rm+1][::-1], X[pp:rm+1][::-1], kind='linear',fill_value=X[rm],bounds_error=False)(vm/ 2)
-        # Remove peaks higher FWHH thresholds
-        if fwhhfilter>0:
-            if isinstance(fwhhfilter,tuple):
-                k = ((rfwhh - lfwhh) >= fwhhfilter[0]) & ((rfwhh - lfwhh) <= fwhhfilter[1])
-            else:
-                k = (rfwhh - lfwhh) >= fwhhfilter
-            val_max = val_max[k]
-            lfwhh = lfwhh[k]
-            rfwhh = rfwhh[k]
-            left_min = left_min[k]
-            right_min = right_min[k]
-        
-        # Remove oversegmented peaks
-        if auto_oversegmfilter_bool:
-            oversegmentationfilter = np.median(rfwhh-lfwhh)
-            #print(oversegmentationfilter)
-        #val_max=np.array(val_max)
+    # Compute FWHH for every peak
+    size = left_min.shape
+    props["FWHML"] = np.empty(size)
+    props["FWHMR"]  = np.empty(size)
+    pos_peak = np.empty(size)
+    for idx, [lm, rm, vm] in enumerate(zip(left_min, right_min,val_max)):
+        pp = lm + np.argmax(Y[lm:rm])
+        pos_peak[idx] = pp
+        props["FWHML"][idx] = interp1d(Y[lm:pp+1], X[lm:pp+1], kind='linear',fill_value=X[lm],bounds_error=False)(vm/2)
+        props["FWHMR"][idx] = interp1d(Y[pp:rm+1][::-1], X[pp:rm+1][::-1], kind='linear',fill_value=X[rm],bounds_error=False)(vm/ 2)
+    # Remove peaks with FWHH thresholds
+    if fwhhfilter:
+        if isinstance(fwhhfilter,tuple):
+            k = ((props["FWHMR"] - props["FWHML"]) >= fwhhfilter[0]) & ((props["FWHMR"] - props["FWHML"]) <= fwhhfilter[1])
+        else:
+            k = (props["FWHMR"] - props["FWHML"]) >= fwhhfilter
+        val_max = val_max[k]
+        props["FWHML"] = props["FWHML"][k]
+        props["FWHMR"] = props["FWHMR"][k]
+        left_min = left_min[k]
+        right_min = right_min[k]
+    # Remove oversegmented peaks
+    if oversegmentationfilter:
+        if isinstance(oversegmentationfilter,str):
+            oversegmentationfilter = np.median(props["FWHMR"]-props["FWHML"])
         while True:
             peak_thld = val_max * peaklocation - math.sqrt(np.finfo(float).eps)
             pkX = np.empty(left_min.shape)
@@ -2671,25 +2530,40 @@ def mspeaks_arrayopt(X, Y_array,spectra_ind, fwhhfilter=0,oversegmentationfilter
                 break
             left_min = np.delete(left_min, j + 1)
             right_min = np.delete(right_min, j)
-            lfwhh = np.delete(lfwhh, j + 1)
-            rfwhh = np.delete(rfwhh, j)
+            props["FWHML"] = np.delete(props["FWHML"], j + 1)
+            props["FWHMR"] = np.delete(props["FWHMR"], j)
             
             val_max[j] = np.maximum(val_max[j], val_max[j + 1])
             val_max = np.delete(val_max, j + 1)
-        signal_num = len(val_max)
+    else:
+        peak_thld = val_max * peaklocation - math.sqrt(np.finfo(float).eps)
+        pkX = np.empty(left_min.shape)
         
-        ## Area calculation
-        pkA = np.empty((signal_num,))
+        for idx, [lm, rm, th] in enumerate(zip(left_min, right_min, peak_thld)):
+            mask = Y[lm:rm] >= th
+            if np.sum(mask) == 0:
+                pkX[idx]=np.nan
+            else:
+                pkX[idx] = np.sum(Y[lm:rm][mask] * X[lm:rm][mask]) / np.sum(Y[lm:rm][mask])
+
+    signal_num = len(val_max)
+    ## Area calculation
+    if Calc_peak_area:
+        props["Area"] = np.empty((signal_num,))
         for idx in range(signal_num):
             sl = slice(left_min[idx],right_min[idx]+1,1)
             if min(Y[sl])<0:
-                pkA[idx] = np.trapz(Y[sl] - min(Y[sl]),X[sl])
+                props["Area"][idx] = np.trapz(Y[sl] - min(Y[sl]),X[sl])
             else:
-                pkA[idx] = np.trapz(Y[sl],X[sl])
-        #peaklists[ns] = np.column_stack(([ind]*signal_num,pkX, val_max, pkA,val_max/noise,X[left_min], X[right_min],lfwhh, rfwhh,[noise]*signal_num,[mean_noise]*signal_num))  
-        peaklists[ns] = np.column_stack(([ind]*signal_num,pkX, val_max, pkA,val_max/noise,X[left_min+1], X[right_min-1],lfwhh, rfwhh,[noise]*signal_num,[mean_noise]*signal_num))  
-    #print_queue.put(f"{[spectra_ind]*sum(k)},\n{pkX[k]}, \n{val_max[k]},\n {pkA},\n{val_max[k]/noise,lfwhh[k]},\n {rfwhh[k]},\n{X[left_min[k]]}, \n{X[right_min[k]]},\n{noise},\n{mean_noise}")
-    return np.vstack(tuple(peaklists.values()))
+                props["Area"][idx] = np.trapz(Y[sl],X[sl])
+    if SNR_threshold:
+        props["SNR"] = (val_max - props["Mean noise"])/props["Noise"]
+        props["Noise"] = [props["Noise"]]*signal_num
+        props["Mean noise"]= [props["Mean noise"]]*signal_num
+    props["PextL"] = X[left_min+1] 
+    props["PextR"] = X[right_min-1] 
+    return np.column_stack(([spectra_ind]*signal_num,pkX, val_max, *(props[key] for key in peaks_prop_infunc.headers)))
+
 ### Utility functions
 def draw_data(data_obj_list,mz_diap4draw = None, num_specst = None):
     """
@@ -3020,7 +2894,8 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
                     endg = max(data_mz)
                     dataf.query("spectra_ind==@roi_idx_spec").plot(x="mz",y="Intensity",ax = plt.gca(), style = "x")
                 
-                
+                print("Example peaklist:")
+                print(dataf)
                 plt.plot(dataf.query("PextL>@startg and PextL<@endg and spectra_ind==@roi_idx_spec")['PextL'],
                         [0]*len(dataf.query("PextL>@startg and PextL<@endg and spectra_ind==@roi_idx_spec")['PextL']),'v')
                 plt.plot(dataf.query("PextR>@startg and PextR<@endg and spectra_ind==@roi_idx_spec")['PextR'],
