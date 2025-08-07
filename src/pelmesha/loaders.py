@@ -76,7 +76,7 @@ def peakl2DF(batch_path, extr_columns=None,extract_coords = True, return_source_
     Функция преобразует данные пиклисты `hdf5` в словарь с датафреймами пиклистов образцов согласно выставленным параметрам.
 
     :param batch_path: лист путей или путь к папке/файлу с `hdf5`. 
-    :param extr_columns: Лист номеров столбцов для экстракции из `hdf5`, где `"spectra_ind"` и `"mz"` или `"Peak"` экстрагируются всегда. Default: `None` - экстракция всех столбцов
+    :param extr_columns: Лист столбцов для экстракции из `hdf5`, где `"spectra_ind"` и `"mz"` или `"Peak"` экстрагируются всегда. Default: `None` - экстракция всех столбцов
     `"Intensity"`, `"Area"`, `"SNR"`, `"PextL"`, `"PextR"`, `"FWHML"`, `"FWHMR"`, `"Noise"`, `"Mean noise"`
     :param extract_coords: `True` - extracting to dict coordinates Dataframe, `False` - coordinates doesn't extracting. Default: `True`
     :param pivoting4val: list of columns or None (default) - extracted data is pivoted by index: spectra_ind, columns: Peak with fill_value = 0, and values: list of columns from pivoting4val. If None - do nothing about pivoting
@@ -116,8 +116,8 @@ def feat2DF(batch_path, extr_columns=None,extract_coords = True, return_source_p
     Функция преобразует данные фича-матрицы `hdf5` в словарь с датафреймами пиклистов образцов согласно выставленным параметрам.
 
     :param batch_path: лист путей или путь к папке/файлу с `hdf5`. 
-    :param extr_columns: Лист номеров столбцов для экстракции из `hdf5`, где 0 и 1 - экстрагируются всегда (`"spectra_ind"` и `"mz"` или `"Peak"`). Default: `None` - экстракция всех столбцов
-    2 - `"Intensity"`, 3 -`"Area"`, 4 - `"SNR"`, 5 - `"PextL"`, 6 - `"PextR"`, 7 - `"FWHML"`, 8 - `"FWHMR"`, 9-`"Noise"`, 10-`"Mean noise"`
+    :param extr_columns: Лист столбцов для экстракции из `hdf5`, где экстрагируются всегда `"spectra_ind"` и `"mz"` или `"Peak"`. Default: `None` - экстракция всех столбцов
+    `"Intensity"`,`"Area"`,`"SNR"`,`"PextL"`,`"PextR"`,`"FWHML"`,`"FWHMR"`,`"Noise"`,`"Mean noise"`
     :param extract_coords: `True` - extracting to dict coordinates Dataframe, `False` - coordinates doesn't extracting. Default: `True`
     :param pivoting4val: list of columns or None (default) - extracted data is pivoted by index: spectra_ind, columns: Peak with fill_value = 0, and values: list of columns from pivoting4val. If None - do nothing about pivoting
     :param return_source_path: If `True` - return full path to source. Optional. Used in some functions.
@@ -243,7 +243,7 @@ def grouped_feat2DF(path, extr_columns=None,extract_coords = True, pivoting4val 
     Функция для работы со сгруппированными между имаджами пиклистами (признаками). Преобразует данные из `hdf5` в датафрейм.
 
     :param batch_path: лист путей или путь к папке/файлу с `hdf5`. 
-    :param extr_columns: Лист номеров столбцов для экстракции из `hdf5`, где 0 и 1 - экстрагируются всегда (`"spectra_ind"` и `"mz"` или `"Peak"`). Default: `None` - экстракция всех столбцов
+    :param extr_columns: Лист столбцов для экстракции из `hdf5`, где 0 и 1 - экстрагируются всегда (`"spectra_ind"` и `"mz"` или `"Peak"`). Default: `None` - экстракция всех столбцов
     2 - `"Intensity"`, 3 -`"Area"`, 4 - `"SNR"`, 5 - `"PextL"`, 6 - `"PextR"`, 7 - `"FWHML"`, 8 - `"FWHMR"`, 9-`"Noise"`, 10-`"Mean noise"`
     :param extract_coords: `True` - extracting to dict coordinates Dataframe, `False` - coordinates doesn't extracting. Default: `True`
     :param pivoting4val: list of columns or None (default) - extracted data is pivoted by index: spectra_ind, columns: Peak with fill_value = 0, and values: list of columns from pivoting4val. If None - do nothing about pivoting
@@ -334,8 +334,8 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
     Функция объединяет данные пиклистов в разных `hdf5` в датафрейм пиклистов образцов согласно выставленным параметрам.
 
     :param paths: dict = {path_1:[[sample_1,[roi_list_1]],[sample_2,[roi_list_2]],....],path_2:[[sample_3,[roi_list_3]],[sample_4,[roi_list_4]],....]}, "path" - path to hdf5 file directory, "sample_n" - какой именно sample (string), если None - берёт всё, "roi_list_n" - список каких roi использовать, если отсутствует, то берёт всё (example: dict value: list[sample_n])
-    :param extr_columns: Лист номеров столбцов для экстракции из `hdf5`, где 0 и 1 - экстрагируются всегда (`"spectra_ind"` и `"mz"` или `"Peak"`). Default: `None` - экстракция всех столбцов
-    2 - `"Intensity"`, 3 -`"Area"`, 4 - `"SNR"`, 5 - `"PextL"`, 6 - `"PextR"`, 7 - `"FWHML"`, 8 - `"FWHMR"`, 9-`"Noise"`, 10-`"Mean noise"`
+    :param extr_columns: Лист столбцов для экстракции из `hdf5`, где экстрагируются всегда `"spectra_ind"` и `"mz"` или `"Peak"`. Default: `None` - экстракция всех столбцов
+    `"Intensity"`,`"Area"`,`"SNR"`,`"PextL"`,`"PextR"`,`"FWHML"`,`"FWHMR"`,`"Noise"`,`"Mean noise"`
     :param processed_feat: `True` - Dataframe from grouped peaklists, `False` - Dataframe from raw image peaklists. Default: `False`
     :param extract_coords: `True` - extracting to dict coordinates Dataframe, `False` - coordinates doesn't extracting. Default: `True`
 
@@ -362,7 +362,8 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
         samples = True
     elif isinstance(paths,str):
         path_list = [paths]
-
+    if isinstance(extr_columns, str):
+        extr_columns=[extr_columns]
     for path in path_list:
        
         ### hdf5 load
@@ -395,23 +396,38 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
 
                 for roi in rois:                    
                     headers = Slide_data[slide][sample][roi][feat_type].attrs['Column headers']
-                    if "Peak" in headers:
-                        mz_type = "Peak"
-                    else:
-                        mz_type = "mz"
+                    ## Setting columns to extract
                     if extr_columns is None:
-                        column_list = range(len(headers))
-                        
+                        extr_columns = headers
+                        column_nums = range(len(extr_columns))
                     else:
-                        column_list = set(range(len(headers)))
-                        column_list = list(column_list-(column_list - set([0,1]+extr_columns)))
+                        column_nums=[]
+                        if "Peak" in headers:
+                            mz_type = "Peak"
+                        else:
+                            mz_type = "mz"
 
+                        if "mz" in extr_columns:
+                            del extr_columns[extr_columns.index("mz")]
+                        if "Peak" in extr_columns:
+                            del extr_columns[extr_columns.index("Peak")]
+                        if "spectra_ind" not in extr_columns:
+                            extr_columns.append("spectra_ind")
+                        extr_columns.append(mz_type)
+
+                        for head in headers:
+                            if head in extr_columns:
+                                column_nums.append(headers.index(head))
+                                del extr_columns[extr_columns.index(head)]
+                        if extr_columns:
+                            logger.warn(f"Columns: {extr_columns} - are not extracted. Columns in loading dataset is {headers}")
+                    ## Setting columns to extract - Ended
                     if Slide_data[slide][sample][roi][feat_type].shape[1] == len(headers):
 
                         #DataFeat[slide][sample][roi]=pd.DataFrame(Slide_data[slide][sample][roi][feat_type], columns= headers).sort_values(['spectra_ind',mz_type])[Slide_data[slide][sample][roi][feat_type].attrs['Column headers'][column_list]]
-                        DataFeat=pd.DataFrame(Slide_data[slide][sample][roi][feat_type], columns= headers).sort_values(['spectra_ind',mz_type])[Slide_data[slide][sample][roi][feat_type].attrs['Column headers'][column_list]]
+                        DataFeat=pd.DataFrame(Slide_data[slide][sample][roi][feat_type][:,column_nums], columns= (headers[column_num] for column_num in column_nums)).sort_values(['spectra_ind',mz_type])
                     else:
-                        DataFeat=pd.DataFrame(Slide_data[slide][sample][roi][feat_type][column_list,:].T, columns= headers).sort_values(['spectra_ind',mz_type])#[Slide_data[slides][sample][roi]['peaklists'].attrs['Column headers'][column_list]]
+                        DataFeat=pd.DataFrame(Slide_data[slide][sample][roi][feat_type][column_nums,:].T, columns= (headers[column_num] for column_num in column_nums)).sort_values(['spectra_ind',mz_type])
                     
                     try:
                         #DataFeat[slide][sample][roi]=DataFeat[slide][sample][roi].astype({"spectra_ind": int})
