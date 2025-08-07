@@ -76,8 +76,8 @@ def peakl2DF(batch_path, extr_columns=None,extract_coords = True, return_source_
     Функция преобразует данные пиклисты `hdf5` в словарь с датафреймами пиклистов образцов согласно выставленным параметрам.
 
     :param batch_path: лист путей или путь к папке/файлу с `hdf5`. 
-    :param extr_columns: Лист номеров столбцов для экстракции из `hdf5`, где 0 и 1 - экстрагируются всегда (`"spectra_ind"` и `"mz"` или `"Peak"`). Default: `None` - экстракция всех столбцов
-    2 - `"Intensity"`, 3 -`"Area"`, 4 - `"SNR"`, 5 - `"PextL"`, 6 - `"PextR"`, 7 - `"FWHML"`, 8 - `"FWHMR"`, 9-`"Noise"`, 10-`"Mean noise"`
+    :param extr_columns: Лист номеров столбцов для экстракции из `hdf5`, где `"spectra_ind"` и `"mz"` или `"Peak"` экстрагируются всегда. Default: `None` - экстракция всех столбцов
+    `"Intensity"`, `"Area"`, `"SNR"`, `"PextL"`, `"PextR"`, `"FWHML"`, `"FWHMR"`, `"Noise"`, `"Mean noise"`
     :param extract_coords: `True` - extracting to dict coordinates Dataframe, `False` - coordinates doesn't extracting. Default: `True`
     :param pivoting4val: list of columns or None (default) - extracted data is pivoted by index: spectra_ind, columns: Peak with fill_value = 0, and values: list of columns from pivoting4val. If None - do nothing about pivoting
     :param return_source_path: If `True` - return full path to source. Optional. Used in some functions.
@@ -94,6 +94,7 @@ def peakl2DF(batch_path, extr_columns=None,extract_coords = True, return_source_
     """
     
     logger("peakl2DF",{**locals()})
+
     if isinstance(batch_path, str):
         batch_path=[batch_path]
 
@@ -149,8 +150,8 @@ def feat2DF(batch_path, extr_columns=None,extract_coords = True, return_source_p
     
 def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, return_source_path = False, pivoting4val = None):
     logger("table2DF",{**locals()})
-    headlist = {0:"spectra_ind",1:None,2:"Intensity",3:"Area",4:"SNR",5:"PextL",6:"PextR",7:"FWHML",8:"FWHMR",9:"Noise",10:"Mean noise"}
-
+    if isinstance(extr_columns, str):
+        extr_columns=[extr_columns]
     DataFeat ={}
     Source_path={}
     for slides in list(Slide_data.keys()):
@@ -171,27 +172,38 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
                     continue
 
                 DataFeat[slides][sample][roi]={}
-                if "Peak" in headers:
-                    mz_type = "Peak"
-                else:
-                    mz_type = "mz"
-                headlist[1]=mz_type
+                ## Setting columns to extract
                 if extr_columns is None:
-                    column_list = range(len(headers))
-                    
+                    extr_columns = headers
+                    column_nums = range(len(extr_columns))
                 else:
-                    column_list=[]
-                    for head in list(set([0,1]+extr_columns)):
-                        head = headlist[head]
-                        try:
-                            column_list.append(headers.index(head))
-                        except:
-                            logger.warn(f"{head} doesn't founded in hdf5 column headers of {slides} {sample} {roi}")
+                    column_nums=[]
+                    if "Peak" in headers:
+                        mz_type = "Peak"
+                    else:
+                        mz_type = "mz"
+
+                    if "mz" in extr_columns:
+                        del extr_columns[extr_columns.index("mz")]
+                    if "Peak" in extr_columns:
+                        del extr_columns[extr_columns.index("Peak")]
+                    if "spectra_ind" not in extr_columns:
+                        extr_columns.append("spectra_ind")
+                    extr_columns.append(mz_type)
+
+                    for head in headers:
+                        if head in extr_columns:
+                            column_nums.append(headers.index(head))
+                            del extr_columns[extr_columns.index(head)]
+                    if extr_columns:
+                        logger.warn(f"Columns: {extr_columns} - are not extracted. Columns in loading dataset is {headers}")
+                ## Setting columns to extract - Ended
+
                 if Slide_data[slides][sample][roi][feat_type].shape[1] == len(headers):
 
-                    DataFeat[slides][sample][roi][feat_type]=pd.DataFrame(Slide_data[slides][sample][roi][feat_type], columns= headers).sort_values(['spectra_ind',mz_type])[Slide_data[slides][sample][roi][feat_type].attrs['Column headers'][column_list]]
+                    DataFeat[slides][sample][roi][feat_type]=pd.DataFrame(Slide_data[slides][sample][roi][feat_type][:,column_nums], columns= (headers[column_num] for column_num in column_nums)).sort_values(['spectra_ind',mz_type])
                 else:
-                    DataFeat[slides][sample][roi][feat_type]=pd.DataFrame(Slide_data[slides][sample][roi][feat_type][column_list,:].T, columns= headers).sort_values(['spectra_ind',mz_type])#[Slide_data[slides][sample][roi]['peaklists'].attrs['Column headers'][column_list]]
+                    DataFeat[slides][sample][roi][feat_type]=pd.DataFrame(Slide_data[slides][sample][roi][feat_type][column_nums,:].T, columns= (headers[column_num] for column_num in column_nums)).sort_values(['spectra_ind',mz_type])
                 try:
                     DataFeat[slides][sample][roi][feat_type]=DataFeat[slides][sample][roi][feat_type].astype({"spectra_ind": int})
                 except:
@@ -208,7 +220,6 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
                     except:
                         pass#print(f"{slides}, {sample} and roi {roi}. The extraction of other coordinates was unsuccessful")
                 if pivoting4val:
-                    
                     DataFeat[slides][sample][roi][feat_type] = DataFeat[slides][sample][roi][feat_type].pivot_table(index="spectra_ind", columns="Peak",fill_value = 0, values =pivoting4val)
             if not DataFeat[slides][sample]:
                 DataFeat[slides].pop(sample,None)
