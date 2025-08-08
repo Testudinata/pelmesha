@@ -885,7 +885,7 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = None, fwhhfilter = Non
     elif noise_est == "std":
         noise_func=np.std
     args2peakpicking = Manager().dict({"oversegmentationfilter": oversegmentationfilter, "fwhhfilter": fwhhfilter, "heightfilter": heightfilter,"rel_heightfilter":rel_heightfilter, "peaklocation": peaklocation,
-                        "SNR_threshold": SNR_threshold,"noise_func": noise_func, "noise_est_iterations": noise_est_iterations, "print_queue":print_queue, "Calc_peak_area":Calc_peak_area})
+                        "SNR_threshold": SNR_threshold,"noise_func": noise_func, "noise_est_iterations": noise_est_iterations, "Calc_peak_area":Calc_peak_area})
 
     
     path_list=find_paths(data_obj_path,file_end = '_specdata.hdf5')
@@ -1545,19 +1545,20 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
             baseliner = Baseline(data_mz)
             for n, idx in enumerate(idx_range):
                 data_mz_old,data_int=sample_imzml.getspectrum(idx)
-                peaklists[n] = peaks_prop_infunc(data_mz, DataProc_resample1d(data_int,data_mz_old,data_mz,baseliner,**loc_args2procc), 
+                data_int = DataProc_resample1d(data_int,data_mz_old,data_mz,baseliner,**loc_args2procc)
+                peaklists[n] = peaks_prop_infunc(data_mz, data_int, np.where(np.diff(data_int) != 0)[0], resample_to_dots, 
                                            nspec_range[n], **args2peakpicking)
          
         else:
             ## Получение пиков
 
             for n, idx in enumerate(idx_range):
-                data_mz = sample_imzml.getspectrum(idx)[0]
+                data_mz, data_int = sample_imzml.getspectrum(idx)
                 loc_args2procc["smooth_window"] = int(args2procc["smooth_window"]/(np.median(np.diff(data_mz))))
                 if loc_args2procc["params2align"]["only_shift"]:
                     loc_args2procc["dots_shift"] = int(args2procc["dots_shift"]/(np.median(np.diff(data_mz))))
-               
-                peaklists[n] = peaks_prop_infunc(data_mz, DataProc_base1d(sample_imzml.getspectrum(idx)[1],data_mz,Baseline(data_mz),**loc_args2procc), 
+                data_int = DataProc_base1d(data_int,data_mz,Baseline(data_mz),**loc_args2procc)
+                peaklists[n] = peaks_prop_infunc(data_mz, data_int, np.where(np.diff(data_int) != 0)[0], len(data_mz),
                                            nspec_range[n], **args2peakpicking)
         peaklists = np.vstack(tuple(peaklists.values()))
         logger.log(f"Processing discontinues data ended")
@@ -2645,8 +2646,8 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
               align_peaks = None, weights_list=None, max_shift_mz=0.95,only_shift=True,params2align={},
               resample_to_dots = None, 
               smooth_algo = None, smooth_window=0.075, smooth_cycles=1,
-              oversegmentationfilter = 0, fwhhfilter = 0, heightfilter=0, peaklocation=1,rel_heightfilter=0,
-              SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3,
+              oversegmentationfilter = None, fwhhfilter = None, heightfilter=None, peaklocation=1,rel_heightfilter=None,
+              SNR_threshold = 3.5, noise_est = "std",noise_est_iterations = 3, Calc_peak_area = True,
               mz_diap4draw = None,dtypeconv='single'):
     """
     Общее описание
@@ -2728,21 +2729,34 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
     params2align["only_shift"]=only_shift
 
     if not isinstance(peaklocation, (int, float)) or not np.isscalar(peaklocation) or peaklocation < 0 or peaklocation > 1:
-        raise ValueError("mspeaks: Invalid peak location")
+        raise ValueError("peaks_prop: Invalid peak location")
     if not isinstance(fwhhfilter, (int, float)) or not np.isscalar(fwhhfilter) or fwhhfilter < 0:
-        raise ValueError("mspeaks: Invalid FWHH filter")
+        if not isinstance(fwhhfilter,type(None)):
+            raise ValueError("peaks_prop: Invalid FWHH filter")
     if not isinstance(oversegmentationfilter, (int, float)) or not np.isscalar(oversegmentationfilter):
         if isinstance(oversegmentationfilter, str):
             oversegmentationfilter=oversegmentationfilter.lower()
+        elif isinstance(oversegmentationfilter, type(None)):
+            pass
         else:
-            raise ValueError("mspeaks: Invalid oversegmentation filter")
+            raise ValueError("peaks_prop: Invalid oversegmentation filter")
     elif oversegmentationfilter < 0:
-        raise ValueError("mspeaks: Invalid oversegmentation filter")
+        raise ValueError("peaks_prop: Invalid oversegmentation filter")
     if not isinstance(heightfilter, (int, float)) or not np.isscalar(heightfilter) or heightfilter < 0:
-        raise ValueError("mspeaks: Invalid height filter")
+        if not isinstance(heightfilter, type(None)):
+            raise ValueError("peaks_prop: Invalid height filter")
     if not isinstance(rel_heightfilter, (int, float)) or not np.isscalar(rel_heightfilter) or rel_heightfilter < 0 or rel_heightfilter > 100:
-        raise ValueError("mspeaks: Invalid relative height filter")
-
+        if not isinstance(rel_heightfilter, type(None)):
+            raise ValueError("peaks_prop: Invalid relative height filter")
+    if SNR_threshold and Calc_peak_area:
+        headers = ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
+    elif SNR_threshold :
+        headers = ["spectra_ind","mz","Intensity","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
+    elif Calc_peak_area:
+        headers = ["spectra_ind","mz","Intensity","Area","PextL","PextR","FWHML","FWHMR"]
+    else: 
+        headers = ["spectra_ind","mz","Intensity","PextL","PextR","FWHML","FWHMR"]
+    peaks_prop_infunc.headers = headers[3:]
     if isinstance(data_obj_path,str):
         data_obj_path=[data_obj_path]
 
@@ -2794,12 +2808,6 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
                 except:   
                     #raw_data_points = int(np.quantile(sample_imzml.mzLengths, 0.95))
                     spectra_num = len(sample_imzml.mzLengths)
-                # try:
-                #     dcont = sample_imzml.metadata.pretty()["file_description"]["continuous"]
-
-                # except KeyError:
-                #     dcont = not sample_imzml.metadata.pretty()["file_description"]["processed"]
-
                 ###
                 ### Так как файлы imzml с poslog исключительно континуальные (одна шкала mz для всех спектров), то здесь работаем исключительно в таком варианте
                 ### Выгрузка данных с poslog
@@ -2877,7 +2885,23 @@ def draw_processing_example(data_obj_path, spec_num=None, baseliner_algo = 'asls
                     loc_args2procc["smooth_window"]=int(smooth_window/(np.median(np.diff(data_mz))))
                     data_int = DataProc_base1d(data_int_old,data_mz,Baseline(data_mz),**loc_args2procc)
 
-                dataf = mspeaks_opt(data_mz, data_int, [idx_spec-idx_start],oversegmentationfilter=oversegmentationfilter, fwhhfilter=fwhhfilter,heightfilter=heightfilter,peaklocation=peaklocation,rel_heightfilter=rel_heightfilter,noise_func = noise_func,noise_est_iterations=noise_est_iterations,SNR_threshold=SNR_threshold)
+                dataf = peaks_prop_infunc(
+                    data_mz, 
+                    data_int, 
+                    np.where(np.diff(data_int) !=0)[0],
+                    len(data_mz),
+                    [idx_spec-idx_start],
+                    oversegmentationfilter=oversegmentationfilter, 
+                    fwhhfilter=fwhhfilter,
+                    heightfilter=heightfilter,
+                    peaklocation=peaklocation,
+                    rel_heightfilter=rel_heightfilter,
+                    noise_func = noise_func,
+                    noise_est_iterations=noise_est_iterations,
+                    SNR_threshold=SNR_threshold,
+                    Calc_peak_area=Calc_peak_area
+                    )
+                
                 dataf = pd.DataFrame(dataf.T, ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]).T
                 dataf = dataf.astype({"spectra_ind": int})
                 if mz_diap4draw:

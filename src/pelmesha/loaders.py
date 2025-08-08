@@ -173,15 +173,15 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
 
                 DataFeat[slides][sample][roi]={}
                 ## Setting columns to extract
+                if "Peak" in headers:
+                    mz_type = "Peak"
+                else:
+                    mz_type = "mz"
                 if extr_columns is None:
                     extr_columns = headers
                     column_nums = range(len(extr_columns))
                 else:
                     column_nums=[]
-                    if "Peak" in headers:
-                        mz_type = "Peak"
-                    else:
-                        mz_type = "mz"
 
                     if "mz" in extr_columns:
                         del extr_columns[extr_columns.index("mz")]
@@ -189,14 +189,15 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
                         del extr_columns[extr_columns.index("Peak")]
                     if "spectra_ind" not in extr_columns:
                         extr_columns.append("spectra_ind")
-                    extr_columns.append(mz_type)
+                    temp_extr_column = extr_columns.copy()
+                    temp_extr_column.append(mz_type)
 
                     for head in headers:
                         if head in extr_columns:
                             column_nums.append(headers.index(head))
-                            del extr_columns[extr_columns.index(head)]
-                    if extr_columns:
-                        logger.warn(f"Columns: {extr_columns} - are not extracted. Columns in loading dataset is {headers}")
+                            del temp_extr_column[temp_extr_column.index(head)]
+                    if temp_extr_column:
+                        logger.warn(f"Columns: {temp_extr_column} - are not extracted. Columns in loading dataset is {headers}")
                 ## Setting columns to extract - Ended
 
                 if Slide_data[slides][sample][roi][feat_type].shape[1] == len(headers):
@@ -396,16 +397,17 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
 
                 for roi in rois:                    
                     headers = Slide_data[slide][sample][roi][feat_type].attrs['Column headers']
+                    if "Peak" in headers:
+                        mz_type = "Peak"
+                    else:
+                        mz_type = "mz"
                     ## Setting columns to extract
                     if extr_columns is None:
-                        extr_columns = headers
-                        column_nums = range(len(extr_columns))
+                        column_nums = range(len(headers))
                     else:
+                        
                         column_nums=[]
-                        if "Peak" in headers:
-                            mz_type = "Peak"
-                        else:
-                            mz_type = "mz"
+
 
                         if "mz" in extr_columns:
                             del extr_columns[extr_columns.index("mz")]
@@ -413,14 +415,15 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
                             del extr_columns[extr_columns.index("Peak")]
                         if "spectra_ind" not in extr_columns:
                             extr_columns.append("spectra_ind")
-                        extr_columns.append(mz_type)
+                        temp_extr_column = extr_columns.copy()
+                        temp_extr_column.append(mz_type)
 
                         for head in headers:
                             if head in extr_columns:
                                 column_nums.append(headers.index(head))
-                                del extr_columns[extr_columns.index(head)]
-                        if extr_columns:
-                            logger.warn(f"Columns: {extr_columns} - are not extracted. Columns in loading dataset is {headers}")
+                                del temp_extr_column[temp_extr_column.index(head)]
+                        if temp_extr_column:
+                            logger.warn(f"Columns: {temp_extr_column} - are not extracted. Columns in loading dataset is {headers}")
                     ## Setting columns to extract - Ended
                     if Slide_data[slide][sample][roi][feat_type].shape[1] == len(headers):
 

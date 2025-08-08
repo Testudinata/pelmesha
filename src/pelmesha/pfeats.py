@@ -100,12 +100,12 @@ def Pgrouping_KD(ftable, columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_ke
     cpu_num = cpu_count()-cpu_free
     tol = tol/1e+6
     min_res = min_res/1e+6
-    if KD_bandwidth.lower() =='med_fwhm':
-        columns=columns+["FWHML", "FWHMR"]
+    if columns:
+        if KD_bandwidth.lower() =='med_fwhm':
+            columns=columns+["FWHML", "FWHMR"]
+        columns=list(set(columns))
         
     # Вариация для рассчётов для уже готовой таблицы или путей к таблицам features 
-    columns=list(set(columns))
-
     if isinstance(ftable, str):
         ftableISAPATH=True
         data, path = peakl2DF([ftable],extr_columns=columns, return_source_path = True,pivoting4val=None)
@@ -224,8 +224,8 @@ def Roi_Pgrouping_KD(Paths, extr_columns=None,path2save=None,**Pgrouping_KD_kwar
     
     :param paths: dict = {path_1:[[sample_1,[roi_list_1]],[sample_2,[roi_list_2]],....],path_2:[[sample_3,[roi_list_3]],[sample_4,[roi_list_4]],....]}, "path" - path to hdf5 file directory, "sample_n" - какой именно sample (string), если None - берёт всё, "roi_list_n" - список каких roi использовать, если отсутствует, то берёт всё (example: dict value: list[sample_n])
     или list[path_1,path_2], "path_n" - path to hdf5 file directory, используются все sample и roi в них.
-    :param extr_columns: Лист номеров столбцов для экстракции из `hdf5`, где 0 и 1 - экстрагируются всегда (`"spectra_ind"` и `"mz"` или `"Peak"`). Default: `None` - экстракция всех столбцов
-    2 - `"Intensity"`, 3 -`"Area"`, 4 - `"SNR"`, 5 - `"PextL"`, 6 - `"PextR"`, 7 - `"FWHML"`, 8 - `"FWHMR"`, 9-`"Noise"`, 10-`"Mean noise"`
+    :param extr_columns: Лист столбцов для экстракции из `hdf5`, где экстрагируются всегда `"spectra_ind"` и `"mz"` или `"Peak"`. Default: `None` - экстракция всех столбцов
+    `"Intensity"`,`"Area"`, `"SNR"`,`"PextL"`,`"PextR"`, `"FWHML"`, `"FWHMR"`,`"Noise"`,`"Mean noise"`
     :param Pgrouping_KD_kwargs: остальные значения параметров, соответствующие функции Pgrouping_KD при группировке пиков
     :param path2save: путь, куда сохранить объединённые данные в файл с названием "Images_{количество_имаджей}_grouped_MSIdata.hdf5". Если `None`, то данные не будут сохранены в файл.
     :param pivoting4val: list of columns or None (default) - resulted table is pivoted by index: `spectra_ind`, columns: `Peak` with fill_value = 0, and values: list of columns from pivoting4val. If `None` - do nothing about pivoting.
@@ -250,11 +250,11 @@ def Roi_Pgrouping_KD(Paths, extr_columns=None,path2save=None,**Pgrouping_KD_kwar
             pass
     try:
         if Pgrouping_KD_kwargs["KD_bandwidth"] == "med_FWHM" and extr_columns is not None:
-            extr_columns=list(set(extr_columns + [7,8]))
+            extr_columns=list(set(extr_columns + ['FWHML',"FWHMR"]))
             extr_columns.sort()
     except:
         pass
-    logger.log('Additional extraction columns list of values: 2 - "Intensity", 3 -"Area", 4 - "SNR", 5 - "PextL", 6 - "PextR", 7 - "FWHML", 8 - "FWHMR", 9-"Noise", 10-"Mean noise"')
+    logger.log('Additional extraction columns list of values: "Intensity","Area", "SNR","PextL","PextR","FWHML", "FWHMR","Noise","Mean noise"')
     logger.log(f'Additional extraction columns:{extr_columns}')
     Total_peaks, coords = IMGfeats_concat(Paths,extr_columns,extracts_coords=True,processed_feat = False)
 
@@ -269,27 +269,29 @@ def Roi_Pgrouping_KD(Paths, extr_columns=None,path2save=None,**Pgrouping_KD_kwar
 
     Aligned_rois = Pgrouping_KD(Total_peaks,**Pgrouping_KD_kwargs)
     ########## under construction
-
-    try:
-        if path2save:
-            
-            indexes = Aligned_rois.index.unique()
-            image_num = len(list(indexes))
-            slides=[]
-            for index in indexes:
-                slides.append(index[0])
-            slides = list(set(slides)) 
-            hdf5file = File(os.path.join(path2save,f"Images_{image_num}_grouped_MSIdata.hdf5"), mode="a")
-            logger.log("Grouped features is saved in hdf5 file of images:")
-            for index in indexes:
+    indexes = Aligned_rois.index.unique()
+    image_num = len(list(indexes))
+    slides=[]
+    for index in indexes:
+        slides.append(index[0]) 
+    slides = list(set(slides))
+    slide_naming=''
+    for slide in slides:
+        slide_naming = slide_naming +"_"+slide
+    if path2save:
+        path2file = os.path.join(path2save,f"Images_{image_num}_from_slides"+ slide_naming+"_grouped_MSIdata.hdf5")
+        hdf5file = File(path2file, mode="a")
+        logger.log("Grouped features is saved in hdf5 file of images:")
+        for index in indexes:
+            try:
                 hdf5file.create_dataset(index[0] + "/" + index[1] + "/"+ index[2] + "/features",data = Aligned_rois.loc[index])
                 hdf5file.create_dataset(index[0] + "/" + index[1] + "/"+ index[2] + "/xy",data = coords.loc[index])
                 logger.log(f"Data saved: {list(index)}")
-            hdf5file.attrs["Column headers"] = list(Aligned_rois.columns)
-            print(f"Grouped features is saved in hdf5 file")
-            hdf5file.close()
-    except Exception as error:
-        logger.warn(f"Error on {index}: \n{error}")
+            except Exception as error:
+                logger.warn(f"Error on {index}: \n{error}")
+        hdf5file.attrs["Column headers"] = list(Aligned_rois.columns)
+        print(f"Grouped features is saved in hdf5 file")
+        hdf5file.close()
 
     ########## under construction
     if pivoting4val:
