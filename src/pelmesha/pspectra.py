@@ -22,6 +22,7 @@ except Exception as error:
     warnings.warn(f"During import torch.multiprocessing package raised error: {error}. Using python package multiprocessing instead")
     from multiprocessing import Pool, cpu_count, Manager, Value
 
+BYTES_FLOAT_SIZE = {"single": 4, "double": 8, "half": 2}
 
 ## pairwise for python versions below 10 
 from sys import version_info
@@ -273,13 +274,8 @@ def Raw2proc(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={}, #
     cpu_num = cpu_count()-free_cores
     Ram_GB = Ram_GB*1e+9
     batch_bsize = Ram_GB/cpu_num
-    if dtypeconv =='single':
-        bytes_flsize = 4
-    elif dtypeconv == 'double':
-        bytes_flsize = 8
-    elif dtypeconv == 'half':
-        bytes_flsize = 2
-    ##
+    
+    bytes_flsize = BYTES_FLOAT_SIZE[dtypeconv]
     
     ###I. Finding slide directory for rawdata of samples (imzml)
     path_dict=find_imzml_roots(data_obj_path)
@@ -574,12 +570,8 @@ def Raw2peaklist(data_obj_path, baseliner_algo = 'asls', params2baseliner_algo={
     cpu_num = cpu_count()-free_cores
     Ram_GB = Ram_GB*1e+9
     batch_bsize = Ram_GB/cpu_num
-    if dtypeconv =='single':
-        bytes_flsize = 4
-    elif dtypeconv == 'double':
-        bytes_flsize = 8
-    elif dtypeconv == 'half':
-        bytes_flsize = 2
+
+    bytes_flsize = BYTES_FLOAT_SIZE[dtypeconv]
     ##
     chunk_size = np.ceil(h5chunk_size_MB*1e+6/(bytes_flsize*11))
 
@@ -871,12 +863,7 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = None, fwhhfilter = Non
     Ram_GB = Ram_GB*1e+9
     h5chunk_size_MB=h5chunk_size_MB*1e+6
     batch_bsize = Ram_GB/cpu_num
-    if dtypeconv =='single':
-        bytes_flsize = 4
-    elif dtypeconv == 'double':
-        bytes_flsize = 8
-    elif dtypeconv == 'half':
-        bytes_flsize = 2
+    bytes_flsize = BYTES_FLOAT_SIZE[dtypeconv]  
     ##
     chunk_size = np.ceil(h5chunk_size_MB/(bytes_flsize*11))
 
@@ -1221,12 +1208,7 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
                 sample_data[roi]["int"] = np.empty((roi_idx[roi][1],dots_num[roi]), dtype=dtypeconv)
                 ### Определим Chunksize при автоматическом определениии размера
                 if chunk_rowsize == "Auto":
-                    if dtypeconv == 'single':
-                        bytes_flsize = 4
-                    elif dtypeconv == 'double':
-                        bytes_flsize = 8
-                    elif dtypeconv == 'half':
-                        bytes_flsize = 2
+                    bytes_flsize = BYTES_FLOAT_SIZE[dtypeconv]
                     chunk_rowsize = np.ceil(chunk_bsize/(bytes_flsize*dots_num[roi]))
                 ###
             
@@ -1267,12 +1249,7 @@ def hdf5_writer(foldersample_path, queue,print_queue, dtypeconv,chunk_rowsize,ch
         sample_data[roi_num]["z"] = sample_imzml.coordinates[0][-1]
 
     if chunk_rowsize == "Auto":
-        if dtypeconv =='single':
-            bytes_flsize = 4
-        elif dtypeconv == 'double':
-            bytes_flsize = 8
-        elif dtypeconv == 'half':
-            bytes_flsize = 2
+        bytes_flsize = BYTES_FLOAT_SIZE[dtypeconv]
         chunk_rowsize = chunk_bsize/(bytes_flsize*dots_num[roi_num])
     del roi_num, dots_num
     ##
@@ -1686,12 +1663,7 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
         sample = folder_name+"_"+sample_name        
     base_path = os.path.join(folder_path2imzml,sample_name)
     ## Определение байтового размера одной точки
-    if dtypeconv =='single':
-        bytes_flsize = 4
-    elif dtypeconv == 'double':
-        bytes_flsize = 8
-    elif dtypeconv == 'half':
-        bytes_flsize = 2
+    bytes_flsize = BYTES_FLOAT_SIZE[dtypeconv]
     ##
     try:
         sample_imzml=ImzMLParser(sample_file)

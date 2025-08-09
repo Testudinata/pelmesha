@@ -193,7 +193,7 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
                     temp_extr_column.append(mz_type)
 
                     for head in headers:
-                        if head in extr_columns:
+                        if head in temp_extr_column:
                             column_nums.append(headers.index(head))
                             del temp_extr_column[temp_extr_column.index(head)]
                     if temp_extr_column:
@@ -419,7 +419,7 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
                         temp_extr_column.append(mz_type)
 
                         for head in headers:
-                            if head in extr_columns:
+                            if head in temp_extr_column:
                                 column_nums.append(headers.index(head))
                                 del temp_extr_column[temp_extr_column.index(head)]
                         if temp_extr_column:
