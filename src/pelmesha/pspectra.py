@@ -17,10 +17,13 @@ import matplotlib.pyplot as plt
 from math import sqrt
 import warnings
 try:
-    from torch.multiprocessing import Pool, cpu_count, Manager, Value
+    from torch.multiprocessing import Pool, cpu_count, Manager, Value, set_start_method
+
 except Exception as error:
     warnings.warn(f"During import torch.multiprocessing package raised error: {error}. Using python package multiprocessing instead")
-    from multiprocessing import Pool, cpu_count, Manager, Value
+    from multiprocessing import Pool, cpu_count, Manager, Value, set_start_method
+
+set_start_method('spawn')
 
 BYTES_FLOAT_SIZE = {"single": 4, "double": 8, "half": 2}
 
@@ -965,13 +968,21 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = None, fwhhfilter = Non
                 args_batches += list(product(batches,[sample],[roi]))
         data_obj_feat.close()
         print_queue.put(num_of_processes_works)
+        if args2peakpicking["SNR_threshold"] and args2peakpicking["Calc_peak_area"]:
+            headers = ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
+        elif args2peakpicking["SNR_threshold"] :
+            headers = ["spectra_ind","mz","Intensity","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
+        elif args2peakpicking["Calc_peak_area"]:
+            headers = ["spectra_ind","mz","Intensity","Area","PextL","PextR","FWHML","FWHMR"]
+        else: 
+            headers = ["spectra_ind","mz","Intensity","PextL","PextR","FWHML","FWHMR"]
         with Pool(cpu_num) as p:
         
             for args_batch in args_batches:
 
                 sample=args_batch[1]
                 roi = args_batch[2]
-                args_batch = list(product(args_batch[0],[sample],[roi],[file_path],[args2peakpicking],[dtypeconv],[print_queue]))
+                args_batch = list(product(args_batch[0],[sample],[roi],[file_path],[args2peakpicking],[dtypeconv],[print_queue],[headers]))
                 results = np.vstack(p.starmap(proc2peaklist_parbatched,args_batch))
                 with File(file_path,'a') as data_obj_feat:
                     
@@ -982,10 +993,11 @@ def proc2peaklist(data_obj_path, oversegmentationfilter = None, fwhhfilter = Non
                         data_obj_feat[sample][roi]["peaklists"].resize(start_row + npeaks ,0)
                         data_obj_feat[sample][roi]["peaklists"][start_row:(start_row+ npeaks),:] = results
                     except:
-                        data_obj_feat.create_dataset(sample + "/" + roi + "/peaklists",results.shape, maxshape = (None, 11), chunks=(chunk_size, 11))
+                        data_obj_feat.create_dataset(sample + "/" + roi + "/peaklists",results.shape, maxshape = (None, len(headers)), chunks=(chunk_size, len(headers)))
 
                         data_obj_feat[sample][roi]["peaklists"][:] = results
-                        data_obj_feat[sample][roi]["peaklists"].attrs["Column headers"] = ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
+                        data_obj_feat[sample][roi]["peaklists"].attrs["Column headers"] = headers
+                        #["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
 
                     data_obj_feat.close()
                 
@@ -1552,7 +1564,7 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
             logger.log(f"Added peaklists data")
         except:
             logger.log(f"Creating peaklist dataset for {sample} {roi}")
-            hdf5.create_dataset(sample + "/" + roi + "/peaklists",peaklists.shape, maxshape = (None, 11), chunks=(chunk_size, 11))
+            hdf5.create_dataset(sample + "/" + roi + "/peaklists",peaklists.shape, maxshape = (None, len(headers)), chunks=(chunk_size, len(headers)))
             hdf5[sample][roi]["peaklists"][:] = peaklists
 
             hdf5[sample][roi]["peaklists"].attrs["Column headers"] = headers
@@ -1564,7 +1576,7 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dots_num,
     logger.ended()
     return
             
-def proc2peaklist_parbatched(sl, sample ,roi ,sample_file_path,args2peakpicking={},dtypeconv='single',print_queue=None):
+def proc2peaklist_parbatched(sl, sample ,roi ,sample_file_path,args2peakpicking={},dtypeconv='single',print_queue=None, headers=None):
     """
     Общее описание
     ----
@@ -1604,14 +1616,7 @@ def proc2peaklist_parbatched(sl, sample ,roi ,sample_file_path,args2peakpicking=
     :rtype: `NoneType`
     """
     ## Пояснение, что какого-то файла не удалось найти/открыть при массовой обработке данных
-    if args2peakpicking["SNR_threshold"] and args2peakpicking["Calc_peak_area"]:
-        headers = ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
-    elif args2peakpicking["SNR_threshold"] :
-        headers = ["spectra_ind","mz","Intensity","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
-    elif args2peakpicking["Calc_peak_area"]:
-        headers = ["spectra_ind","mz","Intensity","Area","PextL","PextR","FWHML","FWHMR"]
-    else: 
-        headers = ["spectra_ind","mz","Intensity","PextL","PextR","FWHML","FWHMR"]
+
     peaks_prop_infunc.headers = headers[3:]
     with File(sample_file_path,'r', libver='latest', swmr=True) as data_obj:
         idx_range = range(sl.start,sl.stop)
@@ -1631,7 +1636,7 @@ def poslog_parbatched(sample_file, batch_bsize, dtypeconv, print_queue,cpu_num,r
 
     :param sample_file: path to spectra source `imzML`
     :param batch_bsize: размер одного батча в байтах. Определяется автоматически на основе рассчётов по кол-ву ядер и заданного параметра в других функциях по максимальному занимаемому RAM (Like `Ram_GB`)
-    :param print_queue: Менеджер для отображения сообщений на экран с процесса.
+    :param print_queue: Менеджер для отображения сообщений на экран с процесса и для отсчёта прогресса по tqdm
     :param cpu_num: предполагаемое кол-во используемых процессов CPU
     :param resample_to_dots: resample spectra to number of dots. Default: `None`
     :param dtypeconv: convert data to `"double"`,`"single"` or `"half"` float type. The default is `"single"`
