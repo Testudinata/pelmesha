@@ -747,7 +747,7 @@ def Peak_assignment(ftable_batch,Xp_batch,Xl_batch,Xr_batch):
             ftable_batch.loc[(ftable_batch['mz']>=Xl_batch[idx]) & (ftable_batch['mz']<=Xr_batch[idx]),"Peak"] = peak
     return ftable_batch
 
-def mspeaks_KD(X, Y,oversegmentationfilter=0,peaklocation=1):
+def mspeaks_KD(X, Y,oversegmentationfilter=None,peaklocation=1):
     """    
     Описание
     ----
@@ -771,24 +771,26 @@ def mspeaks_KD(X, Y,oversegmentationfilter=0,peaklocation=1):
         pos_peak[idx] = pp
     
     # Remove oversegmented peaks
-    while True:
-        peak_thld = val_max * peaklocation - math.sqrt(np.finfo(float).eps)
-        pkX = np.empty(left_min.shape)
-        
-        for idx, [lm, rm, th] in enumerate(zip(left_min, right_min, peak_thld)):
-            mask = Y[lm:rm] >= th
-            if np.sum(mask) == 0:
-                pkX[idx]=np.nan
-            else:
-                pkX[idx] = np.sum(Y[lm:rm][mask] * X[lm:rm][mask]) / np.sum(Y[lm:rm][mask])
-        dpkX = np.concatenate(([np.inf], np.diff(pkX), [np.inf]))
-        
-        j = np.where((dpkX[1:-1] <= oversegmentationfilter) & (dpkX[1:-1] <= dpkX[:-2]) & (dpkX[1:-1] < dpkX[2:]))[0]
-        if j.size == 0:
-            break
-        left_min = np.delete(left_min, j + 1)
-        right_min = np.delete(right_min, j)
-        
-        val_max[j] = np.maximum(val_max[j], val_max[j + 1])
-        val_max = np.delete(val_max, j + 1)
+    if oversegmentationfilter:
+        while True:
+            peak_thld = val_max * peaklocation - math.sqrt(np.finfo(float).eps)
+            pkX = np.empty(left_min.shape)
+            
+            for idx, [lm, rm, th] in enumerate(zip(left_min, right_min, peak_thld)):
+                mask = Y[lm:rm] >= th
+                if np.sum(mask) == 0:
+                    pkX[idx]=np.nan
+                else:
+                    pkX[idx] = np.sum(Y[lm:rm][mask] * X[lm:rm][mask]) / np.sum(Y[lm:rm][mask])
+            dpkX = np.concatenate(([np.inf], np.diff(pkX), [np.inf]))
+            
+            j = np.where((dpkX[1:-1] <= oversegmentationfilter) & (dpkX[1:-1] <= dpkX[:-2]) & (dpkX[1:-1] < dpkX[2:]))[0]
+            if j.size == 0:
+                break
+            left_min = np.delete(left_min, j + 1)
+            right_min = np.delete(right_min, j)
+            
+            val_max[j] = np.maximum(val_max[j], val_max[j + 1])
+            val_max = np.delete(val_max, j + 1)
+            
     return pkX,X[left_min], X[right_min]
