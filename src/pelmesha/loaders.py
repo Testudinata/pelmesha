@@ -40,7 +40,7 @@ def hdf5_Load(path_list, file_end=''):
         Slide_name=os.path.basename(path.replace(file_end,""))
         Slide_data[Slide_name] = File(path,"r")
     if not hdf5path_list:
-        logger.warn(f"Data not readed due to missing hdf5 with spectra data (hdf5 with end \"{file_end}\" in the name is missing)", stacklevel=2)
+        logger.warn(f"Data not readed due to missing hdf5 with spectra data (hdf5 with end \"{file_end}\" in the name is missing)")
     logger.ended()
     return Slide_data
 
@@ -363,6 +363,7 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
         samples = True
     elif isinstance(paths,str):
         path_list = [paths]
+        samples = False
     if isinstance(extr_columns, str):
         extr_columns=[extr_columns]
     for path in path_list:
@@ -417,7 +418,8 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
                             extr_columns.append("spectra_ind")
                         temp_extr_column = extr_columns.copy()
                         temp_extr_column.append(mz_type)
-
+                        if not isinstance(headers,list):
+                            headers = list(headers)
                         for head in headers:
                             if head in temp_extr_column:
                                 column_nums.append(headers.index(head))
@@ -498,6 +500,8 @@ def find_paths(path_list,file_end = '.imzML'):
     :rtype: list
     """
     logger("find_paths",{**locals()})
+    if isinstance(path_list,str):
+        path_list=[path_list]
     file_end = file_end.lower()
     files_path_list = []
     for path in path_list:

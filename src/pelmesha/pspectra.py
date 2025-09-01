@@ -22,9 +22,10 @@ try:
 except Exception as error:
     warnings.warn(f"During import torch.multiprocessing package raised error: {error}. Using python package multiprocessing instead")
     from multiprocessing import Pool, cpu_count, Manager, Value, set_start_method
-
-set_start_method('spawn')
-
+try:
+    set_start_method('spawn')
+except:
+    pass
 BYTES_FLOAT_SIZE = {"single": 4, "double": 8, "half": 2}
 
 ## pairwise for python versions below 10 
