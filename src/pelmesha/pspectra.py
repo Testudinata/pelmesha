@@ -349,6 +349,7 @@ class AdaptiveParameter():
 #             self.source = File(path,'r',libver='latest')
 #     def _load_data(self,)
 #     def __getitem__(self)
+
 def _adapt_proccesing_parameters(
     mz_scale: np.ndarray,
     smooth_window: Union[Callable[[float], float], float, None] = None,
@@ -469,14 +470,12 @@ def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsiz
     logger.log(f"Num of CPU for usage {cpu_num}")
     corenum_counter = Value('i',0) 
     ## Выгрузка данных с помощью ImzMLParser'a и их конвертация в hdf5 (в дальнейшем работаем с hdf5)
-    logger.log(f"Creating Queue for getting information from processes")
+    logger.log(f"Creating Queue for getting information and controling  pool processes")
     manager = Manager()
     print_queue = manager.Queue()
-    logger.log(f"Creating Queue for controling processes for single process acessing to hdf5")
     queue = manager.Queue()
-    logger.log(f"Puting True to queue")
     queue.put(True)
-    logger.log(f"Creating thread for print and visualizing progress")
+    logger.log(f"Creating thread for print and bar progress")
     t = Thread(target=printer,args=[print_queue])
     t.start()
     print_queue.put(len(sample_imzmlpath_list))
@@ -592,7 +591,6 @@ def Raw2proc(data_obj_path,
     ###I. Finding slide directory for rawdata of samples (imzml)
     path_dict=find_imzml_roots(data_obj_path)
     logger.log(f'Path to files dictionary: {path_dict}')
-    ###I Finding slide directory with rawdata of samples (path_list) - DONE
     
     # Working with slides
     for file_path in path_dict.keys():
@@ -604,7 +602,6 @@ def Raw2proc(data_obj_path,
         sample_list = path_dict[file_path]
        
         ###II. Extracting spectra coordinates, roi indexes, other metadata for proccessing slide samples from poslog and _info text files. Input arguments organization for "intprocc_parbatched_imzml" function (spectra processing batched and parallelized)
-        ###II. Вытаскивание данных координат точек и индексов для областей(roi), если их несколько, из poslog и _info. Организация входных параметров для функции "intprocc_parbatched_imzml", включая batch'ей для параллельной выгрузки
         print(f"Slide's {slide} spectra coordinates and metadata extraction for preparation parallel proccessing")
         logger.log(f"Slide's {slide} spectra coordinates and metadata extraction for preparation parallel proccessing")
         
@@ -659,7 +656,6 @@ def Raw2proc(data_obj_path,
             args_batches = args_batches + list(args_batch + (DataProc_configs, queue, chunk_size_dict[args_batch[0]].copy()) for args_batch in data[1])
         del data_obj_temp
         gc.collect()
-        #### Подготовка аргументов для процессинга данных
         ##II. Coordinates, metadata and organization of input arguments for parallelized and batched proccessing of spectra - DONE
         ## Deleting old hdf5 file if it has
         base_path = os.path.join(file_path,slide)
@@ -683,7 +679,6 @@ def Raw2proc(data_obj_path,
                             print("Old hdf5 file deleted")
                             
                             break
-                            #print('tryed',sample,roi)
                         except:
                             pass
                         
@@ -701,17 +696,16 @@ def Raw2proc(data_obj_path,
         with Pool(cpu_num, initializer = init_worker, initargs=['int2procc_parbatched',corenum_counter]) as p:
             p.starmap(int2procc_parbatched,args_batches)
         p.join()
-        ##III. Proccessing, peakpicking and writing to hdf5 - Done
+
         ##IV. Drawing example result
         print_queue.put(0)
-        if draw: #Секция для отрисовки полученных результатов
+        if draw: 
             draw_data(base_path + "_specdata.hdf5",
                         sample_spectra_idx = sample_spectra_idx,
                         plot_mz_range = plot_mz_range,
                         **configs)
-    # Закрытие hdf5 объёктов
-    # Closing threads and hdf5 object
     
+    # Closing threads
     print_queue.put(Sentinel())
     t.join()
     logger.ended()
@@ -833,13 +827,9 @@ def Raw2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spectr
     ###I. Finding slide directory for rawdata of samples (imzml)
     path_dict=find_imzml_roots(data_obj_path)
     logger.log(f'Path to files dictionary: {path_dict}')
-    ###I Finding slide directory with rawdata of samples (path_list) - DONE
 
     # Processing
     for file_path in path_dict.keys():
-        
-        
-
         slide = os.path.basename(file_path)  
         print(f"The {slide} raw spectra data is on progress.")
         
@@ -847,7 +837,6 @@ def Raw2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spectr
         sample_list = path_dict[file_path]
 
         ###II. Extracting spectra coordinates, roi indexes, other metadata for proccessing slide samples from poslog and _info text files. Input arguments organization for "intprocc_parbatched_imzml" function (spectra processing batched and parallelized)
-        ###II. Вытаскивание данных координат точек и индексов для областей(roi), если их несколько, из poslog и _info. Организация входных параметров для функции "intprocc_parbatched_imzml", включая batch'ей для параллельной выгрузки
         print(f"Slide's {slide} spectra coordinates and metadata extraction for preparation parallel proccessing")
         logger.log(f"Slide's {slide} spectra coordinates and metadata extraction for preparation parallel proccessing")
         with Pool(cpu_num) as p:
@@ -878,8 +867,6 @@ def Raw2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spectr
         del data_obj_temp
         gc.collect()
         
-
-        ##II. Coordinates, metadata and organization of input arguments for parallelized and batched proccessing of spectra - DONE
         ## Deleting old hdf5 file if it has dataset with rawpeaklist
         base_path = os.path.join(file_path,slide)
         configs.dump(base_path)
@@ -893,7 +880,6 @@ def Raw2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spectr
         if os.path.isfile(base_path+"_specdata.hdf5"): # if hdf5 exist
             data_obj_feat = File(base_path+"_specdata.hdf5","r")
 
-            #try:
             flag_feat = False
             flag_mzint = True
             
@@ -902,12 +888,10 @@ def Raw2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spectr
                     
                     try:
                         data_obj_feat[sample][roi]['int']
-                        #print('tryed',sample,roi)
                     except:
                         data_obj_feat.close()
                         flag_mzint = False
                         os.remove(base_path+"_specdata.hdf5")
-                        #print("deleted")
                         break
                     try:
                         data_obj_feat[sample][roi]['peaklists']
@@ -935,7 +919,6 @@ def Raw2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spectr
                         data_obj_feat_new.create_dataset(sample+"/" + roi + "/" + "int",data=data_obj_feat[sample][roi]["int"][:], chunks = data_obj_feat[sample][roi]["int"].chunks)
                 data_obj_feat_new.close()
                 data_obj_feat.close()
-                #print("repacked")
                 os.remove(base_path+"_specdata.hdf5")
                 os.rename(base_path+"new.hdf5",base_path+"_specdata.hdf5")
                 
@@ -943,7 +926,6 @@ def Raw2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spectr
 
         else: # if hdf5 doesn't exist
             data_obj_feat = File(base_path+"_specdata.hdf5","a")
-        ## Deleting old hdf5 file - Done
         data_obj_feat.close()
         logger.log(f"Slide's {slide} spectra coordinates writing")
 
@@ -960,115 +942,12 @@ def Raw2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spectr
         p.join()
         print_queue.put(0) #closing old tqdm bar
         
-        ##IV. Proccessing, peakpicking and writing to hdf5 - Done
         if draw: #Секция для отрисовки полученных результатов
             draw_data(base_path+"_specdata.hdf5",
                         sample_spectra_idx = sample_spectra_idx,
                         plot_mz_range = plot_mz_range,
                         **configs)
-                        # resample_to_dots = resample_to_dots,
-                        # DataProc_configs = DataProc_configs,
-                        # PeakPicking_configs = PeakPicking_configs)
-            # args_batches=pd.DataFrame(args_batches)
-            # for sample in data_obj_coord.keys():
-            #     for roi in data_obj_coord[sample].keys():
-                    
-            #         dataf = pd.DataFrame(data_obj_feat[sample][roi]["peaklists"][:].T, data_obj_feat[sample][roi]["peaklists"].attrs["Column headers"]).T
-            #         dataf = dataf.astype({"spectra_ind": int})
-                    
-            #         plt.figure().set_figwidth(25)
-            #         plt.gcf().set_figheight(5)
-
-            #         idx_start, numspec = data_obj_coord[sample][roi]["idxroi"]
-            #         raw = ImzMLParser(data_obj_coord[sample][roi]["source"])
-            #         idx_spec = np.random.randint(idx_start,idx_start+numspec)
-            #         print(f'Spectrum number: {idx_spec}')
-            #         data_mz_old, data_int_old = raw.getspectrum(idx_spec)
-            #         roi_idx_spec = idx_spec-idx_start
-            #         loc_args2procc={"baseline_algo": baseline_algo, "params2baseline_correction": params2baseline_correction,"params2align":params2align, "align_peaks":align_peaks,"weights_list":weights_list,"smooth_algo":smooth_algo, "smooth_cycles":smooth_cycles}
-            #         if resample_to_dots:
-            #             min_mz, max_mz = args_batches.loc[(args_batches.loc[:,1]==sample) & (args_batches.loc[:,2]==roi)].iloc[0,8]
-            #             data_mz = np.array(list(np.linspace(min_mz,max_mz,resample_to_dots)))
-            #             if loc_args2procc["params2align"]["only_shift"]:
-            #                 dots_shift = int(max_shift_mz/(np.median(np.diff(data_mz))))
-            #             else:
-            #                 dots_shift = max_shift_mz
-            #             loc_args2procc['dots_shift']=dots_shift
-            #             loc_args2procc["smooth_window"]=int(smooth_window/(np.median(np.diff(data_mz))))
-            #             data_int = DataProc_resample1d(data_int_old,data_mz_old,data_mz,Baseline(data_mz),**loc_args2procc)
-            #         else:
-            #             data_mz = data_mz_old
-            #             if loc_args2procc["params2align"]["only_shift"]:
-            #                 dots_shift = int(max_shift_mz/(np.median(np.diff(data_mz))))
-            #             else:
-            #                 dots_shift = max_shift_mz
-            #             loc_args2procc['dots_shift']=dots_shift
-            #             loc_args2procc["smooth_window"]=int(smooth_window/(np.median(np.diff(data_mz))))
-            #             data_int = DataProc_base1d(data_int_old,data_mz,Baseline(data_mz),**loc_args2procc)
-                
-            #         if plot_mz_range:
-
-            #             diapold=(np.array(data_mz_old>plot_mz_range[0]) & np.array(data_mz_old<plot_mz_range[1]))
-            #             diap = (np.array(data_mz>plot_mz_range[0]) & np.array(data_mz<plot_mz_range[1]))
-            #             dataf.query("mz>@plot_mz_range[0] and mz<@plot_mz_range[1] and spectra_ind==@roi_idx_spec").plot(x="mz",y="Intensity",ax = plt.gca(), style = "x")
-            #             startg = plot_mz_range[0]
-            #             endg = plot_mz_range[1]
-            #         else:
-            #             diapold=range(len(data_mz_old))
-            #             diap = range(len(data_mz))
-            #             startg = min(data_mz)
-            #             endg = max(data_mz)
-            #             dataf.query("spectra_ind==@roi_idx_spec").plot(x="mz",y="Intensity",ax = plt.gca(), style = "x")
-                    
-
-            #         plt.plot(dataf.query("PextL>@startg and PextL<@endg and spectra_ind==@roi_idx_spec")['PextL'],
-            #                 [0]*len(dataf.query("PextL>@startg and PextL<@endg and spectra_ind==@roi_idx_spec")['PextL']),'v')
-            #         plt.plot(dataf.query("PextR>@startg and PextR<@endg and spectra_ind==@roi_idx_spec")['PextR'],
-            #                 [0]*len(dataf.query("PextR>@startg and PextR<@endg and spectra_ind==@roi_idx_spec")['PextR']),'^')
-            #         plt.plot(data_mz_old[diapold], data_int_old[diapold])
-            #         plt.plot(data_mz[diap], data_int[diap])
-            #         plt.grid(visible = True, which="both")
-            #         plt.title(f'Sample: {sample}, roi: {roi}')
-            #         plt.legend(['Peaks', 'Peak`s left base', 'Peak`s right base', 'Original spectrum','Processed spectrum'])
-            #         plt.minorticks_on()
-            #         plt.xlim((startg,endg))
-            #         plt.show()
-            #         del diapold
-                
-
-        # with open(os.path.join(file_path,"Processing_settings.txt"), "w") as file:
-        #     file.write("###Raw spectra proccessing\n##Spectra aligning(msalign function):\n")
-        #     file.write(f"Aligning peaks list:{align_peaks}\nPeaks weights: {weights_list}\nMax shift in mz scale: {max_shift_mz}\nOther align parametres:")
-        #     for key in params2align.keys():
-        #         file.write(f"{key}: {params2align[key]}\n")
-        #     file.write(f"##Resampling data (interp1d function):\nResampling to dots:{resample_to_dots}.\n")
-        #     file.write(f"Previous data in dots:\n")
-        #     for sample in data_obj_coord.keys():
-        #         for roi in data_obj_coord[sample].keys():
-        #             file.write(f'   for {sample} roi {roi}: ')
-        #             sourced=ImzMLParser(data_obj_coord[sample][roi]['source'])
-        #             if data_obj_coord[sample][roi]['continuous']:
-        #                 data_mz_old=sourced.getspectrum(0)[0]
-        #                 file.write(f'continious data with {len(data_mz_old)} number of dots between {data_mz_old[0]} and {data_mz_old[-1]} m/z')
-        #             else:
-        #                 file.write(f'proccessed data with median {np.median(sourced.mzLengths)} number of dots')
-
-        #     file.write(f"##Baseline correction (pybaseline package, class Baseline)):\nAlgorithm:{baseline_algo}\n")
-        #     for key in params2baseline_correction.keys():
-        #         file.write(f"{key}: {params2baseline_correction[key]}\n")
-        #     file.write(f"##Smoothing (smoothing function):\nSmooth algorithm: {smooth_algo}\nWindow {smooth_window}\nCycles {smooth_cycles}\n")    
-        #     file.write(f"##Other parametres:\nBatch size: {batch_bsize/1000000} Mb\nData type convertion to: {dtypeconv}\n")  
-        #     file.write("\n\n##Peak picking\n")
-        #     if isinstance(oversegmentationfilter,str):
-        #         file.write(f"Oversegmentation filter is local median FWHH\n")
-        #     else:
-        #         file.write(f"Oversegmentation filter: {oversegmentationfilter}\n")
-        #     file.write(f"Full width at half height (FWHH) filter: {fwhhfilter} mz\n")    
-        #     file.write(f"Absolute height threshold: {heightfilter}\nRelative height threshold: {rel_heightfilter}\n")
-        #     file.write(f"\n##Noise estimation by std or MAD\nIterations of noise estimation: {noise_est_iterations}\nMAD or std: {noise_est}\nPeaks SNR threshold filtration: {SNR_threshold}\n")
-        #     file.write(f"\n##Other parametres:\nBatch size: {batch_bsize/1000000} Mb\nData type convertion to: {dtypeconv}\n")    
-
-    # Закрытие hdf5 объёктов
+                        
     # Closing threads and hdf5 object
 
     print_queue.put(Sentinel())
@@ -1146,7 +1025,6 @@ def proc2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spect
     path_list=find_paths(data_obj_path,file_end = '_specdata.hdf5')
 
     for file_path in path_list:        
-        ##II. Coordinates, metadata and organization of input arguments for parallelized and batched proccessing of spectra - DONE
 
         ## Deleting old hdf5 file if it has dataset with peaklists
         directory_path = os.path.dirname(file_path)
@@ -1194,7 +1072,7 @@ def proc2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spect
                         pass
             data_obj_feat_new.close()
             data_obj_feat.close()
-            #print("repacked")
+
             os.remove(file_path)
             os.rename(os.path.join(directory_path,slide)+"new.hdf5",file_path)
         
@@ -1256,9 +1134,7 @@ def proc2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spect
 
                         data_obj_feat[sample][roi]["peaklists"][:] = results
                         data_obj_feat[sample][roi]["peaklists"].attrs["Column headers"] = headers
-                        #["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
 
-                
         p.join()
         ##III. Peakpicking and writing to hdf5 - Done
         ##IV. Writing results
@@ -1268,81 +1144,9 @@ def proc2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spect
                         sample_spectra_idx = sample_spectra_idx,
                         plot_mz_range = plot_mz_range,
                         **PeakPicking_configs)
-        # data_obj_feat = File(file_path,"a")
-        # for sample in data_obj_feat.keys():
-        #     for roi in data_obj_feat[sample].keys():
 
-        #         #print(f"sample{sample} roi {roi} num spec{max(data_obj_feat[sample][roi]["peaklists"][:,0])} COORDS NUM {data_obj_coord[sample][roi]["xy"].shape}")
-        #         if draw: #Секция для отрисовки полученных результатов
-        #             
-        #             dataf = pd.DataFrame(data_obj_feat[sample][roi]["peaklists"][:].T, data_obj_feat[sample][roi]["peaklists"].attrs["Column headers"]).T
-        #             dataf = dataf.astype({"spectra_ind": int})
-
-                    
-        #             plt.figure().set_figwidth(25)
-        #             plt.gcf().set_figheight(5)
-        #             idx_start = data_obj_feat[sample][roi].attrs['idxroi'][0]
-        #             nspec= data_obj_feat[sample][roi].attrs['idxroi'][1]
-        #             path2imzml = data_obj_feat[sample][roi].attrs['source']
-
-        #             num_spec = np.random.randint(idx_start,idx_start+nspec)
-        #             print(f'Spectrum number: {num_spec}')
-        #             roi_num_spec = num_spec-idx_start
-        #             data_mz_old, data_int_old = ImzMLParser(path2imzml).getspectrum(num_spec)
-        #             data_int_old.shape = (data_int_old.shape[0],1)
-
-                    
-        #             data_mz = data_obj_feat[sample][roi]['mz'][:]
-        #             data_int = data_obj_feat[sample][roi]['int'][roi_num_spec,:]
-                
-        #             if plot_mz_range is not None:
-
-        #                 diapold=(np.array(data_mz_old>plot_mz_range[0]) & np.array(data_mz_old<plot_mz_range[1]))
-        #                 diap = (np.array(data_mz>plot_mz_range[0]) & np.array(data_mz<plot_mz_range[1]))
-        #                 dataf.query("mz>@plot_mz_range[0] and mz<@plot_mz_range[1] and spectra_ind==@roi_num_spec").plot(x="mz",y="Intensity",ax = plt.gca(), style = "x")
-        #                 startg = plot_mz_range[0]
-        #                 endg = plot_mz_range[1]
-        #             else:
-        #                 diapold=range(len(data_mz_old))
-        #                 diap = range(len(data_mz))
-        #                 startg = min(data_mz)
-        #                 endg = max(data_mz)
-        #                 dataf.query("spectra_ind==@roi_num_spec").plot(x="mz",y="Intensity",ax = plt.gca(), style = "x")
-                    
-
-        #             plt.plot(dataf.query("PextL>@startg and PextL<@endg and spectra_ind==@roi_num_spec")['PextL'],
-        #                     [0]*len(dataf.query("PextL>@startg and PextL<@endg and spectra_ind==@roi_num_spec")['PextL']),'v')
-        #             plt.plot(dataf.query("PextR>@startg and PextR<@endg and spectra_ind==@roi_num_spec")['PextR'],
-        #                     [0]*len(dataf.query("PextR>@startg and PextR<@endg and spectra_ind==@roi_num_spec")['PextR']),'^')
-        #             plt.plot(data_mz_old[diapold], data_int_old[diapold])
-        #             plt.plot(data_mz[diap], data_int[diap])
-        #             plt.grid(visible = True, which="both")
-        #             plt.title(f'Sample: {sample}, roi: {roi}')
-        #             plt.legend(['Peaks', 'Peak`s left base', 'Peak`s right base', 'Original spectrum','Processed spectrum'])
-        #             plt.minorticks_on()
-        #             plt.xlim(plot_mz_range)
-        #             plt.show()
-        #             del diapold
-        # try:
-        #     with open(os.path.join(directory_path,"Processing_settings.txt"), "r") as file:
-        #         text = file.read()
-        # except:
-        #     text = ''
-        #     pass
-        # with open(os.path.join(directory_path,"Processing_settings.txt"), "w") as file:
-        #     file.write(text[:text.find("\n\n##Peak picking")])
-        #     file.write("\n\n##Peak picking\n")
-        #     if isinstance(oversegmentationfilter,str):
-        #         file.write(f"Oversegmentation filter is local median FWHH")
-        #     else:
-        #         file.write(f"Oversegmentation filter: {oversegmentationfilter}")
-        #     file.write(f"Full width at half height (FWHH) filter: {fwhhfilter} mz")      
-        #     file.write(f"Absolute height threshold: {heightfilter}\nRelative height threshold: {rel_heightfilter}\n")
-        #     file.write(f"\n##Noise estimation by std or MAD\nIterations of noise estimation: {noise_est_iterations}\nMAD or std: {noise_est}\nPeaks SNR threshold filtration: {SNR_threshold}\n")
-        #     file.write(f"\n##Other parametres:\nBatch size: {batch_bsize/1000000} Mb\nData type convertion to: {dtypeconv}\n")
         print_queue.put(0) # закрываем tqdm
     gc.collect()
-    # Закрытие hdf5 объёктов
     # Closing threads and hdf5 object
     logger.ended()
     print_queue.put(Sentinel())
@@ -1614,22 +1418,8 @@ def int2procc_parbatched(sample_file_path, sample,roi,interval,dtypeconv,dcont, 
     :rtype: `NoneType`
     """
     logger(f"Raw2proc_on_core_{int2procc_parbatched.name}",{**locals()})
-    ## Пояснение, что какого-то файла не удалось найти/открыть при массовой обработке данных
     idx_range = range(*interval)
     sample_imzml=ImzMLParser(sample_file_path)
-    # temp = queue.get()
-    # Slide_folder = os.path.dirname(os.path.dirname(sample_file_path))
-    # logger.log(f"Reading data")    
-    # ## Пояснение, что какого-то файла не удалось найти/открыть при массовой обработке данных
-    # try:
-    #     with File(os.path.join(Slide_folder,os.path.basename(Slide_folder)) +"_specdata.hdf5",'r', libver='latest') as hdf5:
-    #         idx_start = hdf5[sample][roi].attrs['idxroi'][0]
-    # except Exception as error:
-    #     logger.warn(f"During reading data raised folowing exception:{error}")
-    # queue.put(True)
-    # nspec_range=range(interval[0]-idx_start,interval[1]-idx_start)
-
-    logger.log(f"Processing data")
     if dcont:
         if resampled_mz is not None:
             data_mz = sample_imzml.getspectrum(0)[0].astype(dtypeconv)
@@ -2029,33 +1819,16 @@ def setup_spectra_batching(sample_file, batch_bsize, dtypeconv, print_queue,cpu_
                 data_mz = sample_imzml.getspectrum(idx)[0].astype(dtypeconv)
                 min_mz = min([min_mz,min(data_mz)])
                 max_mz = max([max_mz,max(data_mz)])
-
-        ####
         
         if resample_to_dots:
             resampled_mz = np.linspace(min_mz,max_mz,resample_to_dots).astype(dtypeconv)
             data_mz = resampled_mz
-        #     dots_distance = (max_mz - min_mz)/resample_to_dots
-        #     if baseliner:
-        #         baseliner = getattr(Baseline(resampled_mz),baseliner)
-        # elif dcont:
-        #     resampled_mz = None
-        #     dots_distance = np.median(np.diff(data_mz))
-        #     if baseliner:
-        #         baseliner = getattr(Baseline(data_mz),baseliner)
         else:
             resampled_mz = None
         
         if resample_to_dots or dcont:
             smooth_window, shift_range, baseliner = _adapt_proccesing_parameters(data_mz, smooth_window, shift_range, baseliner)
-            # if callable(smooth_window):
-            #     smooth_window = smooth_window(dots_distance = dots_distance)
-            # if callable(shift_range):
-            #     shift_range = shift_range(dots_distance = dots_distance)
 
-        
-    
-        ####
         par_args = [
             *par_args, 
             *list(product(
@@ -2327,112 +2100,6 @@ def find_imzml_roots(paths):
     for key in path_dict.keys():
         path_dict[key]=list(set(path_dict[key]))
     return path_dict
-
-#Вырезка кода для сглаживания от великого любителя кодить Martin Strohalm, который написал mMass - адекватную, качественную и бесплатную прогу для масс спектрометрии
-# def smoothing(y, smooth_algo, smooth_window, smooth_cycles):
-#     """Smooth signal by moving average filter. New array is returned.
-#         signal (numpy array) - signal data points
-#         smooth (MA GA SG) - smoothing smooth: MA - moving average, GA - Gaussian, SG - Savitzky-Golay
-#         window (float) - m/z window size for smoothing
-#         cycles (int) - number of repeating cycles
-#     """
-#     # check signal data
-#     if len(y) == 0:
-#         return np.array([])
-
-#     # apply moving average filter
-#     if smooth_algo == 'MA':
-#         return movaver(y, smooth_window, smooth_cycles, style='flat')
-    
-#     # apply gaussian filter
-#     elif smooth_algo == 'GA':
-#         return movaver(y, smooth_window, smooth_cycles, style='gaussian')
-    
-#     # apply savitzky-golay filter
-#     elif smooth_algo == 'SG':
-#         return savgol(y, smooth_window, smooth_cycles)
-    
-#     # unknown smoothing smooth
-#     else:
-#         print("Смузинг нот юсд")
-#         return y
-
-# def movaver(y, window, cycles, style):
-#     """Smooth signal by moving average filter. New array is returned.
-#         signal (numpy array) - signal data points
-#         window (float) - m/z window size for smoothing
-#         cycles (int) - number of repeating cycles
-#     """
-    
-
-#     if window < 3:
-#         return y.copy()
-#     if not window % 2:
-#         window -= 1
-    
-#     # smooth the points
-#     while cycles:
-        
-#         if style == 'flat':
-#             w = np.ones(window,'f')
-#         elif style == 'gaussian':
-#             r = np.array([(i-(window-1)/2.) for i in range(window)])
-#             w = np.exp(-(r**2/(window/4.)**2))
-#         else:
-#             w = eval('np.'+style+'(window)')
-        
-#         s = np.r_[y[window-1:0:-1], y, y[-2:-window-1:-1]]
-#         yy = np.convolve(w/w.sum(), s, mode='same')
-#         y = yy[window-1:-window+1]
-#         cycles -=1
-
-
-#     return y
-
-# def savgol(y, window, cycles, order=3): #Не работает!!!!!!!!!!!!!!!!!!!!
-#     """Smooth signal by Savitzky-Golay filter. New array is returned.
-#         signal (numpy array) - signal data points
-#         window (float) - m/z window size for smoothing
-#         cycles (int) - number of repeating cycles
-#         order (int) - order of polynom used
-#     """
-    
-#     if window <= order:
-#         return y
-    
-#     # coefficients
-#     orderRange = range(order+1)
-#     halfWindow = (window-1) // 2
-#     b = np.asmatrix([[k**i for i in orderRange] for k in range(-halfWindow, halfWindow+1)])
-#     m = np.linalg.pinv(b).A[0]
-#     window = len(m)
-#     halfWindow = (window-1) // 2
-    
-#     # precompute the offset values for better performance
-#     offsets = range(-halfWindow, halfWindow+1)
-#     offsetData = zip(offsets, m)
-    
-#     # smooth the data
-#     while cycles>0:
-#         smoothData = list()
-        
-#         y = np.concatenate((np.zeros(halfWindow)+y[0], y, np.zeros(halfWindow)+y[-1]))
-#         for i in range(halfWindow, len(y) - halfWindow):
-            
-#             value = 0.0
-#             for offset, weight in offsetData:
-#                 value += weight * y[i + offset]
-#             smoothData.append(value)
-        
-#         y = smoothData
-#         cycles -=1
-    
-#     # return smoothed data
-#     y = np.array(y)
-#     return y
-
-
-
 
 def smoothing(y, smooth_algo, smooth_window, smooth_cycles):
     if len(y) == 0:
@@ -2813,24 +2480,6 @@ def draw_data(
                                 intens_raw = interp1d(mz_raw,intens_raw,fill_value=(intens_raw[0],intens_raw[-1]),bounds_error = False )(mz)
                         else:
                             mz = mz_raw
-                    # try:
-                    #     if not Raw_bool:
-                    #         mz = data_obj[slide][sample][roi]["mz"][:]
-                    #         intens = data_obj[slide][sample][roi]["int"][sample_spectra_idx,:]
-                    #         Label.append("Processed mass spectrum from hdf5")
-                    #     else:
-                    #         raise
-                    # except:
-                    #     if kwargs.get('DataProc_configs',False):
-                    #         if kwargs.get("resample_to_dots",False) or kwargs.get("resampled_mz",False):
-                    #             print(mz_raw)
-                    #             mz = kwargs.get("resampled_mz", np.linspace(min(mz_raw),max(mz_raw), kwargs.get("resample_to_dots")))
-                    #             print(kwargs.get("resample_to_dots"),kwargs.get("resampled_mz"))
-                    #             print(mz)
-                    #             intens_raw = np.interp(mz,mz_raw,intens_raw, left = intens_raw[0], right = intens_raw[-1])
-                    #         else:
-                    #             mz = mz_raw
-
                     if mz is not None:
                         if intens is None:
                             DataProc_configs = kwargs.get('DataProc_configs')
@@ -2984,218 +2633,4 @@ def audit_processing_quality(
         path_dict.pop(key)   
 
     draw_data(path_dict, plot_mz_range=plot_mz_range, sample_spectra_idx=sample_spectra_idx, **configs)
-    # # Process args
-    # #defaults parametres for align
-    # pars = list(set(["width","iterations"])-set(params2align.keys()))
-    # if pars:
-    #     params2align_default = {"iterations":3, "width":0.3}
-    #     for par in pars:
-    #         params2align[par]=params2align_default[par]
-    # params2align["only_shift"]=only_shift
-
-    # if not isinstance(peaklocation, (int, float)) or not np.isscalar(peaklocation) or peaklocation < 0 or peaklocation > 1:
-    #     raise ValueError("peaks_prop: Invalid peak location")
-    # if not isinstance(fwhhfilter, (int, float)) or not np.isscalar(fwhhfilter) or fwhhfilter < 0:
-    #     if not isinstance(fwhhfilter,type(None)):
-    #         raise ValueError("peaks_prop: Invalid FWHH filter")
-    # if not isinstance(oversegmentationfilter, (int, float)) or not np.isscalar(oversegmentationfilter):
-    #     if isinstance(oversegmentationfilter, str):
-    #         oversegmentationfilter=oversegmentationfilter.lower()
-    #     elif isinstance(oversegmentationfilter, type(None)):
-    #         pass
-    #     else:
-    #         raise ValueError("peaks_prop: Invalid oversegmentation filter")
-    # elif oversegmentationfilter < 0:
-    #     raise ValueError("peaks_prop: Invalid oversegmentation filter")
-    # if not isinstance(heightfilter, (int, float)) or not np.isscalar(heightfilter) or heightfilter < 0:
-    #     if not isinstance(heightfilter, type(None)):
-    #         raise ValueError("peaks_prop: Invalid height filter")
-    # if not isinstance(rel_heightfilter, (int, float)) or not np.isscalar(rel_heightfilter) or rel_heightfilter < 0 or rel_heightfilter > 100:
-    #     if not isinstance(rel_heightfilter, type(None)):
-    #         raise ValueError("peaks_prop: Invalid relative height filter")
-    # if SNR_threshold and Calc_peak_area:
-    #     headers = ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
-    # elif SNR_threshold :
-    #     headers = ["spectra_ind","mz","Intensity","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]
-    # elif Calc_peak_area:
-    #     headers = ["spectra_ind","mz","Intensity","Area","PextL","PextR","FWHML","FWHMR"]
-    # else: 
-    #     headers = ["spectra_ind","mz","Intensity","PextL","PextR","FWHML","FWHMR"]
-    # peaks_prop_infunc.headers = headers[3:]
-    # if isinstance(data_obj_path,str):
-    #     data_obj_path=[data_obj_path]
-    
-    # ###I Finding slide directory with rawdata of samples (path_list) - DONE
-    # if noise_est == "MAD":
-    #     noise_func= MAD
-    # elif noise_est == "std":
-    #     noise_func=np.std
-    # # Working with slides
-    # for file_path in data_obj_path:
-    #     sample_list =[]
-    #     # Searching direct path to imzml files (samples) 
-    #     if file_path.lower().endswith('.imzml'):
-    #         sample_list.append(file_path)
-    #     for root, dirs, files in os.walk(file_path):
-    #         for file in files: 
-    #             if file.lower().endswith('.imzml'):
-    #                 sample_list.append(os.path.join(root,file))
-
-    #     for sample_path2imzml in sample_list:
-    #         folder_path2imzml = os.path.dirname(sample_path2imzml)
-    #         sample_name = os.path.splitext(os.path.basename(sample_path2imzml))[0]
-    #         folder_name = os.path.basename(folder_path2imzml)
-
-    #         if folder_name == sample_name:
-
-    #             sample=sample_name
-                
-    #         else:
-
-    #             sample = folder_name+"_"+sample_name
-    #         sample_imzml=ImzMLParser(sample_path2imzml)
-    #         ### 1. Файл найден и открыт в sample_imzml файле - DONE
-    #         ### 1. File found and opened in sample_imzml file - DONE
-    #         ### Data extraction
-    #         try: ### b. Extraction from _poslog and _info text files
-    #             count=0
-    #             idx_first=0
-    #             roi_idx={} # Информация sample по индексам спектров roi=(индекс первого спектра, кол-во спектров roi)
-
-    #             base_path_str = os.path.join(folder_path2imzml,sample_name)
-    #             roi_list = []
-    #             try:
-    #                 with open(base_path_str+"_info.txt") as f:
-    #                     data_info = f.readlines()
-    #                     #raw_data_points = int(data_info[12].split(' ')[1]) # Информация по кол-ву точек спектра
-    #                     spectra_num = int(data_info[2].split(' ')[-1]) # Информация по кол-ву спектров в sample
-    #             except:   
-    #                 #raw_data_points = int(np.quantile(sample_imzml.mzLengths, 0.95))
-    #                 spectra_num = len(sample_imzml.mzLengths)
-    #             ###
-    #             ### Так как файлы imzml с poslog исключительно континуальные (одна шкала mz для всех спектров), то здесь работаем исключительно в таком варианте
-    #             ### Выгрузка данных с poslog
-    #             ### 4.b. and 5.b. Extraction data from "poslog" coordinates and roi references of spectra
-    #             with open(base_path_str+"_poslog.txt") as f:
-    #                 data = f.readlines()
-
-    #                 poslog_specdata = [None]*spectra_num #Данные строк в poslog с записью roi и координат снятого спектра.
-    #                 ##первая итерация записи координат начиная с третьей строки
-    #                 coords =  data[2].split(' ') 
-    #                 roi_num = re.search('R(.+?)X', data[2]).group(1)
-    #                 roi_list.append(roi_num)
-    #                 poslog_specdata[count]=(roi_num,float(coords[-3]), float(coords[-2]))
-                    
-    #                 roi_idx[roi_num] = idx_first
-                    
-    #                 count+=1
-    #                 ## продолжение итераций    
-    #                 for i in range(2,len(data)-1):
-    #                     coords =  data[i+1].split(' ')
-                        
-    #                     if(coords[-4]!='__'):
-    #                         roi_num = re.search('R(.+?)X', data[i+1]).group(1)
-    #                         poslog_specdata[count]=(roi_num,float(coords[-3]), float(coords[-2]))
-                            
-    #                         ### Строгое положение из-за roi_list[-2] и условия в if
-    #                         if roi_num not in roi_list[-1]:
-    #                             roi_list.append(roi_num)
-    #                             roi_idx[roi_num] = []
-    #                             roi_idx[roi_list[-2]] = (idx_first, count-idx_first)
-    #                             idx_first=count
-    #                         ###
-    #                         count +=1
-    #                 roi_idx[roi_num] = (idx_first, count-idx_first) ### 2.b. Num of spectra of roi/sample
-
-    #         except FileNotFoundError: 
-    #             roi = "00" # roi только один, так как там вроде нельзя настраивать и определять без poslog
-    #             roi_list = []
-    #             roi_list.append(roi)
-    #             roi_idx[roi] = (idx_first, spectra_num)
-
-    #         plt.figure().set_figwidth(25)
-    #         plt.gcf().set_figheight(5)
-    #         for roi in roi_list:
-    #             idx_start, numspec = roi_idx[roi]
-    #             if spec_num:
-    #                 idx_spec=spec_num
-    #             else:
-    #                 idx_spec = np.random.randint(idx_start,idx_start+numspec)
-                    
-    #             print(f'Spectrum number: {idx_spec}')
-
-    #             data_mz_old, data_int_old = sample_imzml.getspectrum(idx_spec)
-
-    #             #data_int_old.shape = (1,data_int_old.shape[0])
-    #             roi_idx_spec = idx_spec-idx_start
-    #             loc_args2procc={"baseline_algo": baseline_algo, "params2baseline_correction": params2baseline_correction,"params2align":params2align, "align_peaks":align_peaks,"weights_list":weights_list,"smooth_algo":smooth_algo, "smooth_cycles":smooth_cycles}
-    #             if resample_to_dots:
-    #                 data_mz = np.array(list(np.linspace(min(data_mz_old),max(data_mz_old),resample_to_dots)))
-    #                 if loc_args2procc["params2align"]["only_shift"]:
-    #                     dots_shift = int(max_shift_mz/(np.median(np.diff(data_mz))))
-    #                 else:
-    #                     dots_shift = max_shift_mz
-    #                 loc_args2procc['dots_shift']=dots_shift
-    #                 loc_args2procc["smooth_window"]=int(smooth_window/(np.median(np.diff(data_mz))))
-    #                 data_int = DataProc_resample1d(data_int_old,data_mz_old,data_mz,Baseline(data_mz),**loc_args2procc)
-
-    #             else:
-    #                 data_mz = data_mz_old
-    #                 if loc_args2procc["params2align"]["only_shift"]:
-    #                     dots_shift = int(max_shift_mz/(np.median(np.diff(data_mz))))
-    #                 else:
-    #                     dots_shift = max_shift_mz
-    #                 loc_args2procc['dots_shift']=dots_shift
-    #                 loc_args2procc["smooth_window"]=int(smooth_window/(np.median(np.diff(data_mz))))
-    #                 data_int = DataProc_base1d(data_int_old,data_mz,Baseline(data_mz),**loc_args2procc)
-
-    #             dataf = peaks_prop_infunc(
-    #                 data_mz, 
-    #                 data_int, 
-    #                 np.where(np.diff(data_int) !=0)[0],
-    #                 len(data_mz),
-    #                 [idx_spec-idx_start],
-    #                 oversegmentationfilter=oversegmentationfilter, 
-    #                 fwhhfilter=fwhhfilter,
-    #                 heightfilter=heightfilter,
-    #                 peaklocation=peaklocation,
-    #                 rel_heightfilter=rel_heightfilter,
-    #                 noise_func = noise_func,
-    #                 noise_est_iterations=noise_est_iterations,
-    #                 SNR_threshold=SNR_threshold,
-    #                 Calc_peak_area=Calc_peak_area
-    #                 )
-                
-    #             dataf = pd.DataFrame(dataf.T, ["spectra_ind","mz","Intensity","Area","SNR","PextL","PextR","FWHML","FWHMR","Noise","Mean noise"]).T
-    #             dataf = dataf.astype({"spectra_ind": int})
-    #             if plot_mz_range:
-
-    #                 diapold=(np.array(data_mz_old>plot_mz_range[0]) & np.array(data_mz_old<plot_mz_range[1]))
-    #                 diap = (np.array(data_mz>plot_mz_range[0]) & np.array(data_mz<plot_mz_range[1]))
-    #                 dataf.query("mz>@plot_mz_range[0] and mz<@plot_mz_range[1] and spectra_ind==@roi_idx_spec").plot(x="mz",y="Intensity",ax = plt.gca(), style = "x")
-    #                 startg = plot_mz_range[0]
-    #                 endg = plot_mz_range[1]
-    #             else:
-    #                 diapold=range(len(data_mz_old))
-    #                 diap = range(len(data_mz))
-    #                 startg = min(data_mz)
-    #                 endg = max(data_mz)
-    #                 dataf.query("spectra_ind==@roi_idx_spec").plot(x="mz",y="Intensity",ax = plt.gca(), style = "x")
-                
-    #             print("Example peaklist:")
-    #             print(dataf)
-    #             plt.plot(dataf.query("PextL>@startg and PextL<@endg and spectra_ind==@roi_idx_spec")['PextL'],
-    #                     [0]*len(dataf.query("PextL>@startg and PextL<@endg and spectra_ind==@roi_idx_spec")['PextL']),'v')
-    #             plt.plot(dataf.query("PextR>@startg and PextR<@endg and spectra_ind==@roi_idx_spec")['PextR'],
-    #                     [0]*len(dataf.query("PextR>@startg and PextR<@endg and spectra_ind==@roi_idx_spec")['PextR']),'^')
-    #             plt.plot(data_mz_old[diapold], data_int_old[diapold])
-    #             plt.plot(data_mz[diap], data_int[diap])
-    #             plt.grid(visible = True, which="both")
-    #             plt.ylabel('Intensity')
-    #             plt.title(f'Sample: {sample}, roi: {roi}')
-    #             plt.legend(['Peaks', 'Peak`s left base', 'Peak`s right base', 'Original spectrum','Processed spectrum'])
-    #             plt.minorticks_on()
-    #             plt.xlim((startg,endg))
-    #             plt.show()
-    #             del diapold
     return
