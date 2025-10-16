@@ -24,7 +24,8 @@ dependencies = [
   "pyimzML",
   "scikit_learn",
   "scipy",
-  "tqdm"
+  "tqdm",
+  "PyYAML"
 ]
 
 license = "Apache-2.0"

@@ -512,6 +512,8 @@ def find_paths(path_list,file_end = '.imzML'):
                 for file in files: 
                     if file.lower().endswith(file_end):
                         files_path_list.append(os.path.join(root,file))
+    if not files_path_list:
+        logger.warn(f'Files matching pattern {file_end} not found in specified paths: {path_list}')
     logger.ended()
     return files_path_list
 
