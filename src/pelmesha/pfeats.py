@@ -503,7 +503,6 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     
     if median_dist<min_res*(plot_start+plot_end)/2:
         median_dist=min_res*(plot_start+plot_end)/2
-        #logging.warning(f'Warning. The value of {min_res*1e+6} ppm is used as the minimum distance between points to build the density distribution. If you want to build a more accurate probability distribution, change the "min_res" parameter. (Example: accuracy of Orbitrap ~ 10 ppm)')
         textw=f'The value of {min_res*1e+6} ppm is used as the minimum distance between points to build the density distribution. If you want to build a more accurate probability distribution, change the "min_res" parameter. (Example: accuracy of Orbitrap ~ 10 ppm)'
         logger.warn(textw)
     logger.log(f'median_dist is {median_dist}')
