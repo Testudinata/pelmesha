@@ -17,5 +17,5 @@ peaklocation : 1 #PeakPicking
 rel_heightfilter : null #PeakPicking
 SNR_threshold : 3.5 #PeakPicking
 noise_func : "std" #PeakPicking
-noise_est_iterations : 3 #PeakPicking 
+noise_est_iterations : 3 #PeakPicking. Best 5, optimal 3
 Calc_peak_area : True #PeakPicking

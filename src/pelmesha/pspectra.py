@@ -19,6 +19,8 @@ import warnings
 import yaml
 from typing import Callable, Union, Tuple
 from scipy.signal import savgol_filter
+# from pyteomics import mzxml
+
 try:
     from torch.multiprocessing import Pool, cpu_count, Manager, Value, set_start_method
 
@@ -264,13 +266,6 @@ class Configs(dict):
     def _rearrange_conf(self,configs,functions_list):
         ## Rearranging arguments for baseliner into a dictionary
         try:
-            # Extract the parameter names
-            # import inspect
-            # signature = inspect.signature(getattr(Baseline(),configs['baseliner']))
-            # configs["baseline_configs"]={}
-            # for arg in tuple(configs.keys()):
-            #     if arg in signature.parameters.keys():
-            #         configs["baseline_configs"][arg] = configs.pop(arg)
             configs["baseline_configs"]={}
             func_code = getattr(Baseline(),configs['baseliner']).__dict__["__wrapped__"].__code__
             for arg in tuple(configs.keys()):
@@ -341,14 +336,81 @@ class AdaptiveParameter():
     def __call__(self, *args):
         return self.adaptation_rule(self.parameter,*args)
 
-# class DataSource(): TODO: Develop a source class that we can work with. It doesn’t matter which data source we use — IMZML or HDF5; the approach will be the same.
-#     def __init__(self, path):
-#         if path.lowercase().endswith(".imzml"):
+# class DataSource: TODO: Develop a source class that we can work with. It doesn’t matter which data source we use — IMZML or HDF5 or maybe MZXML; the approach will be the same.
+#     """
+#     Класс для работы с различными источниками масс-спектрометрических данных (IMZML, HDF5, MZXML).
+#     Обеспечивает унифицированный интерфейс для получения данных m/z шкалы и интенсивностей спектра.
+#     """
+
+#     def __init__(self, path, dtypeconv):
+#         """
+#         Инициализация источника данных.
+#         :param path: путь к файлу данных
+#         """
+#         self.dtypeconv = dtypeconv
+#         self.path = path
+#         if path.lower().endswith(".imzml"):
 #             self.source = ImzMLParser(path)
-#         elif path.lowercase().endswith(".hdf5"):
-#             self.source = File(path,'r',libver='latest')
-#     def _load_data(self,)
-#     def __getitem__(self)
+#             self._loader = _load_imzml_mz
+
+#         elif path.lower().endswith(".mzxml"):
+#             self.source = mzxml.MzXML(path)
+#             self._loader_intensity =
+#             self._loader_mz =
+#         elif path.lower().endswith(".hdf5"): !!!!!!!!!!!!!!!!!!! Разработать через idxroi. где определяем какой именно roi и sample используется
+#             # self.source = File(path, 'r', libver='latest')
+#             # self._loader_intensity =
+#             # self._loader_mz =
+#             raise ValueError("Неподдерживаемый формат файла")
+#         else:
+#             raise ValueError("Неподдерживаемый формат файла")
+
+#     def _load_imzml(self, idx):
+#         """
+#         Загрузка данных из источника.
+#         В зависимости от формата файла, данные загружаются разными способами.
+#         """
+#         mz, intens = zip(*(self.source.getspectrum(i) for i in idx))
+#         return np.array(mz).astype(self.dtypeconv), np.array(intens).astype(self.dtypeconv)
+#     def _load_hdf5(self, idx):
+#         """
+#         Загрузка данных из источника.
+#         В зависимости от формата файла, данные загружаются разными способами.
+#         """
+#         return self.source
+#         elif isinstance(self.source, h5py._hl.files.File):
+#             # Для HDF5 структура может отличаться, пример предполагает стандартные группы
+#             self.mz_scales = self.source['mz_scale']
+#             self.intensities = self.source['intensities']
+#         elif isinstance(self.source, mzxml.MzXML):
+#             self.spectra = [spectrum for spectrum in self.source]
+    
+#     def __getitem__(self, index):
+#         """
+#         Получение спектра по индексу.
+#         :param index: индекс спектра
+#         :return: кортеж (mz_scale, intensities) для заданного спектра
+#         """
+#         if not hasattr(self, 'mz_scales') or not hasattr(self, 'intensities') and not hasattr(self, 'spectra'):
+#             self._load_data()
+
+#         if isinstance(self.source, ImzMLParser):
+#             mz_scale, intensities = self.source.get_spectrum(index)
+#         elif isinstance(self.source, h5py._hl.files.File):
+#             # Предполагаем, что данные хранятся в виде массивов, где каждый спектр — это строка
+#             mz_scale = self.mz_scales[index]
+#             intensities = self.intensities[index]
+#         elif isinstance(self.source, mzxml.MzXML):
+#             spectrum = self.spectra[index]
+#             mz_scale = spectrum['m/z array']
+#             intensities = spectrum['intensity array']
+#         return mz_scale, intensities
+
+#     def close(self):
+#         """
+#         Закрытие источника данных.
+#         """
+#         self.source.close()
 
 def _adapt_proccesing_parameters(
     mz_scale: np.ndarray,
@@ -946,6 +1008,7 @@ def Raw2peaklist(data_obj_path, draw = True, plot_mz_range = None, sample_spectr
             draw_data(base_path+"_specdata.hdf5",
                         sample_spectra_idx = sample_spectra_idx,
                         plot_mz_range = plot_mz_range,
+                        imzml_source = True,
                         **configs)
                         
     # Closing threads and hdf5 object
@@ -1549,7 +1612,6 @@ def int2proc2peaklist_parbatched(sample_file_path, sample,roi,interval,dtypeconv
     logger.log(f"Processing data")
 
     if dcont:
-        
         if resampled_mz is not None:
             data_mz = sample_imzml.getspectrum(0)[0].astype(dtypeconv)
             # Векторизованная интерполяция через numpy
@@ -2397,13 +2459,12 @@ def peaks_prop_infunc(X,
     props["PextR"] = X[right_min]
 
     return np.column_stack(([spectra_ind]*signal_num,pkX, val_max, *(props[key] for key in headers[3:])))
-
 ### Utility
-
 def draw_data(
         data_sources: list,
         plot_mz_range = None,
-        sample_spectra_idx = None, 
+        sample_spectra_idx = None,
+        imzml_source = False,
         **kwargs):
     """
     Общее описание
@@ -2457,31 +2518,31 @@ def draw_data(
                         idx_roi = range(idx_roi[0], idx_roi[0] + idx_roi[1])
                         mz_raw, intens_raw = sample_imzml.getspectrum(idx_roi[sample_spectra_idx])
                         Label = ["Raw mass spectrum from imzml file"]
+                    if plot_mz_range is None:
+                        plot_mz_range = [min(mz_raw),max(mz_raw)]
                     diap_raw = diapcalc(mz_raw, plot_mz_range)
                     plt.plot(mz_raw[diap_raw], intens_raw[diap_raw],alpha=0.75)
 
                     ### proccessed
                     mz = None
                     intens = None
-                    if not Raw_bool:
+                    if not Raw_bool and not imzml_source:
                         if rf"{sample}/{roi}/mz" in data_obj[slide]:
                             mz = data_obj[slide][sample][roi]["mz"][:]
                         if rf"{sample}/{roi}/int" in data_obj[slide]:    
                             intens = data_obj[slide][sample][roi]["int"][sample_spectra_idx,:]
                             Label.append("Processed mass spectrum from hdf5")
-        
+                    
                     if kwargs.get('DataProc_configs',False):
                         if kwargs.get("resample_to_dots",False) or kwargs.get("resampled_mz",False):
-                            if rf"{sample}/{roi}/mz" not in data_obj[slide]:
+                            if rf"{sample}/{roi}/mz" not in data_obj[slide] or imzml_source:
                                 mz = kwargs.get("resampled_mz", np.linspace(min(mz_raw),max(mz_raw), kwargs.get("resample_to_dots")))
-                            if rf"{sample}/{roi}/int" not in data_obj[slide]:
-                                # intens_raw = np.interp(mz,mz_raw,intens_raw, left = intens_raw[0], right = intens_raw[-1])
-                                from scipy.interpolate import interp1d
-                                intens_raw = interp1d(mz_raw,intens_raw,fill_value=(intens_raw[0],intens_raw[-1]),bounds_error = False )(mz)
+                            if rf"{sample}/{roi}/int" not in data_obj[slide] or imzml_source:
+                                intens_raw = np.interp(mz,mz_raw,intens_raw, left = intens_raw[0], right = intens_raw[-1])
                         else:
                             mz = mz_raw
                     if mz is not None:
-                        if intens is None:
+                        if intens is None or imzml_source:
                             DataProc_configs = kwargs.get('DataProc_configs')
                             DataProc_configs['smoothing_configs']["smooth_window"], smooth_window = _func_conserve(DataProc_configs['smoothing_configs']["smooth_window"], smooth_window)
                             DataProc_configs['msalign_configs']["shift_range"], shift_range = _func_conserve(DataProc_configs['msalign_configs']["shift_range"], shift_range)
@@ -2490,11 +2551,13 @@ def draw_data(
                                                                                                                                                             DataProc_configs['smoothing_configs']["smooth_window"], 
                                                                                                                                                             DataProc_configs["msalign_configs"]["shift_range"], 
                                                                                                                                                             DataProc_configs["baseliner"])
-                            intens = DataProc_1d(intens_raw,mz,**DataProc_configs)
+                            intens = DataProc_1d(intens_raw, mz,**DataProc_configs)
+                        
                         diap = diapcalc(mz, plot_mz_range)
                         Label.append("Processed mass spectrum")
                         plt.plot(mz[diap], intens[diap],alpha=0.75)
                     ### peaklists
+
                     DataFeat=None
                     try:
                         DataFeat = pd.DataFrame(data_obj[slide][sample][roi]["peaklists"][:].T, data_obj[slide][sample][roi]["peaklists"].attrs["Column headers"]).T

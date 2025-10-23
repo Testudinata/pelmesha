@@ -32,7 +32,7 @@ else:
             return zip(a, b)
     else:
         from itertools import pairwise
-
+FWHM_TO_SIGMA_FACTOR = 0.4247
 ### Base functions
 def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10,tol = 500, norm = (None,None),draw_borders = 1.5,
                   dupl_drop = True,min_res = 10, pivoting4val = None, cpu_free=1, path2save=None,sample="unknwn",roi="00", coords4table=None, draw=True, **params2mspeaks_KD):
@@ -247,13 +247,10 @@ def Roi_Pgrouping_KD(Paths, extr_columns=None,path2save=None,**Pgrouping_KD_kwar
             print(f"Previous grouped features data is deleted")
         except:
             pass
-    if isinstance(extr_columns,str):
+    if isinstance(extr_columns,(str)):
         extr_columns = [extr_columns]
-    if "KD_bandwidth" not in Pgrouping_KD_kwargs.keys():
-        extr_columns=list(set(extr_columns + ['FWHML',"FWHMR"]))
-        extr_columns.sort()
-    elif Pgrouping_KD_kwargs["KD_bandwidth"] == "med_FWHM" and extr_columns is not None:
-        extr_columns=list(set(extr_columns + ['FWHML',"FWHMR"]))
+    if  Pgrouping_KD_kwargs.get("KD_bandwidth", "med_FWHM") == "med_FWHM" and extr_columns is not None:
+        extr_columns = list(set(extr_columns + ['FWHML',"FWHMR"]))
         extr_columns.sort()
     logger.log('Additional extraction columns list of values: "Intensity","Area", "SNR","PextL","PextR","FWHML", "FWHMR","Noise","Mean noise"')
     logger.log(f'Additional extraction columns:{extr_columns}')
@@ -526,12 +523,11 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
         KD_bandwidth = median_dist*bwc
 
     elif KD_bandwidth.lower() == "med_fwhm":
-        KD_bandwidth =np.median(np.array(ftable["FWHMR"])-np.array(ftable["FWHML"]))*bwc*0.1431
+        KD_bandwidth = np.median(np.array(ftable["FWHMR"])-np.array(ftable["FWHML"]))*bwc*(FWHM_TO_SIGMA_FACTOR/6)
     logger.log(f"KD bandwidth value\\estimated value = {KD_bandwidth}, with coeff: {bwc}")
     ##
     ##Построение графика функции плотности вероятности по всей шкале mz
-    
-    Y_plot = FFTKDE(kernel=KD_kernel,bw=KD_bandwidth).fit(ftable['mz'].values)(X_plot)
+    Y_plot = FFTKDE(kernel = KD_kernel, bw = KD_bandwidth).fit(ftable['mz'].values)(X_plot)
     
     ##
     ##Определение пиков графика плотности вероятности и их оснований
@@ -542,7 +538,6 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     ##Проверка попадания нескольких пиков с одного спектра в этот диапазон
     ##Batching по диапазону
     ### Определим индексы значений m/z для диапазонов
-  
     sorted_mz = ftable['mz'].sort_values(ascending=True).unique()
 
     idxmz_batches = list(pairwise(np.linspace(0,sorted_mz.shape[0],cpu_num*3,dtype=int))) 
