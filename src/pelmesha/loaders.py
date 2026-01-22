@@ -33,14 +33,14 @@ def hdf5_Load(path_list, file_end=''):
     if isinstance(path_list, str):
         path_list=[path_list]
         
-    hdf5path_list=find_paths(path_list,file_end=file_end)
+    hdf5path_list = find_paths(path_list,file_end=file_end)
     
     Slide_data={}
     for path in hdf5path_list:
         Slide_name=os.path.basename(path.replace(file_end,""))
         Slide_data[Slide_name] = File(path,"r")
     if not hdf5path_list:
-        logger.warn(f"Data not readed due to missing hdf5 with spectra data (hdf5 with end \"{file_end}\" in the name is missing)", stacklevel=2)
+        logger.warn(f"Data not readed due to missing hdf5 with spectra data (hdf5 with end \"{file_end}\" in the name is missing)")
     logger.ended()
     return Slide_data
 
@@ -334,7 +334,7 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
     ----
     Функция объединяет данные пиклистов в разных `hdf5` в датафрейм пиклистов образцов согласно выставленным параметрам.
 
-    :param paths: dict = {path_1:[[sample_1,[roi_list_1]],[sample_2,[roi_list_2]],....],path_2:[[sample_3,[roi_list_3]],[sample_4,[roi_list_4]],....]}, "path" - path to hdf5 file directory, "sample_n" - какой именно sample (string), если None - берёт всё, "roi_list_n" - список каких roi использовать, если отсутствует, то берёт всё (example: dict value: list[sample_n])
+    :param paths: dict = {path_1: [[sample_1,[roi_list_1]], [sample_2,[roi_list_2]], ....],path_2:[[sample_3,[roi_list_3]],[sample_4,[roi_list_4]],....]}, "path" - path to hdf5 file directory, "sample_n" - какой именно sample (string), если None - берёт всё, "roi_list_n" - список каких roi использовать, если отсутствует, то берёт всё (example: dict value: list[sample_n])
     :param extr_columns: Лист столбцов для экстракции из `hdf5`, где экстрагируются всегда `"spectra_ind"` и `"mz"` или `"Peak"`. Default: `None` - экстракция всех столбцов
     `"Intensity"`,`"Area"`,`"SNR"`,`"PextL"`,`"PextR"`,`"FWHML"`,`"FWHMR"`,`"Noise"`,`"Mean noise"`
     :param processed_feat: `True` - Dataframe from grouped peaklists, `False` - Dataframe from raw image peaklists. Default: `False`
@@ -353,7 +353,7 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
     ### Data_loading
     logger("IMGfeats_concat",locals())
     grouped_images_DF=pd.DataFrame()
-    Coords = pd.DataFrame(columns=['x','y'])
+    Coords = pd.DataFrame(columns=['x','y'], dtype = float)
     if isinstance(paths,list):
         path_list=paths
         samples = False
@@ -363,6 +363,7 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
         samples = True
     elif isinstance(paths,str):
         path_list = [paths]
+        samples = False
     if isinstance(extr_columns, str):
         extr_columns=[extr_columns]
     for path in path_list:
@@ -417,7 +418,8 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
                             extr_columns.append("spectra_ind")
                         temp_extr_column = extr_columns.copy()
                         temp_extr_column.append(mz_type)
-
+                        if not isinstance(headers,list):
+                            headers = list(headers)
                         for head in headers:
                             if head in temp_extr_column:
                                 column_nums.append(headers.index(head))
@@ -498,6 +500,8 @@ def find_paths(path_list,file_end = '.imzML'):
     :rtype: list
     """
     logger("find_paths",{**locals()})
+    if isinstance(path_list,str):
+        path_list=[path_list]
     file_end = file_end.lower()
     files_path_list = []
     for path in path_list:
@@ -508,6 +512,8 @@ def find_paths(path_list,file_end = '.imzML'):
                 for file in files: 
                     if file.lower().endswith(file_end):
                         files_path_list.append(os.path.join(root,file))
+    if not files_path_list:
+        logger.warn(f'Files matching pattern {file_end} not found in specified paths: {path_list}')
     logger.ended()
     return files_path_list
 
