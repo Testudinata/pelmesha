@@ -22,7 +22,7 @@ import warnings
 import yaml
 from typing import Callable, Union, Tuple
 from scipy.signal import savgol_filter
-# from pyteomics import mzxml
+from pyteomics import mzxml
 # from pelmesha.cli import calculate
 from functools import wraps
 try:
@@ -773,17 +773,11 @@ def Raw2proc(data_obj_path,
                                                    [queue],
                                                    [chunk_size_dict],
                                                    [dataset_name]
-                                                #    [resample_to_dots],
-                                                #    [DataProc_configs["msalign_configs"].get('shift_range',None)],
-                                                #    [DataProc_configs['baseliner']], 
-                                                #    [DataProc_configs['smoothing_configs'].get('smooth_window',None)]
                                                    )
                                                    )
                                                    )
         p.join()    
         args_batches=[]
-        # msalign_configs = DataProc_configs['msalign_configs']
-        # smoothing_configs = DataProc_configs['smoothing_configs']
         logger.log(f"Preparing arguments and data for parallelization")
         for data in data_obj_temp:
             data_obj_coord.update(data[0])
@@ -921,10 +915,7 @@ def Raw2peaklist(data_obj_path,
     :rtype: `NoneType`
     """
     configs = Configs(FUNCTIONS_FOR_PROCCESING, config_path,**kwargs)
-    # resample_to_dots = configs["resample_to_dots"]
-    # DataProc_configs = configs['DataProc_configs']
-    # PeakPicking_configs = configs['peaks_configs']
-    # TODO: Найти в чём причина несохранения xy координат в некоторых случаях (наверное следует посмотреть в первую очередь на удаление файлов?) 
+
     logger("Raw2peaklist",{**locals()})
     #Create thread for printing text in multiprocessing
     manager = Manager()
@@ -977,25 +968,12 @@ def Raw2peaklist(data_obj_path,
                                           )
                                           )
                                           )
-                                    #                [DataProc_configs["msalign_configs"].get('shift_range',None)],
-                                    #                [DataProc_configs['baseliner']], 
-                                    #                [DataProc_configs['smoothing_configs'].get('smooth_window',None)]
-                                    #                )
-                                    #     )
-                                    # )
         p.join()    
         args_batches=[]
 
         logger.log(f"Preparing arguments and data for parallelization")
         for data in data_obj_temp:
             data_obj_coord.update(data[0])
-            # temp = DataProc_configs.copy() 
-            # temp['msalign_configs'] = temp['msalign_configs'].copy()
-            # temp['smoothing_configs'] = temp['smoothing_configs'].copy()
-            # temp['msalign_configs']['shift_range'] = data[2]
-            # temp['baseliner'] = data[3]
-            # temp['smoothing_configs']['smooth_window'] = data[4]
-            # args_batches.extend(list(args_batch) + [temp, PeakPicking_configs, queue, chunk_size, dataset_name] for args_batch in data[1])
             args_batches.extend(data[1])
 
         del data_obj_temp
@@ -1099,7 +1077,6 @@ def proc2peaklist(data_obj_path,
     :return: `None`
     :rtype: `NoneType`
     """
-    # TODO: Решить что за проблема возникает с приостановкой процессинга
     configs = Configs([peaks_prop_array], config_path,**kwargs)
     PeakPicking_configs = configs['peaks_configs']
     logger("proc2peaklist",{**locals()})
@@ -1701,11 +1678,6 @@ def int2proc2peaklist_parbatched(sample_file_path,
     headers = PeakPicking_configs['headers']
     
     logger.log(f"Writing data")
-    # TODO: del
-    try:
-        hdf5 = h5py.File(hdf5_file_path,"a", libver='latest')
-    except Exception as error:
-        logger.warn(f"During writing data raised folowing exception:{error}") #TODO: del
     with File(hdf5_file_path,"a", libver='latest') as hdf5:
         logger.log(f"File {hdf5_file_path} is opened")
         if rf"{sample}/{roi}/{dataset_name}" in hdf5:
