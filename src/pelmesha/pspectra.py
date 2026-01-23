@@ -283,7 +283,7 @@ class Configs(dict): # TODO: "Улучшить" класс Configs, сделав
                     configs["baseline_configs"][arg] = configs.pop(arg)
                     
         except Exception as e:
-            print(e)
+            
             if isinstance(e,(TypeError,AttributeError)):
                 configs['baseliner'] =  AdaptiveParameter(None, _baseliner_prep)
                 configs['baseline_configs'] = {}
