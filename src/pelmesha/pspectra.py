@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
-from pelmesha.loaders import hdf5_Load, specdata_Load, hdf5_close
+import collections
+from pelmesha.loaders import hdf5_Load, specdata_Load, hdf5_close, create_file_path, del_datasets_hdf5, del_hdf5, repack_hdf5, hdf5_metadata
 from itertools import product, zip_longest
 from threading import Thread
 from pybaselines import Baseline
@@ -135,11 +136,19 @@ class DatasetHeaders(list):
     def __contains__(self, item):
         return item in self.headnames
 
-class Configs(dict): # TODO: "Улучшить" класс Configs, сделав доступ к значению по одному ключу и/или ключам вложенного словаря (nested_dicts)
+class Configs(dict): 
+    initialized = False
+
     def __init__(self, functions_list, config_path = None,**kwargs):
         if not isinstance(functions_list,list):
             functions_list = [functions_list]
+        self._init_functions_list = functions_list
+        self._init_config_path = config_path
+        
         ## Argument validation for functions
+        # for key in kwargs:
+        #     if isinstance(kwargs[key], AdaptiveParameter):
+        #         kwargs[key] = kwargs[key].parameter
         if "peaklocation" in kwargs:
             if not isinstance(kwargs['peaklocation'], (int, float)) or not np.isscalar(kwargs['peaklocation']) or kwargs['peaklocation'] < 0 or kwargs['peaklocation'] > 1:
                 raise ValueError("peaks_prop: Invalid peak location")
@@ -175,25 +184,23 @@ class Configs(dict): # TODO: "Улучшить" класс Configs, сделав
             configs = {}
             configs.update(yaml.load(file,Loader=yaml.FullLoader))
         configs = self._conf_param_recurs_replace(configs, kwargs)
-        baseline_algo = configs.pop("baseline_algo", None)
 
+        baseline_algo = configs.get("baseline_algo", None)
         if baseline_algo:
-            try:
-                temp_obj = getattr(Baseline(), baseline_algo, None)
-                if temp_obj is None:
-                    raise AttributeError
-            except AttributeError:
+            if getattr(Baseline(), baseline_algo, None) is None:
                 available = [m for m in dir(Baseline()) if not m.startswith('_')]
                 raise ValueError(
                     f"Method '{baseline_algo}' not found. Available methods: {', '.join(available)}"
                 ) from None
+        
         configs['baseliner'] = AdaptiveParameter(baseline_algo, _baseliner_prep)
-
         ### Adjusting smoothing window and maximum shift parameters based on conditions for m/z-to-points conversion
         if "shift_range" in configs:
             if isinstance(configs['shift_range'],(int,float)):
                 configs["shift_range"] = [-configs["shift_range"],configs["shift_range"]]
-        
+            elif isinstance(configs['shift_range'],AdaptiveParameter):
+                configs["shift_range"] = configs["shift_range"].parameter
+               
         if configs.get('align_peaks', None) is not None:
 
             if configs.get('only_shift',False):
@@ -218,6 +225,8 @@ class Configs(dict): # TODO: "Улучшить" класс Configs, сделав
                 
                 configs["smooth_window"] = base_conf['smooth_window']
                 warnings.warn(f'"smooth_window" parameter is None, while smooth_algo is specified. "smooth_window" changed to base value from "Base_configs.yaml" file: { base_conf['smooth_window']}', stacklevel =3)
+            if isinstance(configs["smooth_window"], AdaptiveParameter):
+                configs["smooth_window"] = configs["smooth_window"].parameter
             configs["smooth_window"] = AdaptiveParameter(configs["smooth_window"], 
                                                             adaptation_rule = _smooth_window_to_dots)
         else:
@@ -269,18 +278,21 @@ class Configs(dict): # TODO: "Улучшить" класс Configs, сделав
                                         ])
 
         ## Rearranging and hierarchical configuration setup for nested function scopes
-        configs = self._rearrange_conf(configs,functions_list)
-            
+        if functions_list[0] is not None:
+            configs = self._rearrange_conf(configs,functions_list)
+        self.initialized = True
         super().__init__(**configs)
 
     def _rearrange_conf(self,configs,functions_list):
         ## Rearranging arguments for baseliner into a dictionary
+        self.param_nests_path = {}
         try:
             configs["baseline_configs"]={}
             func_code = configs['baseliner']([1]).__dict__["__wrapped__"].__code__
             for arg in tuple(configs.keys()):
                 if arg in func_code.co_varnames[:func_code.co_argcount]:
                     configs["baseline_configs"][arg] = configs.pop(arg)
+                    
                     
         except Exception as e:
             
@@ -298,14 +310,20 @@ class Configs(dict): # TODO: "Улучшить" класс Configs, сделав
                 func_name_conf = func.__name__.split("_")[0]+"_configs"
                 if arg in func.__code__.co_varnames[:func.__code__.co_argcount] and not arg.endswith("_configs"):
                     configs[func_name_conf][arg] = configs.pop(arg)
+                    self.param_nests_path[arg] = [func_name_conf]
 
         ## Hierarchical configuration setup for nested function scopes
-        for arg in tuple(configs.keys()):
-            if arg.endswith("_configs"):
+        for nested in tuple(configs.keys()):
+            if nested.endswith("_configs"):
                 for func in functions_list:
                     func_name_conf = func.__name__.split("_")[0]+"_configs"
-                    if arg in func.__code__.co_varnames:
-                        configs[func_name_conf][arg] = configs.pop(arg)
+                    if nested in func.__code__.co_varnames:
+                        for arg in configs[nested].keys():
+                            if self.param_nests_path.get(arg, False):
+                                self.param_nests_path[arg] = [func_name_conf] + self.param_nests_path[arg]
+                            else:
+                                self.param_nests_path[arg] = [func_name_conf, nested]
+                        configs[func_name_conf][nested] = configs.pop(nested)
         return configs
 
     def _conf_param_recurs_replace(self,configs, param_dict):
@@ -321,17 +339,150 @@ class Configs(dict): # TODO: "Улучшить" класс Configs, сделав
                 print(f"Parameter '{item}' is not in configs")
         return configs
     
+    def __getitem__(self, key):
+        if dict.__contains__(self,key): 
+            return dict.__getitem__(self, key)
+        else:
+            flatten_dict = self.flatten()
+            if key in flatten_dict:
+                return flatten_dict[key]
+            else:
+                raise KeyError(f"Key '{key}' not found in self")
+            # if not hasattr(self, 'param_nests_path'):
+            #     raise KeyError(key)
+            # if key not in self.param_nests_path:
+            #     raise KeyError(key)
+            # path = self.param_nests_path[key]
+            # item = self
+            # for nest in path:
+            #     # Используем super().get(), если вложенные элементы — это тоже экземпляры вашего класса
+            #     # или проверяем, есть ли у item метод __getitem__
+            #     # item = super().__getitem__(nest)
+            #     item = super().__getitem__(nest)
+            # return item[key]
+            # except KeyError:
+            #     raise KeyError(f"Key '{key}' not found in self or param_nests_path")
+            # item = self
+            # for nest in self.param_nests_path[key]:
+            #     item = item[nest]
+            # return item[key]
+    def __setitem__(self, key, value):
+        if not self.initialized:
+            super().__setitem__(key, value)
+        else:
+            if key in ['baseliner', 'baseline_algo'] and self:
+                
+                temp = dict.__getitem__(self,'baseline_algo')
+                try:
+                    super().__setitem__('baseline_algo', value)
+                    flatten_dict = self.flatten()
+                    functions_list = self._init_functions_list 
+                    config_path = self._init_config_path
+               
+                    # self["baseline_configs"]={}
+                    # func_code = self['baseliner']([1]).__dict__["__wrapped__"].__code__
+                    # for arg in tuple(self.keys()):
+                    #     if arg in func_code.co_varnames[:func_code.co_argcount]:
+                    #         self["baseline_configs"][arg] = self.pop(arg)
+                    self.__init__(functions_list, config_path, **flatten_dict) #TODO: изменить этот упрощённый костыль. Необходимо реинициализировать только baseliner с перебором всех параметров, а не весь конфиг 
+
+                except Exception as e:
+
+                    super().__setitem__('baseline_algo', temp)
+                    raise e
+            if dict.__contains__(self, key):
+                dict.__setitem__(self, key, value)
+            else:     
+                path = dict.get(self.param_nests_path, key)
+                if path is not None:
+                    item = self
+                    for nest in path:
+                        item = dict.__getitem__(item, nest)
+                        if not isinstance(item, dict):
+                            raise KeyError(f"Cannot traverse path at '{nest}', got {type(item).__name__}")
+                    if key in ['shift_range', 'smooth_window']:
+                        item[key].parameter = value
+                    elif dict.__contains__(item,key):
+                        dict.__setitem__(item, key, value)
+                    else:
+                        dict.__setitem__(self, key, value)
+                else:
+                    dict.__setitem__(self, key, value)
+                
+    def __getstate__(self):
+        """
+        Возвращает состояние объекта для сериализации.
+        """
+
+        state = {
+            'dict_data': dict(self), 
+            'param_nests_path': self.param_nests_path,
+            '_init_functions_list': self._init_functions_list,
+            '_init_config_path': self._init_config_path,
+            'initialized': self.initialized
+        }
+        return state
+    def __setstate__(self, state):
+        """
+        Восстанавливает состояние объекта после десериализации.
+        """
+        self.param_nests_path = dict(state.get('param_nests_path', {}))
+        self._init_functions_list = state.get('_init_functions_list', [])
+        self._init_config_path = state.get('_init_config_path', None)
+
+        dict.update(self, state.get('dict_data', {}))
+        self.initialized = state.get('initialized',False)
+        
+        
+        # print(self)
+    def flatten(self, data = None):
+        flattened = {}
+        if data is None:
+            data = self
+        for key in data.keys():
+            if isinstance(data[key],dict):
+                flattened.update(self.flatten(data[key]))
+            else:
+                flattened[key] = data[key]
+        return flattened
+
+    # def open(path):
+    #     if not path.endswith('.yaml'):
+    #         if os.path.exists(path + '.yaml'):
+    #             path = path + '.yaml'
+    #         else:
+    #             path = find_paths(path, file_end='.yaml')
+    #             if len(path) > 1:
+    #                 raise ValueError(f"Multiple file paths were found:\n{path}\nPlease specify the direct path to the desired file.")
+    #             elif not path:
+    #                 raise FileNotFoundError('Файл не найден.')
+    #             else:
+    #                 path = path[0]
+    #     return Configs(None, config_path=path)
+    
+    def save(self, path2dir = "", file_end = "_proccesing_settings"):
+        self.dump(path2dir, file_end)
     def dump(self, path2dir = "", file_end = "_proccesing_settings"):
-        with open(path2dir + file_end +".yaml","w") as file:
+        if not path2dir.endswith(".yaml"):
+            if path2dir.endswith(file_end):
+                path = path2dir + ".yaml"
+            else:
+                path = path2dir + file_end +".yaml"
+        else:
+            path = path2dir
+        with open(path,"w") as file:
             self._dump_nest(self,file)
     def _dump_nest(self,nest,file):
+        baseliner_temp = False
         if 'baseliner' in nest:
-            nest["baseline_algo"] = nest.pop('baseliner')
+            baseliner_temp = nest.pop('baseliner')
+
         for key in nest.keys():
             if isinstance(nest[key],dict):
                 self._dump_nest(nest[key],file)
             elif isinstance(nest[key],AdaptiveParameter):
-                yaml.safe_dump({key: nest[key].parameter}, file, default_flow_style=False, sort_keys=False)
+                par_temp = copy.copy(nest[key].parameter)
+                yaml.safe_dump({key: par_temp}, file, default_flow_style=False, sort_keys=False)
             elif isinstance(nest[key],DatasetHeaders):
                 pass
             else:
@@ -342,8 +493,9 @@ class Configs(dict): # TODO: "Улучшить" класс Configs, сделав
                         yaml.safe_dump({key: nest[key]}, file, default_flow_style=False, sort_keys=False)
                     except:
                         yaml.safe_dump({key: list(nest[key])}, file, default_flow_style=False, sort_keys=False)
-        if 'baseline_algo' in nest:
-            nest["baseliner"] = nest.pop('baseline_algo')
+        
+        if isinstance(baseliner_temp,AdaptiveParameter):
+            nest["baseliner"] = baseliner_temp
 def _set_local_proc_configs(DataProc_configs, data_mz):
     dots_distance = np.median(np.diff(data_mz))
     local_configs = copy.deepcopy(DataProc_configs)
@@ -527,7 +679,8 @@ def _baseliner_prep(baseliner,mz_scale):
         return None
 ### Base functions
 
-def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsize = 10000000, reconv = False):
+def imzml2hdf5(path_list, dtypeconv='single', chunk_rowsize = "Auto", chunk_bsize = 10000000, reconv = False): 
+    # Очень важный TODO. ПОЗВОЛИТ РАБОТАТЬ С METASPACE ДАННЫМИ!!!: превратить эту функцию в конвертацию центроидных (и уже обработанных) данных imzml в hdf5 (типа в пиклист)
     """
     Description
     ----
@@ -626,7 +779,7 @@ def Raw2proc(data_obj_path,
              h5chunk_size_MB = 10,
              dtypeconv='single',
              free_cores=1,
-             config_path = None,
+             configs = None,
              dataset_name = "int",
              eval_align = False,
              **kwargs):
@@ -696,9 +849,13 @@ def Raw2proc(data_obj_path,
     :rtype: `NoneType`
     """
     
-
+    
     # Process args
-    configs = Configs([msalign,smoothing,DataProc_array], config_path,**kwargs)
+    if isinstance(configs,Configs):
+        configs.__init__([msalign,smoothing,DataProc_array],**configs)
+    else:
+        configs = Configs([msalign,smoothing,DataProc_array], configs,**kwargs)
+
     resample_to_dots = configs["resample_to_dots"]
     # DataProc_configs = configs['DataProc_configs']
     #Create thread for printing text in multiprocessing
@@ -761,10 +918,12 @@ def Raw2proc(data_obj_path,
             print(f"No suitable files found in the specified path: {folder_path}")
             continue
         hdf5_save_path = create_file_path(hdf5_save_folder, slide, hdf5_end)
+        config_path2save = os.path.join(os.path.dirname(hdf5_save_path),slide)
         with Pool(cpu_num) as p:
             data_obj_temp = p.starmap(setup_spectra_batching,
                                       list(product(sample_list,
                                                    [hdf5_save_path],
+                                                   [config_path2save],
                                                    [batch_bsize],
                                                    [dtypeconv],
                                                    [print_queue],
@@ -788,13 +947,12 @@ def Raw2proc(data_obj_path,
         ##II. Coordinates, metadata and organization of input arguments for parallelized and batched proccessing of spectra - DONE
 
         logger.log(f"Slide's {slide} spectra metadata writing")
-        configs.dump(os.path.join(os.path.dirname(hdf5_save_path),slide))
+        configs.dump(config_path2save)
         del_hdf5(hdf5_save_path)
         hdf5_metadata(hdf5_save_path, data_obj_coord, chunk_size_dict)
-        logger.log(f"Data processing started")
-        
-        multiproc_processing(int2procc_parbatched,print_queue,cpu_num,args_batches, dataset_name, eval_align)
 
+        logger.log(f"Data processing started")
+        multiproc_processing(int2procc_parbatched,print_queue,cpu_num,args_batches, dataset_name, eval_align)
 
         ##IV. Drawing example result
         if draw:
@@ -829,7 +987,7 @@ def Raw2peaklist(data_obj_path,
                  h5chunk_size_MB = 10, 
                  dtypeconv='single',
                  free_cores=1, 
-                 config_path = None,
+                 configs = None,
                  eval_align = False,
                  dataset_name = 'peaklists',
                  **kwargs):
@@ -914,7 +1072,10 @@ def Raw2peaklist(data_obj_path,
     :return: `None`
     :rtype: `NoneType`
     """
-    configs = Configs(FUNCTIONS_FOR_PROCCESING, config_path,**kwargs)
+    if isinstance(configs,Configs):
+        configs.__init__(FUNCTIONS_FOR_PROCCESING,**configs)
+    else:
+        configs = Configs(FUNCTIONS_FOR_PROCCESING, configs,**kwargs)
 
     logger("Raw2peaklist",{**locals()})
     #Create thread for printing text in multiprocessing
@@ -949,14 +1110,15 @@ def Raw2peaklist(data_obj_path,
         ###II. Extracting spectra coordinates, roi indexes, other metadata for proccessing slide samples from poslog and _info text files. Input arguments organization for "intprocc_parbatched_imzml" function (spectra processing batched and parallelized)
         print(f"Slide's {slide} spectra coordinates and metadata extraction for preparation parallel proccessing")
         logger.log(f"Slide's {slide} spectra coordinates and metadata extraction for preparation parallel proccessing")
-
         hdf5_save_path = create_file_path(hdf5_save_folder, slide, hdf5_end)
+        config_path2save = os.path.join(os.path.dirname(hdf5_save_path),slide)
 
         with Pool(cpu_num) as p:
             data_obj_temp = p.starmap(setup_spectra_batching,
                                       list(product(
                                           sample_list,
                                           [hdf5_save_path],
+                                          [config_path2save],
                                           [batch_bsize],
                                           [dtypeconv],
                                           [print_queue],
@@ -984,7 +1146,7 @@ def Raw2peaklist(data_obj_path,
         ##III. Writing metadata
         print(f"Slide's {slide} spectra coordinates writing")
         del_hdf5(hdf5_save_path)
-        configs.dump(os.path.join(os.path.dirname(hdf5_save_path),slide))
+        configs.dump(config_path2save)
         hdf5_metadata(hdf5_save_path,data_obj_coord,chunk_size)
         ##IV. Proccessing, peakpicking and writing to hdf5
         print(f"Slide's {slide} spectra parallel proccessing")
@@ -1030,7 +1192,7 @@ def proc2peaklist(data_obj_path,
                   h5chunk_size_MB = 10, 
                   dtypeconv='single', 
                   free_cores=1, 
-                  config_path = None, 
+                  configs = None, 
                   eval_align = False,
                   dataset_name = 'peaklists',
                   **kwargs):
@@ -1077,7 +1239,11 @@ def proc2peaklist(data_obj_path,
     :return: `None`
     :rtype: `NoneType`
     """
-    configs = Configs([peaks_prop_array], config_path,**kwargs)
+    if isinstance(configs,Configs):
+        configs.__init__([peaks_prop_array],**configs)
+    else:
+        configs = Configs([peaks_prop_array], configs,**kwargs)
+
     PeakPicking_configs = configs['peaks_configs']
     logger("proc2peaklist",{**locals()})
     manager = Manager()
@@ -1103,7 +1269,6 @@ def proc2peaklist(data_obj_path,
         slide = os.path.basename(file_path).replace(file_end,'')
         print(f"The {slide} processed spectra data is loaded from the hdf5 file.")
         config_path_base = file_path.replace(file_end,'')
-        print(config_path_base)
         if os.path.exists(config_path_base+'_proccesing_settings.yaml'): 
             prev_configs = Configs(FUNCTIONS_FOR_PROCCESING , config_path_base + '_proccesing_settings.yaml', **kwargs)
             prev_configs.dump(config_path_base,file_end = "_proccesing_settings")
@@ -1666,7 +1831,9 @@ def int2proc2peaklist_parbatched(sample_file_path,
                 DataProc_configs['msalign_configs']['shift_range'](dots_distance)
                 DataProc_configs['baseliner'](data_mz)
 
-                data_int = DataProc_1d(data_int,data_mz,**_set_local_proc_configs(DataProc_configs,data_mz))
+                # data_int = DataProc_1d(data_int,data_mz,**_set_local_proc_configs(DataProc_configs,data_mz)) #TODO вероятно забыл удалить _set_local_proc_configs. Надо проверить работоспособность кода без него
+                data_int = DataProc_1d(data_int,data_mz,**DataProc_configs) #TODO вероятно забыл удалить _set_local_proc_configs. Надо проверить работоспособность кода без него
+
                 peaklists[n] = peaks_prop_infunc(data_mz, data_int, np.where(np.diff(data_int) != 0)[0], len(data_mz),
                                            nspec_range[n], **PeakPicking_configs)
             
@@ -1754,7 +1921,8 @@ def proc2peaklist_parbatched(sl,
     return peaklists
 
 def setup_spectra_batching(sample_file, 
-                           hdf5_save_path, 
+                           hdf5_save_path,
+                           config_path2save, 
                            batch_bsize, 
                            dtypeconv, 
                            print_queue,
@@ -1892,6 +2060,7 @@ def setup_spectra_batching(sample_file,
         data_obj[sample][roi]["source"] = sample_file
         data_obj[sample][roi]["dtype"] = dtypeconv
         data_obj[sample][roi]["N_resampled"] = resample_to_dots
+        data_obj[sample][roi]['configs'] = config_path2save
         
         #### 
         if dcont:
@@ -1949,7 +2118,6 @@ def setup_spectra_batching(sample_file,
                 [dataset_name]
                 )
                 )
-        
     return (data_obj, par_args) #, shift_range, baseliner, smooth_window)
 
 ### Utility functions for processing
@@ -2012,62 +2180,6 @@ def multiproc_processing(func, print_queue, cpu_num, args_batches, dataset_name 
             if not dataset_name.endswith("_noaln"):
                 args_batch[-1] = dataset_name + "_noaln"
         multiproc_processing(func,print_queue,cpu_num,args_batches, dataset_name, eval_align = False)
-def hdf5_metadata(file_path, data_obj_metadata_donor, chunk_size):
-    """
-    Общее описание
-    ----
-    Вспомогательная функция для создания двух hdf5 файлов "[Slidename]_specdata.hdf5" и "[Slidename]_features.hdf5" и записи в них координат и часть данных таких как путь к первоисточнику, континуальность данных и записью принадлежности индекса спектра к определённому roi в sample.
-
-    :param file_path: path to folder for writing `hdf5`.
-    :param slide: параметр задающий Slidename в названии файла `hdf5`
-    :param data_obj_coord: словарь схожий по структуре записи с будущими hdf5 и непосредственно из которого берутся все данные для записи.
-    :param chunk_size: количество строк, на которые разделяется матрица в hdf5 файле
-    
-    :type file_path: `str`
-    :type slide: `str`
-    :type data_obj_coord: `dict`
-    :type chunk_size: `int`
-
-    :return: `None`
-    :rtype: `NoneType`
-    """ 
-    with File(file_path,"a") as data_obj:
-        for sample in data_obj_metadata_donor.keys():
-            for roi in data_obj_metadata_donor[sample].keys():
-                groups_path = rf"/{sample}/{roi}"
-                if rf"{groups_path}/xy" not in data_obj:
-                    try:
-                        if isinstance(chunk_size, dict):
-                            data_obj.create_dataset(rf"{groups_path}/xy",data=data_obj_metadata_donor[sample][roi]["xy"], chunks = (chunk_size[data_obj_metadata_donor[sample][roi]['source']],2))
-                        else:
-                            data_obj.create_dataset(rf"{groups_path}/xy",data=data_obj_metadata_donor[sample][roi]["xy"], chunks = (chunk_size,2))
-                    except ValueError:
-                        data_obj.create_dataset(rf"{groups_path}/xy",data=data_obj_metadata_donor[sample][roi]["xy"])
-                        
-                if rf"{groups_path}/z" not in data_obj and "z" in data_obj_metadata_donor[sample][roi].keys():     
-                        data_obj.create_dataset(rf"{groups_path}/z",data=data_obj_metadata_donor[sample][roi]["z"])
-                if isinstance(data_obj_metadata_donor, File):
-                    source = data_obj_metadata_donor[sample][roi].attrs['source']
-                    continuous = data_obj_metadata_donor[sample][roi].attrs['continuous']
-                    idxroi = data_obj_metadata_donor[sample][roi].attrs['idxroi']
-                    dtype = data_obj_metadata_donor[sample][roi].attrs['dtype']
-                    N_resampled = data_obj_metadata_donor[sample][roi].attrs['N_resampled']
-                    mz_range = data_obj_metadata_donor[sample][roi].attrs['mz_range']
-                else:
-                    source = data_obj_metadata_donor[sample][roi]['source']
-                    continuous = data_obj_metadata_donor[sample][roi]['continuous']
-                    idxroi = data_obj_metadata_donor[sample][roi]['idxroi']
-                    dtype = data_obj_metadata_donor[sample][roi]['dtype']
-                    N_resampled = data_obj_metadata_donor[sample][roi]['N_resampled']
-                    mz_range = data_obj_metadata_donor[sample][roi]['mz_range']
-                data_obj[sample][roi].attrs['source'] = source
-                data_obj[sample][roi].attrs['continuous'] = continuous
-                data_obj[sample][roi].attrs['idxroi'] = idxroi
-                data_obj[sample][roi].attrs['dtype'] = dtype
-                if N_resampled is not None:
-                    data_obj[sample][roi].attrs['N_resampled'] = N_resampled
-                data_obj[sample][roi].attrs['mz_range'] = mz_range
-    return
 
 def DataProc_array(y,x, baseliner = None, baseline_configs = {},
                        msalign_configs={}, smoothing_configs = {}): 
@@ -2200,7 +2312,7 @@ def DataProc_1d(y,x,baseliner= None, baseline_configs={},
     .. todo:: code refactoring with class
     """
     # Spectral Alignment
-    if msalign_configs['align_peaks'] is not None:
+    if msalign_configs['align_peaks'] is not None: # TODO Задуматься о том, чтобы поставить выравнивание в конце обработки
         y = msalign(x,y,**msalign_configs).squeeze()
     # Baseline Correction and Smoothing
     if baseliner:
@@ -2440,8 +2552,7 @@ def peaks_prop_infunc(X,
         noise_points = np.array([True]*xsize) # Zero iteration
 
         for it in range(noise_est_iterations):
-            
-            for idx in np.where(((val_max-np.mean(Y[noise_points]))/noise_func(Y[noise_points])>=SNR_threshold))[0]:
+            for idx in np.where(((val_max-np.mean(Y[noise_points]))/noise_func(Y[noise_points])>=SNR_threshold))[0]: #По сути тут расчёт z-score в чистом виде TODO: оценить скорость рассчётов моего варианта и scipy.stats.zscore
                 sl = slice(left_min[idx],right_min[idx]+1)
                 noise_points[sl] = False
         
@@ -2973,6 +3084,7 @@ def add_procc_data(hdf5_object,
         t.join()
         logger.ended()
         if draw:
+            # TODO: Выяснить почему может неправильно отрисовываться пики
             draw_data(hdf5_save_path, 
                       plot_mz_range = plot_mz_range,
                       sample_spectra_idx = sample_spectra_idx, 
@@ -3016,7 +3128,7 @@ def _get_local_metadata(obj, datasets_list = None):
        
                     
     
-def _find_dots_process(specdata_sources, **kwargs):
+def _find_dots_process(specdata_sources, save_results = True, **kwargs):
     # TODO: Если файл yaml для peaklists_noaln совпадает с нынешними настройками без выравнивания, то делается варнинг и получается уже повторная обработка не происходит (УЧЕСТЬ И DTYPECONV!).
     # TODO: Если удаляется peaklists_noaln - удаляется и файл с настройками
     """
@@ -3051,28 +3163,45 @@ def _find_dots_process(specdata_sources, **kwargs):
         for source in source_list:
             Slide_data = specdata_Load([source])
             for slide in Slide_data.keys():
-                _find_dots_process(Slide_data[slide])
-                
-    elif isinstance(specdata_sources,dict): #TODO: Добавить поддержку вносимых hdf5 файлов
-        source_keys=specdata_sources.keys()
+                _find_dots_process(Slide_data[slide], save_results = save_results, **kwargs)
+        source_list = []
+
+    elif isinstance(specdata_sources, dict): #TODO: Добавить поддержку вносимых hdf5 файлов
+        source_keys=list(specdata_sources.keys())
         if isinstance(specdata_sources[source_keys[0]], (h5py._hl.files.File,h5py.File, h5py.Group, h5py.Dataset)):
-            new_specdata_sources = {}
-            sample_dict = {}
+            # new_specdata_sources = {}
+            # sample_dict = {}
             for source in source_keys:
-                names = specdata_sources[source].name.split("/")
-                sample_dict = new_specdata_sources.setdefault(specdata_sources[source].__filename__, {})
-                if len(names)>1:
-                    sample_dict.setdefault(names[0], [])
-                    if len(names)>2:
-                        sample_dict[names[0]].append(names[1])
-                    else:
-                        sample_dict[names[0]].append(None)
-                else: 
-                    sample_dict = None
-            for source in new_specdata_sources.keys():
+                _find_dots_process(specdata_sources[source], save_results = save_results, **kwargs)
+            source_list = []
+        else:
+            source_list = specdata_sources.keys()
+            samples = True
+    elif isinstance(specdata_sources, (h5py._hl.files.File,h5py.File, h5py.Group, h5py.Dataset)):
+        new_specdata_sources = {}
+        sample_dict = {}
+
+        if isinstance(specdata_sources, (h5py._hl.files.File,h5py.File)):
+            path_to_file = specdata_sources.filename
+        else:
+            path_to_file = specdata_sources.__filename__
+        
+        sample_dict = new_specdata_sources.setdefault(path_to_file, {})
+        names = specdata_sources.name.split("/")
+        if names == [''] or names == ['','']:
+            new_specdata_sources[path_to_file] = None
+        elif len(names)>1:
+            sample_dict.setdefault(names[0], [])
+            if len(names)>2:
+                sample_dict[names[0]].append(names[1])
+            else:
+                sample_dict[names[0]].append(None)
+        else: 
+            new_specdata_sources[path_to_file] = None
+        for source in new_specdata_sources.keys():
+            if new_specdata_sources[source]:
                 new_specdata_sources[source] = list(new_specdata_sources[source].items())
-            specdata_sources = new_specdata_sources
-            
+        specdata_sources = new_specdata_sources
         source_list = specdata_sources.keys()
         samples = True
     elif isinstance(specdata_sources,str):
@@ -3122,7 +3251,6 @@ def _find_dots_process(specdata_sources, **kwargs):
         add_procc_data(datasets4_noaln, int2proc2peaklist_parbatched, dataset_name = "peaklists_noaln", **kwargs)
     else:
         logger.log("No new peaklists_noaln datasets to process")
-        print("No new peaklists_noaln datasets to process")
     
     for source in source_list:
         Slide_data = specdata_Load([source])
@@ -3145,84 +3273,67 @@ def _find_dots_process(specdata_sources, **kwargs):
                         sample = sample[0]
                     else:
                         rois = list(hdf5[sample].keys())
-             
                 for roi in rois:
                     # TODO 1) Сделать автоматическим подбор Bandwidth, возможно лучше переписать код из pfeats сделав получение KDE общим по данным из hdf5
+                    # TODO 1.2) Исправить ошибку, если bandwidth слишком большой (а может и маленький??). Так как возникают пустые листы в списке пиков и как следствие есть возникновение NaN чисел при mean функции, что приводит к ошибке
                     # TODO 2) Разобраться в необходимости ref и dev
                     # TODO 3) Сделать автоматическим подбор n_dots
                     # TODO 4) Убрать вопросы записи данных и куда сохранять метаданные
                     # TODO 5) СДелать возможность отрисовки графиков результатов
                     # TODO 6) Разобраться в применяемой статистике определения что всё гуд
                     # TODO 7) Разобраться с работой венгерского алгоритма в данной штуке и в его необходимости
-                    calculate(path_to_hdf5,f"{sample}/{roi}/peaklists_noaln",f"{sample}/{roi}/peaklists", ref = 171, dev=0.5, bandwidth=0.025,n_dots=100000)
+                    calculate(path_to_hdf5,f"{sample}/{roi}/peaklists_noaln",f"{sample}/{roi}/peaklists", ref = 0, dev=0.15, bandwidth=0.025, n_dots=100000, save_results = save_results)
+def split_array_by_num_distance(array, min_distance2split, by_column = 'mz'):
+    """
+    Split array by num distance
+    args:
+        array: array to split
+        min_distance2split: minimum distance to split
+        by_column: column to split by
+    returns:
+        batched_array: array split by num distance
+    """
+    if isinstance(array, pd.DataFrame):
+        if by_column is None:
+            raise ValueError("by_column is None when array is a DataFrame. Please specify by_column.")
+        if by_column not in array.columns:
+            raise ValueError("by_column is not in array.columns. Please specify a valid column.")
+        nums_sequence = array.sort_values(by=by_column)[by_column].unique()
+        array4mask = array[by_column].to_numpy()
+    elif isinstance(array, np.ndarray):
+        nums_sequence = np.unique(np.sort(array))
+        array4mask = array
 
+    nums_distance_bool = np.diff(nums_sequence) > min_distance2split
+    left_nums = nums_sequence[:-1][nums_distance_bool]
+    right_nums = nums_sequence[1:][nums_distance_bool] 
+    mz_bins = np.concatenate(([nums_sequence[0] - min_distance2split], (left_nums + right_nums)/2, [nums_sequence[-1] + min_distance2split]))
+    batched_array = [0]*(len(mz_bins) - 1)
+    for n_batch, mz_bin in enumerate(pairwise(mz_bins)):
+        mask = (array4mask > mz_bin[0]) & (array4mask < mz_bin[1])
+        batched_array[n_batch] = array[mask]
 
+    return batched_array
 
-def create_file_path(hdf5_save_folder, slide_name = None, hdf5_end = None):
-    if slide_name is None:
-        slide_name = os.path.basename(hdf5_save_folder)
-    if hdf5_end is None:
-        hdf5_end = ".hdf5"
-    elif not hdf5_end.endswith(".hdf5"):
-        hdf5_end = hdf5_end+".hdf5"
-    return os.path.join(hdf5_save_folder,slide_name) + hdf5_end
-
-def del_hdf5(hdf5_path):
-    if os.path.exists(hdf5_path):
-        os.remove(hdf5_path)
-        print(f"Deleted file {os.path.basename(hdf5_path)} in directory {os.path.dirname(hdf5_path)}")
+def chunking_datasets(data_objs, min_distance2split, index_names = None):
+    """
+    Chunking aln noaln data
+    args:
+        data_obj: data object
+    returns:
+        chunked_data_obj: chunked data object
+    """
+    if min_distance2split is None:
+        raise ValueError("min_distance2split is None. Please specify min_distance2split.")
+    elif isinstance(min_distance2split, list):
+        min_distance2split = max(min_distance2split)
+        Warning(f"min_distance2split is a list. Max value {min_distance2split} will be used.")
+        
+    if isinstance(data_objs, dict):
+        index_names = index_names or data_objs.keys()
+    merged_data_obj =  pd.concat(data_objs, index_names)
+    return split_array_by_num_distance(merged_data_obj, min_distance2split = min_distance2split)
     
-
-def del_datasets_hdf5(hdf5_obj, samples_path = None, dataset_to_del = None): 
-    Need_repacking = False
-    hdf5_name = os.path.basename(hdf5_obj.filename)
-    if dataset_to_del is not None and not isinstance(dataset_to_del, list):
-        dataset_to_del = [dataset_to_del]
-    if not isinstance(samples_path, list):
-        samples_path = [samples_path]
-    for sample in hdf5_obj.keys():
-        for sample_path in samples_path:
-            for roi in hdf5_obj[sample].keys():        
-                if (hdf5_obj[sample][roi].attrs["source"] == sample_path) or sample_path is None:
-                    if dataset_to_del is None:
-                        del hdf5_obj[rf'/{sample}']
-                        Need_repacking = True
-                        print(f"{hdf5_name}. Deleted sample {sample}")
-                        break
-                    else:
-                        for dataset in dataset_to_del:
-                            if hdf5_obj.get(rf'{sample}/{roi}/{dataset}', None):
-                                del hdf5_obj[rf'{sample}/{roi}/{dataset}']
-                                print(f"{hdf5_name}. Deleted dataset {dataset} from sample {sample} roi {roi}")
-                                Need_repacking = True
-    return Need_repacking
-
-def repack_hdf5(hdf5_obj):
-    if isinstance(hdf5_obj, str):
-        hdf5_path = hdf5_obj
-        hdf5_obj = File(hdf5_obj,"r")
-    else:
-        hdf5_path = hdf5_obj.filename
-    print(f"Repacking {hdf5_path}")
-    def _repacking_func(hdf5_old, hdf5_rep):
-        for name, obj in hdf5_old.items():
-            if isinstance(obj, h5py.Dataset):
-                hdf5_rep.create_dataset(name, data=obj[:], chunks = obj.chunks ,dtype = obj.dtype)
-                    # Копируем атрибуты датасета
-                for attr_name, attr_value in obj.attrs.items():
-                    hdf5_rep[name].attrs[attr_name] = attr_value
-            elif isinstance(obj, h5py.Group):
-                _repacking_func(obj, hdf5_rep.create_group(name)[obj.name])
-                # Копируем атрибуты группы
-                for attr_name, attr_value in obj.attrs.items():
-                    hdf5_rep[name].attrs[attr_name] = attr_value
-    hdf5_rep_path = hdf5_path.replace(".hdf5","_rep.hdf5")
-    with File(hdf5_path,"r") as hdf5_old, File(hdf5_rep_path,"w") as hdf5_rep:
-        _repacking_func(hdf5_old,hdf5_rep)
-    hdf5_obj.close()
-    os.remove(hdf5_path)
-    os.rename(hdf5_rep_path,hdf5_path)
-
 ### Constants and base configs
 BYTES_FLOAT_SIZE = {"single": 4, "double": 8, "half": 2}
 FUNCTIONS_FOR_PROCCESING = [msalign,smoothing,DataProc_array,peaks_prop_array]

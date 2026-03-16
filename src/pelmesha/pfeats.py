@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from itertools import product
-from pelmesha.loaders import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger
+from pelmesha.loaders import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger, hdf5_metadata, del_hdf5
 import matplotlib.pyplot as plt
 from h5py import File
 from KDEpy import FFTKDE
@@ -33,8 +33,8 @@ else:
         from itertools import pairwise
 FWHM_TO_SIGMA_FACTOR = 0.4247
 ### Base functions
-def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10,tol = 500, norm = (None,None),draw_borders = 1.5,
-                  dupl_drop = True,min_res = 10, pivoting4val = None, cpu_free=1, path2save=None,sample="unknwn",roi="00", coords4table=None, draw=True, **params2mspeaks_KD):
+def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10, norm = (None,None),draw_borders = 1.5,
+                  dupl_drop = True,min_res = 10, pivoting4val = None, cpu_free=1, path2save=None,sample="unknwn",roi="00", coords4table=None, account_mzscale = True, draw=True, **params2mspeaks_KD):
     """    
     Описание
     ----
@@ -54,7 +54,6 @@ def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,
     :param KD_kernel: KDE ядро (see also: https://kdepy.readthedocs.io/en/latest/kernels.html#available-kernels)
     :param CountF: Параметр исключение из датасета редких пиков, чьё кол-во меньше данного значения
     :param params2mspeaks_KD: остальные параметры для функции mspeaks_KD
-    :param tol: tolerance in ppm of m/z (used for batching dots by window)
     :param norm: Default (None, None). First is type of normalization on spectrum: "l1", "l2", "max". Second is which column normalize (str or list)
     :param draw_borders: graphics borders extension ± m/z
     :param dupl_drop: `True` - полученная фича таблица фильтрует дупликаты пиков.
@@ -73,7 +72,6 @@ def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,
     :type KD_kernel: `str`
     :type CountF: `int`
     :type params2mspeaks: `keyword` 
-    :type tol: `float`
     :type norm: `tuple`
     :type draw_borders: `float`
     :type dupl_drop: `bool`
@@ -96,7 +94,6 @@ def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,
     if not isinstance(extr_columns,list) and extr_columns:
         extr_columns = [extr_columns]
     cpu_num = cpu_count()-cpu_free
-    tol = tol/1e+6
     min_res = min_res/1e+6
     if extr_columns:
         if KD_bandwidth.lower() =='med_fwhm':
@@ -119,7 +116,7 @@ def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,
 
     if ftableISAPATH:
         logger.log(f"Data proccessed from file")
-        ftable = Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel,CountF,tol, norm,draw_borders,dupl_drop, min_res,draw,**params2mspeaks_KD)
+        ftable = Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel,CountF, norm,draw_borders,dupl_drop, min_res, account_mzscale ,draw,**params2mspeaks_KD)
         if pivoting4val:
             for slide in ftable.keys():
                 for sample in ftable[slide].keys():
@@ -127,7 +124,7 @@ def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,
                         ftable[slide][sample][roi]['features'] = ftable[slide][sample][roi]['features'].pivot_table(index="spectra_ind", columns="Peak",fill_value = 0, values =pivoting4val)
     else:
         logger.log(f"Data proccessed from table")
-        ftable = Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end,KD_bandwidth, bwc,KD_kernel,CountF,tol, norm,draw_borders,dupl_drop, min_res,sample=sample,roi=roi,draw=draw,**params2mspeaks_KD)
+        ftable = Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end,KD_bandwidth, bwc,KD_kernel,CountF, norm,draw_borders,dupl_drop, min_res,sample=sample,roi=roi, account_mzscale = account_mzscale,draw=draw,**params2mspeaks_KD)
         if path2save:
             logger.log(f"Starting saving grouped data")
             try:
@@ -188,11 +185,15 @@ def Getrefpeaks(ref_rois_paths,step=100,num_peaks_per_step=5, min_occurence = 0.
     :type min_occurence: `float`
 
     :return: Возвращает список референсных пиков или ещё и веса этих пиков на основе их встречаемости. 
-    :rtype: `list` or tuple(`list`,`pd.Series`) 
+    :rtype: `list` or tuple(`list`,`pd.Series`,`pd.DataFrame`) 
     """
     logger("Getrefpeaks",{**locals()})
-    ref = IMGfeats_concat(ref_rois_paths,extr_columns=None,extracts_coords=False,processed_feat = False)
-    ref = Pgrouping_KD(ref.reset_index(drop=True),**Pgrouping_KD_kwargs)
+    if isinstance(ref_rois_paths, pd.DataFrame):
+        ref = ref_rois_paths
+    else:
+        ref = IMGfeats_concat(ref_rois_paths,extr_columns=None,extracts_coords=False,processed_feat = False)
+    if 'Peak' not in ref.columns:
+        ref = Pgrouping_KD(ref.reset_index(drop=True),**Pgrouping_KD_kwargs)
     ref_peaks = ref.pivot_table(columns= 'Peak', fill_value = 0,aggfunc={"spectra_ind":'count'}).rename({'spectra_ind':'P_occurence'}).astype(float)
     ref_peaks.loc['P_occurence'] = ref_peaks.loc['P_occurence']/ref_peaks.loc['P_occurence'].max()
     ref_peaks = ref_peaks.loc[:,ref_peaks.loc['P_occurence']>min_occurence]
@@ -240,12 +241,7 @@ def Roi_Pgrouping_KD(Paths, extr_columns=None,path2save=None,**Pgrouping_KD_kwar
     logger("Roi_Pgrouping_KD",{**locals()},path2save)
     #if "path2save" not in Pgrouping_KD_kwargs.keys():
     #    Pgrouping_KD_kwargs["path2save"]=path2save
-    if path2save:
-        try:
-            os.remove(path2save+"_grouped_MSIdata.hdf5")
-            print(f"Previous grouped features data is deleted")
-        except:
-            pass
+
     if isinstance(extr_columns,(str)):
         extr_columns = [extr_columns]
     if  Pgrouping_KD_kwargs.get("KD_bandwidth", "med_FWHM") == "med_FWHM" and extr_columns is not None:
@@ -277,6 +273,7 @@ def Roi_Pgrouping_KD(Paths, extr_columns=None,path2save=None,**Pgrouping_KD_kwar
         slide_naming = slide_naming +"_"+slide
     if path2save:
         path2file = os.path.join(path2save,f"Images_{image_num}_from_slides"+ slide_naming+"_grouped_MSIdata.hdf5")
+        del_hdf5(path2file)
         hdf5file = File(path2file, mode="a")
         logger.log("Grouped features is saved in hdf5 file of images:")
         for index in indexes:
@@ -317,7 +314,7 @@ def Roi_Pgrouping_KD(Paths, extr_columns=None,path2save=None,**Pgrouping_KD_kwar
     return Aligned_rois, coords
 
 ### utils functions
-def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF,tol, norm, draw_borders, dupl_drop, min_res, draw,**params2mspeaks_KD):
+def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF, norm, draw_borders, dupl_drop, min_res, account_mzscale, draw,**params2mspeaks_KD):
     """    
     Описание
     ----
@@ -331,15 +328,13 @@ def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF,tol
             file.write(f"##General grouping settings\n")
             file.write(f"KD_bandwidth estimation: {KD_bandwidth} (or value mz)\nBandwith coeff: {bwc} \nKD kernel: {KD_kernel}\n")    
             file.write(f"Peaks count filter: {CountF}\nduplicated peaks dropping: {dupl_drop}\n")
-            file.write(f"Tolerance for parallel peak assigment: {tol*1e+6} ppm")
             file.write(f"\nNormalizing data after grouping: type of normalization {norm[0]}, column: {norm[1]}")
-        try:
-            os.remove(path[slide][:-14]+"_features.hdf5")
-            print(f"Previous processed features data is deleted")
-        except:
-            pass
         
+        hdf5_feat_path = "_".join(path[slide].split("_")[:-1])+"_features.hdf5"
 
+        del_hdf5(hdf5_feat_path)
+        with File(path[slide]) as donor:
+            hdf5_metadata(hdf5_feat_path, donor)
         for sample in data[slide].keys():
             Grouped_ftable[slide][sample] = {}
             for roi in data[slide][sample].keys():
@@ -349,11 +344,11 @@ def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF,tol
                 ## normalization
                 
                 ##Определение шкалы построение функции плотности вероятности.
-                Grouped_ftable[slide][sample][roi]["xy"] = data[slide][sample][roi]["xy"]
-                try:
-                    Grouped_ftable[slide][sample][roi]["z"] = data[slide][sample][roi]["z"]
-                except:
-                    pass
+                # Grouped_ftable[slide][sample][roi]["xy"] = data[slide][sample][roi]["xy"]
+                # try:
+                #     Grouped_ftable[slide][sample][roi]["z"] = data[slide][sample][roi]["z"]
+                # except:
+                #     pass
         
                 spec_data = specdata_Load(path[slide])
                 try:
@@ -401,11 +396,13 @@ def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF,tol
                         median_dist = np.median(np.diff(np.sort(ftable["mz"].unique())))
                         plot_start = ftable["mz"].min()-1
                         plot_end = ftable["mz"][:].max()+1
-                Grouped_ftable[slide][sample][roi]["features"] = Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwidth, bwc,KD_kernel, CountF,tol, norm, draw_borders, dupl_drop,min_res, sample, roi,draw, **params2mspeaks_KD)  
+                Grouped_ftable[slide][sample][roi]["features"] = Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwidth, bwc,KD_kernel, CountF, norm, draw_borders, dupl_drop,min_res, sample, roi, account_mzscale,draw, **params2mspeaks_KD)  
                 if draw:
-                    try:
+                    rand_spec_1 = Pgrouping_KD_table.rand_spec_1
+                    rand_spec_2 = Pgrouping_KD_table.rand_spec_2
+                    if rand_spec_1:
+                        rand_spec = rand_spec_1[-1]
                         plt.figure(num=plt.get_fignums()[-2])
-                        rand_spec = Pgrouping_KD_table.rand_spec_1[-1]
                         try:
                             x = spec_data[slide][sample][roi]["mz"][:]        
                             y = spec_data[slide][sample][roi]["int"][rand_spec,:]
@@ -420,42 +417,39 @@ def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF,tol
                         plt.gcf().tight_layout()
                         plt.ylabel("Intensity")
                         plt.legend([f"Graph of the {rand_spec} mass spectrum"],loc='upper left')
-                        rand_spec = Pgrouping_KD_table.rand_spec_2
-                        
-                        plt.figure(num=plt.get_fignums()[-1])
-                        try: 
-                            x,y = spec_data.getspectrum(rand_spec+idx_start)
+                    
+                    
+                    plt.figure(num=plt.get_fignums()[-1])
+                    try: 
+                        x,y = spec_data.getspectrum(rand_spec_2+idx_start)
 
-                        except:
-                            x = spec_data[slide][sample][roi]["mz"][:]        
-                            y = spec_data[slide][sample][roi]["int"][rand_spec,:]
-                        mz_draw_borders = plt.xlim()
-                        dots_bord_spec = (np.array(x)>=mz_draw_borders[0]) & (np.array(x)<=mz_draw_borders[1])
+                    except:
+                        x = spec_data[slide][sample][roi]["mz"][:]        
+                        y = spec_data[slide][sample][roi]["int"][rand_spec_2,:]
+                    mz_draw_borders = plt.xlim()
+                    dots_bord_spec = (np.array(x)>=mz_draw_borders[0]) & (np.array(x)<=mz_draw_borders[1])
 
-                        ax = plt.gca().twinx() 
-                        ax.plot(np.array(x)[dots_bord_spec],np.array(y)[dots_bord_spec], c="dimgray",alpha=0.75)
-                        plt.gcf().tight_layout()
-                        plt.ylabel("Intensity")
-                        plt.legend([f"Graph of the {rand_spec} mass spectrum"], loc='upper left')
-                        if source == 'hdf5':
-                            spec_data[slide].close()
-                    except Exception as error:
-                        print(error)
-                ## Удаление старого hdf5 файла
+                    ax = plt.gca().twinx() 
+                    ax.plot(np.array(x)[dots_bord_spec],np.array(y)[dots_bord_spec], c="dimgray",alpha=0.75)
+                    plt.gcf().tight_layout()
+                    plt.ylabel("Intensity")
+                    plt.legend([f"Graph of the {rand_spec_2} mass spectrum"], loc='upper left')
+                    if source == 'hdf5':
+                        spec_data[slide].close()
+                   
 
                 ## Запись в hdf5 файл, если на входе был путь к hdf5 файлу
                 try:
-                    
-                    hdf5file = File(path[slide][:-14]+"_features.hdf5", mode="a")
-                    hdf5file.create_dataset(sample + "/" + roi + "/features",data = Grouped_ftable[slide][sample][roi]["features"])
-                    hdf5file.create_dataset(sample + "/" + roi + "/xy",data = Grouped_ftable[slide][sample][roi]["xy"])
-                    try:
-                        hdf5file.create_dataset(sample + "/" + roi + "/z",data = Grouped_ftable[slide][sample][roi]["z"])
-                    except:
-                        pass                        
-                    hdf5file[sample][roi]["features"].attrs["Column headers"] = list(Grouped_ftable[slide][sample][roi]["features"].columns)
-                    print(f"Processed features of sample {sample} roi {roi} is saved in hdf5 file")
-                    hdf5file.close()
+                    with File(hdf5_feat_path, mode="a") as hdf5file:
+                        hdf5file.create_dataset(sample + "/" + roi + "/features",data = Grouped_ftable[slide][sample][roi]["features"])
+                        # if sample + "/" + roi + "/xy" not in hdf5file:
+                        #     hdf5file.create_dataset(sample + "/" + roi + "/xy",data = Grouped_ftable[slide][sample][roi]["xy"])
+                        # try:
+                        #     hdf5file.create_dataset(sample + "/" + roi + "/z",data = Grouped_ftable[slide][sample][roi]["z"])
+                        # except:
+                        #     pass                        
+                        hdf5file[sample][roi]["features"].attrs["Column headers"] = list(Grouped_ftable[slide][sample][roi]["features"].columns)
+                        print(f"Processed features of sample {sample} roi {roi} is saved in hdf5 file")
                     unique_num = Pgrouping_KD_table.unique_num
                     num_bf_raredel = Pgrouping_KD_table.num_bf_raredel 
                     num_raredel = Pgrouping_KD_table.num_raredel 
@@ -464,12 +458,13 @@ def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF,tol
                         file.write(f"\n\n##Grouping results of {sample} roi: {roi}\n")
                         file.write(f"KDE bandwidth: {KD_bandwidth}\n")
                         file.write(f"Grouping results:\nNumber of unique peaks before grouping: {unique_num}\nNumber of unique peaks after grouping: {num_bf_raredel}\nNumber of excluded peaks by count filter({CountF}): {num_raredel} ({num_raredel*100/num_bf_raredel:.2f}%)\nResulted feature peaks is {num_res}")             
-                except:
-                    print(f"Processed features of sample {sample} roi {roi} doesn't saved in hdf5 file")
+                except Exception as error:
+                    print(f"Processed features of sample {sample} roi {roi} doesn't saved in hdf5 file by following error:")
+                    raise(error)
     
     return Grouped_ftable
 
-def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwidth, bwc,KD_kernel, CountF,tol, norm, draw_borders, dupl_drop,min_res, sample = None, roi=None, draw=True,**params2mspeaks_KD):
+def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwidth, bwc,KD_kernel, CountF, norm, draw_borders, dupl_drop,min_res, sample = None, roi=None, account_mzscale = True, draw=True, **params2mspeaks_KD):
     """    
     Описание
     ----
@@ -495,7 +490,7 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
         ftable=pd.concat(ftable)
         ftable.reset_index(level='spectra_ind', inplace=True)
     ### Нормализация end
-    ftable_colarrange = ftable.rename(columns={'mz':'Peak'}, inplace=False).columns
+    # ftable_colarrange = ftable.rename(columns={'mz':'Peak'}, inplace=False).columns
     
     if median_dist<min_res*(plot_start+plot_end)/2:
         median_dist=min_res*(plot_start+plot_end)/2
@@ -522,15 +517,17 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
         KD_bandwidth = median_dist*bwc
     elif KD_bandwidth.lower() == "med_fwhm":
         KD_bandwidth = np.median(np.array(ftable["FWHMR"])-np.array(ftable["FWHML"]))*bwc*(FWHM_TO_SIGMA_FACTOR/4) #(TODO Изменить либо делитель 6, либо проверку минимальный размер расстояния между дискретными точками - не подошло даже после выравнивания. Спектр нередко переcглажен)
-        if median_dist*3 < KD_bandwidth:
+        if median_dist*3 > KD_bandwidth and account_mzscale:
+            k=1.05
             logger.warn(
-                        f"The estimated KD bandwidth value ({KD_bandwidth}) with coefficient {bwc} has been adjusted to {median_dist}. "
+                        f"The estimated KD bandwidth value ({KD_bandwidth}) with coefficient {bwc} has been adjusted to {k*median_dist}. "
                         f"The adjustment was necessary because the m/z scale distance between raw signal points is "
                         f"{median_dist / KD_bandwidth:.2f} times larger than the KDE bandwidth."
             )
-            KD_bandwidth = 3*median_dist
+            KD_bandwidth = k*median_dist
             
     logger.log(f"KD bandwidth value\\estimated value = {KD_bandwidth}, with coeff: {bwc}")
+    
     ##
     ##Построение графика функции плотности вероятности по всей шкале mz
     Y_plot = FFTKDE(kernel = KD_kernel, bw = KD_bandwidth).fit(ftable['mz'].values)(X_plot)
@@ -539,40 +536,38 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     ##Определение пиков графика плотности вероятности и их оснований
     ##### ПОпробовать разбить спектр на доли, чтобы более комфортно что-то строить
     logger.log("Peaks search is started")
-    Xp, Xl, Xr = mspeaks_KD(X_plot,Y_plot,**params2mspeaks_KD)
+    Xp_data = mspeaks_KD(X_plot,Y_plot,**params2mspeaks_KD)
+    Xp = Xp_data[0]
+    Xl = Xp_data[1]
+    Xr = Xp_data[2]
     logger.log("Peaks search is ended")
     ##Проверка попадания нескольких пиков с одного спектра в этот диапазон
     ##Batching по диапазону
     ### Определим индексы значений m/z для диапазонов
-    sorted_mz = ftable['mz'].sort_values(ascending=True).unique()
-
+    sorted_mz = np.sort(ftable['mz'].unique())
     idxmz_batches = list(pairwise(np.linspace(0,sorted_mz.shape[0],cpu_num*3,dtype=int))) 
-    ### Определяем сами m/z диапазону по сортированному списку m/z
-    par_args=[None]*len(idxmz_batches)
-    #sorted_mz = ftable["mz"].sort_values(ascending=True).reset_index(drop=True)
+
     ### Организуем аргументы для параллельного назначения
+    par_args=[None]*len(idxmz_batches)
     logger.log("Organizing arguments for parallelization")
-    for batch_n,idx_batch in enumerate(idxmz_batches[:-1]):
+    for batch_n,idx_batch in enumerate(idxmz_batches):
         mzb_min = sorted_mz[idx_batch[0]]
         mzb_max = sorted_mz[idx_batch[1]-1]
-        batch_indexes = (Xp>=mzb_min-mzb_min*tol) & (Xp<=mzb_max+mzb_max*tol)
-        par_args[batch_n] = (ftable.loc[(ftable['mz']>=mzb_min) & (ftable['mz']<=mzb_max)],np.array(Xp)[batch_indexes],np.array(Xl)[batch_indexes],np.array(Xr)[batch_indexes])
-       
-    #print(f'Time 1 is: {time.time()-start_time}')
-    mzb_min = sorted_mz[idxmz_batches[-1][0]]
-    mzb_max = sorted_mz[idxmz_batches[-1][1]-1]
-    batch_indexes = (Xp>=mzb_min-mzb_min*tol) & (Xp<=mzb_max+mzb_max*tol)
-    par_args[-1] = (ftable.loc[(ftable['mz']>=mzb_min) & (ftable['mz']<=mzb_max)],np.array(Xp)[batch_indexes],np.array(Xl)[batch_indexes],np.array(Xr)[batch_indexes])
+        Xl_min = Xl[Xl<=mzb_min][-1]
+        Xr_max = Xr[Xr>=mzb_max][0]
+        batch_indexes = (Xp>=Xl_min) & (Xp<=Xr_max)
+        par_args[batch_n] = (ftable.loc[(ftable['mz'] >= mzb_min) & (ftable['mz'] <= mzb_max)], Xp_data[:,batch_indexes])
 
     logger.log("Arguments for parallelization is organized")
-    del Xp, Xl, Xr
+    
     gc.collect()
     logger.log("Peaks assigment is started")
     with Pool(cpu_num) as p:
         grftable = p.starmap(Peak_assignment,par_args)
     grftable=pd.concat(grftable)
     logger.log("Peaks assigment is ended")
-
+    assert len(grftable)==len(ftable), f"batching is not working properly grouped table length is {len(grftable)} but ftable length is {len(ftable)}"
+    del Xp_data
     del par_args
     gc.collect()
     
@@ -607,18 +602,20 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
             plt.bar(temp_pivo['count']["mz"].value_counts().index.astype(str),temp_pivo['count']["mz"].value_counts().astype(int))
             plt.xlabel('Quantity')
             plt.ylabel('Num of duplicates')
-            plt.gca().set_title(f"Occurence of peaks in one group in mass spectrum. Sample: {sample} {roi}")        
+            plt.gca().set_title(f"Peaks occurence in one group in mass spectrum. Sample: {sample} {roi}")        
             plt.grid(visible=True,which="both",axis="y")
         
         
-        rand_num = np.random.randint(0,temp_pivo.shape[0])
-        rand_spec = temp_pivo.iloc[rand_num].name
-        peak_mz = rand_spec[-1]
-        rand_spec = rand_spec[:-1]
-        mz_draw_borders = (peak_mz-draw_borders,peak_mz+draw_borders)
-        dots_bord = (np.array(X_plot)>=mz_draw_borders[0]) & (np.array(X_plot)<=mz_draw_borders[1])
+
         if draw:
+            rand_num = np.random.randint(0,temp_pivo.shape[0])
+            rand_spec = temp_pivo.iloc[rand_num].name
+            peak_mz = rand_spec[-1]
+            rand_spec = rand_spec[:-1]
+            mz_draw_borders = (peak_mz-draw_borders,peak_mz+draw_borders)
+            dots_bord = (np.array(X_plot)>=mz_draw_borders[0]) & (np.array(X_plot)<=mz_draw_borders[1])
             plt.figure(figsize=(25, 4), dpi=600)
+            # plt.figure(figsize=(17.5, 7.5/1.5), dpi=600)
             plt.plot(np.array(X_plot)[dots_bord],np.array(Y_plot)[dots_bord])
             if len(ftable.index.names)==1:
                 query_table = ftable.query("spectra_ind==@rand_spec[-1] and mz>=@mz_draw_borders[0] and mz<=@mz_draw_borders[1]")["mz"]
@@ -634,14 +631,18 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
             plt.ylabel("Probability Density")
             plt.xlim(mz_draw_borders[0],mz_draw_borders[1])
             if ind_norm:
-                text = ["Probability function graphic",f"All peaks except mass spectra with num of spectra {rand_spec[-1]}",f"The mass spectrum peaks of spectra with num of spectra {rand_spec[-1]}"]
+                text = ["Probability function graphic",f"All peaks except mass spectrum N {rand_spec[-1]}",f"Peaks of mass spectrum N {rand_spec[-1]}"]
             else:
-                text = ["Probability function graphic",f"All peaks except mass spectra with index {rand_spec[:-1]} and num of spectra {rand_spec[-1]}",f"The mass spectrum peaks of spectra with index {rand_spec[:-1]} and num of spectra {rand_spec[-1]}"]
+                text = ["Probability function graphic",f"All peaks except mass spectrum index {rand_spec[:-1]} and N {rand_spec[-1]}",f"Peaks of mass spectrum index {rand_spec[:-1]} and N {rand_spec[-1]}"]
             plt.legend(text)
-            Pgrouping_KD_table.rand_spec_1=rand_spec
+            Pgrouping_KD_table.rand_spec_1 = rand_spec
             plt.minorticks_on()
             plt.grid(visible=True,which="both")
-            plt.gca().set_title(f"Duplicated peak {peak_mz:.3f} in the spectra of sample {sample} {roi}.")
+            plt.gca().set_title(f"Duplicated peak {peak_mz:.3f} in the spectra of {sample} {roi}.")
+        else:
+            Pgrouping_KD_table.rand_spec_1 = None
+    else:
+        Pgrouping_KD_table.rand_spec_1 = None
     logger.log("Drawing graphs ended")
     logger.log(f'Merging with peaks column: shape before {grftable.shape}')
     merged_full = grftable.merge(grftable['Peak'].value_counts(),left_on="Peak",right_index=True)
@@ -661,12 +662,14 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     gc.collect()
 
     ## Проверочный график. Строим график плотности вероятности в некотором диапазоне случайного пика
-    rand_num = np.random.randint(0,result.shape[0])
-    rand_spec, peak_mz = result.iloc[rand_num][["spectra_ind","Peak"]]
 
-    mz_draw_borders = (peak_mz-draw_borders,peak_mz+draw_borders)
     if draw:
-        plt.figure(figsize=(25,4), dpi=600)
+        rand_num = np.random.randint(0,result.shape[0])
+        rand_spec, peak_mz = result.iloc[rand_num][["spectra_ind","Peak"]]
+
+        mz_draw_borders = (peak_mz-draw_borders,peak_mz+draw_borders)
+        plt.figure(figsize=(25, 4), dpi=600)
+        # plt.figure(figsize=(17.5, 7.5/1.5), dpi=600)
         dots_bord = (np.array(X_plot)>=mz_draw_borders[0]) & (np.array(X_plot)<=mz_draw_borders[1])
         plt.plot(np.array(X_plot)[dots_bord],np.array(Y_plot)[dots_bord])
         leg = ["Probability function graphic"]
@@ -680,20 +683,26 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
         for peak in Peaks_list:
             temp_query = quered_results.query("Peak == @peak")
             plt.plot(temp_query["mz"],[0]*temp_query.shape[0],'|',alpha=0.85)
-            leg+=[f"m/z dots of {peak:.3f} peak"]
+            leg+=[f"{peak:.3f} peak"]
         plt.plot(excluded["mz"],[0]*excluded.shape[0],"|",c="k",alpha=1)
-        leg+=["Dots of excluded peaks"]
+        leg+=["Excluded peaks"]
         plt.legend(leg)
         plt.minorticks_on()
         plt.grid(visible=True,which="both")
     
-    Pgrouping_KD_table.rand_spec_2=int(rand_spec)
+        Pgrouping_KD_table.rand_spec_2=int(rand_spec)
+    else:
+        Pgrouping_KD_table.rand_spec_2=None
     Pgrouping_KD_table.unique_num = unique_num
     Pgrouping_KD_table.num_bf_raredel = num_bf_raredel
     Pgrouping_KD_table.num_raredel = num_raredel
     Pgrouping_KD_table.num_res = num_res
 
-    result.drop(columns=['count','mz'],inplace=True)
+    if params2mspeaks_KD.get('return_pkY', False):
+        drop_list = ['count']
+    else:
+        drop_list = ['count','mz']
+    result.drop(columns=drop_list,inplace=True)
 
     headers=[]
     Column_headers = result.columns
@@ -709,14 +718,14 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
 
     if dupl_drop:
         if ind_norm:
-            result=pd.pivot_table(result,index=['spectra_ind','Peak'],aggfunc=dict4drop)
+            result=pd.pivot_table(result,index=['spectra_ind','Peak'],aggfunc=dict4drop).reset_index(level=['spectra_ind','Peak'])
         else:
-            result=pd.pivot_table(result,index=[*result.index.names,'spectra_ind','Peak'],aggfunc=dict4drop)
+            result=pd.pivot_table(result,index=[*result.index.names,'spectra_ind','Peak'],aggfunc=dict4drop).reset_index(level=['spectra_ind','Peak'])
 
     logger.log(f"Shape of the dataframe on enter:{ftable.shape}")
-    logger.log(f"Shape of the dataframe before drop:{result.shape} ({grftable.shape[0]-result.shape[0]})")
+    logger.log(f"Shape of the dataframe before drop:{grftable.shape} ({grftable.shape[0]-result.shape[0]})")
     logger.log(f"Shape of the dataframe after drop:{result.shape} ({grftable.shape[0]-result.shape[0]})")
-    return result.reset_index(level=['spectra_ind','Peak']).reindex(columns=ftable_colarrange)
+    return result#.reindex(columns=ftable_colarrange)
 
 def batching(features4batch,mz):
     """
@@ -738,7 +747,7 @@ def SpecNorm(ftable,norm):
         else:
             col_list=norm[1]
         #for colname in col_list:
-        # logger.log(f"{ftable.loc[idx,col_list]}")
+
         data_array = ftable.loc[idx,col_list].to_numpy()
         if len(data_array.shape)==1:
             data_array.shape = (data_array.shape[0],1)
@@ -746,22 +755,52 @@ def SpecNorm(ftable,norm):
         # logger.log(f"{ftable.loc[idx,col_list]}")
     return ftable
 
-def Peak_assignment(ftable_batch,Xp_batch,Xl_batch,Xr_batch):
+def Peak_assignment(ftable_batch,Xp_batch):
     """    
     Описание
     ----
     Вспомогательная функция к основной `Pgrouping_KD`. Определяет принадлежность значений mz к определённому значению пика  
     """
     if not ftable_batch.empty:
-        for idx, peak in enumerate(Xp_batch):
-            ftable_batch.loc[(ftable_batch['mz']>=Xl_batch[idx]) & (ftable_batch['mz']<=Xr_batch[idx]),"Peak"] = peak
+        if len(Xp_batch) == 3:
+            
+            for peak, xl, xr in Xp_batch.T:
+                bool_mask = (ftable_batch['mz']>=xl) & (ftable_batch['mz']<=xr)
+                ftable_batch.loc[bool_mask,"Peak"] = peak
+        else:
+
+            for peak, xl, xr, density in Xp_batch.T:
+                bool_mask = (ftable_batch['mz']>=xl) & (ftable_batch['mz']<=xr)
+                ftable_batch.loc[bool_mask,"Peak"] = peak
+                ftable_batch.loc[bool_mask,"Density"] = density
     return ftable_batch
 
-def mspeaks_KD(X, Y,oversegmentationfilter=None,peaklocation=1):
-    """    
-    Описание
-    ----
-    Вспомогательная функция к основной `Pgrouping_KD`. Находит пики и их границы в оценке плотности вероятности. 
+def mspeaks_KD(X, Y,oversegmentationfilter=None,peaklocation=1, return_pkY = False):
+    """
+    Detect peaks in a KDE curve and return their centers and boundaries.
+
+    Parameters
+    ----------
+    X : ndarray
+        Monotonic array of X coordinates (e.g., m/z grid).
+    Y : ndarray
+        Corresponding density/height values.
+    oversegmentation_filter : float or None, optional
+        Minimal allowed separation between adjacent peaks; when provided, peaks
+        closer than this threshold are merged.
+    peak_location : float, optional
+        Fraction of the peak height to compute a barycentric center; used in
+        boundary calculations as a threshold. Default is 1.
+
+    Returns
+    -------
+    pk_x : ndarray
+        Estimated peak centers (X positions). May contain NaNs if a region has
+        no samples above the threshold.
+    left : ndarray
+        Left boundary (valley position) for each peak.
+    right : ndarray
+        Right boundary (valley position) for each peak.
     """
     n = X.size
     # Robust valley finding
@@ -812,5 +851,6 @@ def mspeaks_KD(X, Y,oversegmentationfilter=None,peaklocation=1):
                 pkX[idx]=np.nan
             else:
                 pkX[idx] = np.sum(Y[lm:rm][mask] * X[lm:rm][mask]) / np.sum(Y[lm:rm][mask])
-
-    return pkX,X[left_min], X[right_min]
+    if return_pkY:
+        return np.array((pkX, X[left_min], X[right_min], val_max))
+    return np.array((pkX, X[left_min], X[right_min]))

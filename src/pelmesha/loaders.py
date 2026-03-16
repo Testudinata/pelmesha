@@ -1,5 +1,6 @@
 import os
 from h5py import File
+import h5py
 import gc
 import warnings
 import logging
@@ -69,7 +70,7 @@ def grouped_MSIdata_Load(path):
     return gr_fdata[group_list[0]]
 
 
-def peakl2DF(batch_path, extr_columns=None,extract_coords = True, return_source_path = False, pivoting4val = None):
+def peakl2DF(batch_path, extr_columns=None, extract_coords = True, return_source_path = False, pivoting4val = None, peaks_dataset_name = "peaklists"):
     """
     Общее описание
     ----
@@ -99,15 +100,14 @@ def peakl2DF(batch_path, extr_columns=None,extract_coords = True, return_source_
         batch_path=[batch_path]
 
     ### hdf5 load
-    feat_type = "peaklists"
     Slide_data = specdata_Load(batch_path)
     if return_source_path:
-        table,sourcse_path = table2DF(Slide_data,feat_type,extr_columns,extract_coords, return_source_path, pivoting4val)
+        table,sourcse_path = table2DF(Slide_data, peaks_dataset_name, extr_columns, extract_coords, return_source_path, pivoting4val)
         logger.ended()
         return table,sourcse_path
     else:
         logger.ended()
-        return table2DF(Slide_data,feat_type,extr_columns,extract_coords, return_source_path, pivoting4val) 
+        return table2DF(Slide_data, peaks_dataset_name, extr_columns, extract_coords, return_source_path, pivoting4val) 
 
 def feat2DF(batch_path, extr_columns=None,extract_coords = True, return_source_path = False, pivoting4val = None):
     """
@@ -148,30 +148,35 @@ def feat2DF(batch_path, extr_columns=None,extract_coords = True, return_source_p
         logger.ended()
         return table2DF(Slide_data,feat_type,extr_columns,extract_coords, return_source_path, pivoting4val) 
     
-def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, return_source_path = False, pivoting4val = None):
+def table2DF(Slide_data, dataset_name, extr_columns=None,extract_coords = True, return_source_path = False, pivoting4val = None, close = True):
     logger("table2DF",{**locals()})
     if isinstance(extr_columns, str):
         extr_columns=[extr_columns]
     DataFeat ={}
     Source_path={}
-    for slides in list(Slide_data.keys()):
-        DataFeat[slides]={}
-        Source_path[slides] = Slide_data[slides].filename
-        
-        for sample in Slide_data[slides].keys():
-            DataFeat[slides][sample]={}
-            for roi in Slide_data[slides][sample].keys():
+    if isinstance(Slide_data, dict):
+        for slides in list(Slide_data.keys()):
+            Source_path[slides] = Slide_data[slides].filename
+            DataFeat[slides]= table2DF(Slide_data[slides], dataset_name, extr_columns = extr_columns, extract_coords = extract_coords, return_source_path = False, pivoting4val = pivoting4val)
+            if not DataFeat[slides]:
+                DataFeat.pop(slides,None)
+    else:
+        Source_path = Slide_data.filename
+        slides = Source_path.split("\\")[-2]
+        for sample in Slide_data.keys():
+            DataFeat[sample]={}
+            for roi in Slide_data[sample].keys():
                 try:
-                    headers = list(Slide_data[slides][sample][roi][feat_type].attrs['Column headers'])
+                    headers = list(Slide_data[sample][roi][dataset_name].attrs['Column headers'])
                 except KeyError as error:
                     logger.warn(f"An error occurred on {slides} {sample} {roi}: {error}")
                     try:
-                        logger.warn(f'HDF5 file from source {Source_path[slides]} on {slides} {sample} {roi} has datasets: {Slide_data[slides][sample][roi].keys()}')
+                        logger.warn(f'HDF5 file from source {Source_path} on {slides} {sample} {roi} has datasets: {Slide_data[sample][roi].keys()}. And atributes: {Slide_data[sample][roi].attrs.keys()}')
                     except:
                         pass
                     continue
 
-                DataFeat[slides][sample][roi]={}
+                DataFeat[sample][roi]={}
                 ## Setting columns to extract
                 if "Peak" in headers:
                     mz_type = "Peak"
@@ -200,35 +205,34 @@ def table2DF(Slide_data, feat_type , extr_columns=None,extract_coords = True, re
                         logger.warn(f"Columns: {temp_extr_column} - are not extracted. Columns in loading dataset is {headers}")
                 ## Setting columns to extract - Ended
 
-                if Slide_data[slides][sample][roi][feat_type].shape[1] == len(headers):
+                if Slide_data[sample][roi][dataset_name].shape[1] == len(headers):
 
-                    DataFeat[slides][sample][roi][feat_type]=pd.DataFrame(Slide_data[slides][sample][roi][feat_type][:,column_nums], columns= (headers[column_num] for column_num in column_nums)).sort_values(['spectra_ind',mz_type])
+                    DataFeat[sample][roi][dataset_name] = pd.DataFrame(Slide_data[sample][roi][dataset_name][:,column_nums], columns= (headers[column_num] for column_num in column_nums)).sort_values(['spectra_ind',mz_type])
                 else:
-                    DataFeat[slides][sample][roi][feat_type]=pd.DataFrame(Slide_data[slides][sample][roi][feat_type][column_nums,:].T, columns= (headers[column_num] for column_num in column_nums)).sort_values(['spectra_ind',mz_type])
+                    DataFeat[sample][roi][dataset_name] = pd.DataFrame(Slide_data[sample][roi][dataset_name][column_nums,:].T, columns= (headers[column_num] for column_num in column_nums)).sort_values(['spectra_ind',mz_type])
                 try:
-                    DataFeat[slides][sample][roi][feat_type]=DataFeat[slides][sample][roi][feat_type].astype({"spectra_ind": int})
+                    DataFeat[sample][roi][dataset_name] = DataFeat[sample][roi][dataset_name].astype({"spectra_ind": int})
                 except:
                     logger.warn("spectra_ind to int is unsuccessful")
                     pass
                 if extract_coords:
                     try:
                         #print(Slide_data[slides][sample][roi]['xy'][:])
-                        DataFeat[slides][sample][roi]["xy"] = pd.DataFrame(Slide_data[slides][sample][roi]['xy'][:],columns=["x","y"], index=pd.Index(range(Slide_data[slides][sample][roi]['xy'].shape[0]),name="spectra_ind"))
+                        DataFeat[sample][roi]["xy"] = pd.DataFrame(Slide_data[sample][roi]['xy'][:],columns=["x","y"], index=pd.Index(range(Slide_data[sample][roi]['xy'].shape[0]),name="spectra_ind"))
                         
                         logger.info(f"{slides}, {sample} and roi {roi}. x and y coordinates were extracted")
-                        DataFeat[slides][sample][roi]["z"] = pd.Series(Slide_data[slides][sample][roi]['z'][:],columns=['z'], index=pd.Index(range(Slide_data[slides][sample][roi]['z'].shape[0]),name="spectra_ind"))
+                        DataFeat[sample][roi]["z"] = pd.Series(Slide_data[sample][roi]['z'][:],columns=['z'], index=pd.Index(range(Slide_data[sample][roi]['z'].shape[0]),name="spectra_ind"))
                         logger.info(f"{slides}, {sample} and roi {roi}. z coordinates were extracted")
                     except:
                         pass#print(f"{slides}, {sample} and roi {roi}. The extraction of other coordinates was unsuccessful")
                 if pivoting4val:
-                    DataFeat[slides][sample][roi][feat_type] = DataFeat[slides][sample][roi][feat_type].pivot_table(index="spectra_ind", columns="Peak",fill_value = 0, values =pivoting4val)
-            if not DataFeat[slides][sample]:
-                DataFeat[slides].pop(sample,None)
-        if not DataFeat[slides]:
-            DataFeat.pop(slides,None)
-        Slide_data[slides].close()
+                    DataFeat[sample][roi][dataset_name] = DataFeat[sample][roi][dataset_name].pivot_table(index="spectra_ind", columns="Peak",fill_value = 0, values =pivoting4val)
+            if not DataFeat[sample]:
+                DataFeat.pop(sample,None)
+    if close and not isinstance(Slide_data, dict):
+        Slide_data.close()
     if not DataFeat:
-        warnings.warn(f"Warning. Any dataset doesn't have {feat_type} data")
+        warnings.warn(f"Warning. Any dataset doesn't have {dataset_name} data")
         logger.ended()
         return
     if return_source_path:
@@ -352,7 +356,7 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
     
     ### Data_loading
     logger("IMGfeats_concat",locals())
-    grouped_images_DF=pd.DataFrame()
+    grouped_images_DF=pd.DataFrame() 
     Coords = pd.DataFrame(columns=['x','y'], dtype = float)
     if isinstance(paths,list):
         path_list=paths
@@ -517,6 +521,132 @@ def find_paths(path_list,file_end = '.imzML'):
     logger.ended()
     return files_path_list
 
+def create_file_path(hdf5_save_folder, slide_name = None, hdf5_end = None):
+    if slide_name is None:
+        slide_name = os.path.basename(hdf5_save_folder)
+    if hdf5_end is None:
+        hdf5_end = ".hdf5"
+    elif not hdf5_end.endswith(".hdf5"):
+        hdf5_end = hdf5_end+".hdf5"
+    return os.path.join(hdf5_save_folder,slide_name) + hdf5_end
+
+def del_hdf5(hdf5_path):
+    if os.path.exists(hdf5_path):
+        os.remove(hdf5_path)
+        print(f"Deleted file {os.path.basename(hdf5_path)} in directory {os.path.dirname(hdf5_path)}")
+    
+
+def del_datasets_hdf5(hdf5_obj, samples_path = None, dataset_to_del = None): 
+    Need_repacking = False
+    hdf5_name = os.path.basename(hdf5_obj.filename)
+    if dataset_to_del is not None and not isinstance(dataset_to_del, list):
+        dataset_to_del = [dataset_to_del]
+    if not isinstance(samples_path, list):
+        samples_path = [samples_path]
+    for sample in hdf5_obj.keys():
+        for sample_path in samples_path:
+            for roi in hdf5_obj[sample].keys():        
+                if (hdf5_obj[sample][roi].attrs["source"] == sample_path) or sample_path is None:
+                    if dataset_to_del is None:
+                        del hdf5_obj[rf'/{sample}']
+                        Need_repacking = True
+                        print(f"{hdf5_name}. Deleted sample {sample}")
+                        break
+                    else:
+                        for dataset in dataset_to_del:
+                            if hdf5_obj.get(rf'{sample}/{roi}/{dataset}', None):
+                                del hdf5_obj[rf'{sample}/{roi}/{dataset}']
+                                print(f"{hdf5_name}. Deleted dataset {dataset} from sample {sample} roi {roi}")
+                                Need_repacking = True
+    return Need_repacking
+
+def repack_hdf5(hdf5_obj):
+    if isinstance(hdf5_obj, str):
+        hdf5_path = hdf5_obj
+        hdf5_obj = File(hdf5_obj,"r")
+    else:
+        hdf5_path = hdf5_obj.filename
+    print(f"Repacking {hdf5_path}")
+    def _repacking_func(hdf5_old, hdf5_rep):
+        for name, obj in hdf5_old.items():
+            if isinstance(obj, h5py.Dataset):
+                hdf5_rep.create_dataset(name, data=obj[:], chunks = obj.chunks ,dtype = obj.dtype)
+                    # Копируем атрибуты датасета
+                for attr_name, attr_value in obj.attrs.items():
+                    hdf5_rep[name].attrs[attr_name] = attr_value
+            elif isinstance(obj, h5py.Group):
+                _repacking_func(obj, hdf5_rep.create_group(name)[obj.name])
+                # Копируем атрибуты группы
+                for attr_name, attr_value in obj.attrs.items():
+                    hdf5_rep[name].attrs[attr_name] = attr_value
+    hdf5_rep_path = hdf5_path.replace(".hdf5","_rep.hdf5")
+    with File(hdf5_path,"r") as hdf5_old, File(hdf5_rep_path,"w") as hdf5_rep:
+        _repacking_func(hdf5_old,hdf5_rep)
+    hdf5_obj.close()
+    os.remove(hdf5_path)
+    os.rename(hdf5_rep_path,hdf5_path)
+
+def hdf5_metadata(file_path, data_obj_metadata_donor, chunk_size = None):
+    """
+    Общее описание
+    ----
+    Вспомогательная функция для создания двух hdf5 файлов "[Slidename]_specdata.hdf5" и "[Slidename]_features.hdf5" и записи в них координат и часть данных таких как путь к первоисточнику, континуальность данных и записью принадлежности индекса спектра к определённому roi в sample.
+
+    :param file_path: path to folder for writing `hdf5`.
+    :param slide: параметр задающий Slidename в названии файла `hdf5`
+    :param data_obj_coord: словарь схожий по структуре записи с будущими hdf5 и непосредственно из которого берутся все данные для записи.
+    :param chunk_size: количество строк, на которые разделяется матрица в hdf5 файле
+    
+    :type file_path: `str`
+    :type slide: `str`
+    :type data_obj_coord: `dict`
+    :type chunk_size: `int`
+
+    :return: `None`
+    :rtype: `NoneType`
+    """ 
+    with File(file_path,"a") as data_obj:
+        for sample in data_obj_metadata_donor.keys():
+            for roi in data_obj_metadata_donor[sample].keys():
+                groups_path = rf"/{sample}/{roi}"
+                if rf"{groups_path}/xy" not in data_obj:
+                    try:
+                        if isinstance(chunk_size, dict):
+                            data_obj.create_dataset(rf"{groups_path}/xy",data=data_obj_metadata_donor[sample][roi]["xy"], chunks = (chunk_size[data_obj_metadata_donor[sample][roi]['source']],2))
+                        elif chunk_size:
+                            data_obj.create_dataset(rf"{groups_path}/xy",data=data_obj_metadata_donor[sample][roi]["xy"], chunks = (chunk_size,2))
+                        else:
+                            data_obj.create_dataset(rf"{groups_path}/xy",data=data_obj_metadata_donor[sample][roi]["xy"], chunks = True)
+                    except ValueError:
+                        data_obj.create_dataset(rf"{groups_path}/xy",data=data_obj_metadata_donor[sample][roi]["xy"])
+                        
+                if rf"{groups_path}/z" not in data_obj and "z" in data_obj_metadata_donor[sample][roi].keys():     
+                        data_obj.create_dataset(rf"{groups_path}/z",data=data_obj_metadata_donor[sample][roi]["z"])
+                if isinstance(data_obj_metadata_donor, File):
+                    source = data_obj_metadata_donor[sample][roi].attrs['source']
+                    configs = data_obj_metadata_donor[sample][roi].attrs['configs']
+                    continuous = data_obj_metadata_donor[sample][roi].attrs['continuous']
+                    idxroi = data_obj_metadata_donor[sample][roi].attrs['idxroi']
+                    dtype = data_obj_metadata_donor[sample][roi].attrs['dtype']
+                    N_resampled = data_obj_metadata_donor[sample][roi].attrs.get('N_resampled',None)
+                    mz_range = data_obj_metadata_donor[sample][roi].attrs['mz_range']
+                else:
+                    source = data_obj_metadata_donor[sample][roi]['source']
+                    configs = data_obj_metadata_donor[sample][roi]['configs']
+                    continuous = data_obj_metadata_donor[sample][roi]['continuous']
+                    idxroi = data_obj_metadata_donor[sample][roi]['idxroi']
+                    dtype = data_obj_metadata_donor[sample][roi]['dtype']
+                    N_resampled = data_obj_metadata_donor[sample][roi].get('N_resampled',None)
+                    mz_range = data_obj_metadata_donor[sample][roi]['mz_range']
+                data_obj[sample][roi].attrs['source'] = source
+                data_obj[sample][roi].attrs['configs'] = configs
+                data_obj[sample][roi].attrs['continuous'] = continuous
+                data_obj[sample][roi].attrs['idxroi'] = idxroi
+                data_obj[sample][roi].attrs['dtype'] = dtype
+                if N_resampled is not None:
+                    data_obj[sample][roi].attrs['N_resampled'] = N_resampled
+                data_obj[sample][roi].attrs['mz_range'] = mz_range
+    return
 class logger:
     """
     logging messages in local package format:
