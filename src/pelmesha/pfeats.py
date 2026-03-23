@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from itertools import product
 from pelmesha.loaders import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger, hdf5_metadata, del_hdf5
+from pelmesha.utilities import split_array_by_num_distance
 import matplotlib.pyplot as plt
 from h5py import File
 from KDEpy import FFTKDE
@@ -113,6 +114,7 @@ def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,
         plot_start = np.float64(ftable['mz'].min()-1)
         plot_end = np.float64(ftable['mz'].max()+1)
         logger.log(f"Peaks are in range {plot_start}-{plot_end} with dtype{type(plot_start)}. Median distance: {median_dist}")
+    # TODO: Распараллелить на этом этапе для File. Здесь произвести разбивку, и подготовить аргументы, особенно ?median_fwhm? и median_dist, разбатчить таблицы по m/z и тд. (проверить, кажется уже где-то батчилось по мз)
 
     if ftableISAPATH:
         logger.log(f"Data proccessed from file")
@@ -128,10 +130,9 @@ def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,
         if path2save:
             logger.log(f"Starting saving grouped data")
             try:
-                if os.path.exists(os.path.join(path2save,f"{sample}_{roi}")+"_features.hdf5"):
-                    os.remove(os.path.join(path2save,f"{sample}_{roi}")+"_features.hdf5")
-                    logger.log(f"Old file deleted")
-                hdf5file = File(os.path.join(path2save,f"{sample}_{roi}")+"_features.hdf5", mode="a")
+                path2hdf5 = os.path.join(path2save,f"{sample}_{roi}")+"_features.hdf5"
+                del_hdf5(path2hdf5)
+                hdf5file = File(path2hdf5, mode="a")
                 hdf5file.create_dataset(sample + "/" + roi + "/features",data = ftable)
                 logger.log(f"Grouped table data saved in hdf5")
                 hdf5file[sample][roi]["features"].attrs["Column headers"] = list(ftable.columns)
@@ -164,6 +165,30 @@ def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,
 
     logger.ended()
     return ftable
+
+# def Pgrouping_KD_refactored(feat_source, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10, norm = (None,None),draw_borders = 1.5,
+#                   dupl_drop = True,min_res = 10, pivoting4val = None, cpu_free=1, path2save=None,sample="unknwn",roi="00", coords4table=None, account_mzscale = True, draw=True, **params2mspeaks_KD):
+#     """
+#     Description
+#     ----
+#     :param feat_source:
+#     :pa
+#     """
+#     logger("Pgrouping_KD",{**locals()},path2save)
+    
+#     cpu_num = cpu_count()-cpu_free
+#     min_res = min_res/1e+6
+    
+#     # Доподготовка параметра extr_columns
+#     if not isinstance(extr_columns,list) and extr_columns:
+#         extr_columns = [extr_columns]
+#     if extr_columns:
+#         if KD_bandwidth.lower() =='med_fwhm':
+#             extr_columns=extr_columns+["FWHML", "FWHMR"]
+#         extr_columns=list(set(extr_columns))
+#     # Точка рекурсии для feat_source типов
+#     if isinstance(feat_source, str):
+#         pass
 
 def Getrefpeaks(ref_rois_paths,step=100,num_peaks_per_step=5, min_occurence = 0.1, return_weight=True,**Pgrouping_KD_kwargs):
     """    
@@ -471,7 +496,7 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     Вспомогательная функция к основной `Pgrouping_KD`. В ней производятся основные рассчёты функции и работает только с табличными данными `pd.DataFrame`.  
     """
     ind_norm = len(ftable.index.names)==1 and not ftable.index.names[0] # Определяем тип индексации (Обычная без названия (TRUE) "as is" или информативная по принадлежности к чему-либо)
-
+    
     ## Заглушка, если не определены sample и roi
     if not sample:
         sample = "unknwn"
@@ -492,24 +517,17 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     ### Нормализация end
     # ftable_colarrange = ftable.rename(columns={'mz':'Peak'}, inplace=False).columns
     
+    # TODO: Проблемы с median_dist:
+    # 1) нужны из сырых данных получить настоящие dist между точками
+    # 2) Если нет возможности получить из сырых данных... 
+    #   а. Брать между разницей пиков. Вариант хороший и упор будет на FWHM тогда, а если его нет - тоже неплохо. Но плохо, если у нас в данных сугубо шумы,
+    #      которые далеко друг от друга и в итоге fwhm шума будет сильно меньше dist и dist будет нашей bw, что создаст ложноположительный результат
+    #   б. Использовать только ppm прибора. Из плюсов: ложноположительного результата не будет. Минусы: если вдруг bw полученная от fwhm будет сильно ниже расстояния между точками, то спектры точно будут пересглажены
     if median_dist<min_res*(plot_start+plot_end)/2:
         median_dist=min_res*(plot_start+plot_end)/2
         textw=f'The value of {min_res*1e+6} ppm is used as the minimum distance between points to build the density distribution. If you want to build a more accurate probability distribution, change the "min_res" parameter. (Example: accuracy of Orbitrap ~ 10 ppm)'
         logger.warn(textw)
     logger.log(f'median_dist is {median_dist}')
-    num_of_dots = int((plot_end-plot_start)*10/median_dist)+1
-    
-    X_plot = np.linspace(np.float64(plot_start),np.float64(plot_end),num_of_dots)
-    diffs = np.diff(X_plot)
-    while not np.allclose(np.ones_like(diffs) * diffs[0], diffs):
-        logger.warn(f"X_plot is not uniform between {plot_start} and {plot_end} with num of dots: {num_of_dots} and distances between points {np.unique_values(diffs)}. Reducing number of dots for X_plot by 2 times")
-        num_of_dots=int(num_of_dots/2)
-        X_plot = np.linspace(plot_start,plot_end,num_of_dots)
-        diffs = np.diff(X_plot)
-        if num_of_dots<=1:
-            raise AssertionError("Cannot get uniform data for KDE. See logs for info")
-        
-    logger.log(f"X_plot is uniform between {plot_start} and {plot_end} with dtype {type(plot_start)} and num of dots: {num_of_dots} and distances between points {np.unique(diffs, equal_nan=False)}.")
 
     logger.log(f"KD bandwith value or estimation method = {KD_bandwidth}")
     if KD_bandwidth == "mz_discret":
@@ -527,6 +545,23 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
             KD_bandwidth = k*median_dist
             
     logger.log(f"KD bandwidth value\\estimated value = {KD_bandwidth}, with coeff: {bwc}")
+
+
+    num_of_dots = int((plot_end-plot_start)*10/median_dist)+1
+    
+    X_plot = np.linspace(np.float64(plot_start),np.float64(plot_end),num_of_dots)
+    diffs = np.diff(X_plot)
+    while not np.allclose(np.ones_like(diffs) * diffs[0], diffs):
+        logger.warn(f"X_plot is not uniform between {plot_start} and {plot_end} with num of dots: {num_of_dots} and distances between points {np.unique_values(diffs)}. Reducing number of dots for X_plot by 2 times")
+        num_of_dots=int(num_of_dots/2)
+        X_plot = np.linspace(plot_start,plot_end,num_of_dots)
+        diffs = np.diff(X_plot)
+        if num_of_dots<=1:
+            raise AssertionError("Cannot get uniform data for KDE. See logs for info")
+        
+    logger.log(f"X_plot is uniform between {plot_start} and {plot_end} with dtype {type(plot_start)} and num of dots: {num_of_dots} and distances between points {np.unique(diffs, equal_nan=False)}.")
+    # Сегментирование с помощью KDE
+   
     
     ##
     ##Построение графика функции плотности вероятности по всей шкале mz
@@ -616,7 +651,7 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
             dots_bord = (np.array(X_plot)>=mz_draw_borders[0]) & (np.array(X_plot)<=mz_draw_borders[1])
             plt.figure(figsize=(25, 4), dpi=600)
             # plt.figure(figsize=(17.5, 7.5/1.5), dpi=600)
-            plt.plot(np.array(X_plot)[dots_bord],np.array(Y_plot)[dots_bord])
+            plt.plot(np.array(X_plot)[dots_bord],np.array(Y_plot)[dots_bord],color='k',alpha = 0.85)
             if len(ftable.index.names)==1:
                 query_table = ftable.query("spectra_ind==@rand_spec[-1] and mz>=@mz_draw_borders[0] and mz<=@mz_draw_borders[1]")["mz"]
                 query_table_excluded = ftable.query("spectra_ind!=@rand_spec[-1] and mz>=@mz_draw_borders[0] and mz<=@mz_draw_borders[1]")["mz"]
@@ -671,7 +706,7 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
         plt.figure(figsize=(25, 4), dpi=600)
         # plt.figure(figsize=(17.5, 7.5/1.5), dpi=600)
         dots_bord = (np.array(X_plot)>=mz_draw_borders[0]) & (np.array(X_plot)<=mz_draw_borders[1])
-        plt.plot(np.array(X_plot)[dots_bord],np.array(Y_plot)[dots_bord])
+        plt.plot(np.array(X_plot)[dots_bord],np.array(Y_plot)[dots_bord], color="k",alpha=0.85)
         leg = ["Probability function graphic"]
         plt.xlim(mz_draw_borders)
         quered_results = result.query("mz>=@mz_draw_borders[0] and mz<=@mz_draw_borders[1]")
@@ -726,6 +761,45 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     logger.log(f"Shape of the dataframe before drop:{grftable.shape} ({grftable.shape[0]-result.shape[0]})")
     logger.log(f"Shape of the dataframe after drop:{result.shape} ({grftable.shape[0]-result.shape[0]})")
     return result#.reindex(columns=ftable_colarrange)
+
+def _dataset_segmenting(ftable,KD_bandwidth,median_dist,bwc,account_mzscale):
+    KD_bandwidth_est_method = KD_bandwidth
+    median_dist_est = median_dist
+    if median_dist is None:
+        median_dist = ftable['mz'].sort_values().diff().loc[ftable['mz'].sort_values().diff()>0].median()
+        plot_start = np.float64(ftable['mz'].min()-1)
+        plot_end = np.float64(ftable['mz'].max()+1)
+        if median_dist<min_res*(plot_start+plot_end)/2:
+            median_dist=min_res*(plot_start+plot_end)/2
+            textw=f'The value of {min_res*1e+6} ppm is used as the minimum distance between points to build the density distribution. If you want to build a more accurate probability distribution, change the "min_res" parameter. (Example: accuracy of Orbitrap ~ 10 ppm)'
+            logger.warn(textw)
+            logger.log(f'median_dist is {median_dist}')
+    logger.log(f"KD bandwith value or estimation method = {KD_bandwidth}")
+    if KD_bandwidth == "mz_discret":
+        #KD_bandwidth = min_dist*bwc
+        KD_bandwidth = median_dist*bwc
+    elif KD_bandwidth.lower() == "med_fwhm":
+        KD_bandwidth = np.median(np.array(ftable["FWHMR"])-np.array(ftable["FWHML"]))*bwc*(FWHM_TO_SIGMA_FACTOR/4) #(TODO Изменить либо делитель 6, либо проверку минимальный размер расстояния между дискретными точками - не подошло даже после выравнивания. Спектр нередко переcглажен)
+        if median_dist*3 > KD_bandwidth and account_mzscale:
+            k=1.05
+            logger.warn(
+                        f"The estimated KD bandwidth value ({KD_bandwidth}) with coefficient {bwc} has been adjusted to {k*median_dist}. "
+                        f"The adjustment was necessary because the m/z scale distance between raw signal points is "
+                        f"{median_dist / KD_bandwidth:.2f} times larger than the KDE bandwidth."
+            )
+            KD_bandwidth = k*median_dist*bwc
+    
+
+    logger.log(f"Peaks are in range {plot_start}-{plot_end} with dtype{type(plot_start)}. Median distance: {median_dist}")
+
+    logger.log(f"KD bandwidth value\\estimated value = {KD_bandwidth}, with coeff: {bwc}")
+    segmented_arrays = split_array_by_num_distance(ftable,KD_bandwidth*12)
+    logger.log(f"Dataset segmented on {len(segmented_arrays)} parts")
+    if len(segmented_arrays) == 1:
+        return (segmented_arrays[0], KD_bandwidth)
+    else:
+        for segmented_array in segmented_arrays:
+           _dataset_segmenting(segmented_array, KD_bandwidth_est_method)
 
 def batching(features4batch,mz):
     """

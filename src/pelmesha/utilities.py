@@ -2,7 +2,8 @@
 import time
 import warnings
 from typing import List, Union
-
+import pandas as pd
+from itertools import pairwise
 import numpy as np
 import scipy.interpolate as interpolate
 
@@ -166,3 +167,54 @@ def convert_peak_values_to_index(x: np.ndarray, peaks) -> List:
         list of peaks as index
     """
     return [find_nearest_index(x, peak) for peak in peaks]
+
+def split_array_by_num_distance(array, min_distance2split, by_column = 'mz'):
+    """
+    Split array by num distance
+    args:
+        array: array to split
+        min_distance2split: minimum distance to split
+        by_column: column to split by
+    returns:
+        batched_array: array split by num distance
+    """
+    if isinstance(array, pd.DataFrame):
+        if by_column is None:
+            raise ValueError("by_column is None when array is a DataFrame. Please specify by_column.")
+        if by_column not in array.columns:
+            raise ValueError("by_column is not in array.columns. Please specify a valid column.")
+        nums_sequence = array.sort_values(by=by_column)[by_column].unique()
+        array4mask = array[by_column].to_numpy()
+    elif isinstance(array, np.ndarray):
+        nums_sequence = np.unique(np.sort(array))
+        array4mask = array
+
+    nums_distance_bool = np.diff(nums_sequence) > min_distance2split
+    left_nums = nums_sequence[:-1][nums_distance_bool]
+    right_nums = nums_sequence[1:][nums_distance_bool] 
+    mz_bins = np.concatenate(([nums_sequence[0] - min_distance2split], (left_nums + right_nums)/2, [nums_sequence[-1] + min_distance2split]))
+    batched_array = [0]*(len(mz_bins) - 1)
+    for n_batch, mz_bin in enumerate(pairwise(mz_bins)):
+        mask = (array4mask > mz_bin[0]) & (array4mask < mz_bin[1])
+        batched_array[n_batch] = array[mask]
+
+    return batched_array
+
+def chunking_datasets(data_objs, min_distance2split, index_names = None):
+    """
+    Chunking aln noaln data
+    args:
+        data_obj: data object
+    returns:
+        chunked_data_obj: chunked data object
+    """
+    if min_distance2split is None:
+        raise ValueError("min_distance2split is None. Please specify min_distance2split.")
+    elif isinstance(min_distance2split, list):
+        min_distance2split = max(min_distance2split)
+        Warning(f"min_distance2split is a list. Max value {min_distance2split} will be used.")
+        
+    if isinstance(data_objs, dict):
+        index_names = index_names or data_objs.keys()
+    merged_data_obj =  pd.concat(data_objs, index_names)
+    return split_array_by_num_distance(merged_data_obj, min_distance2split = min_distance2split)
