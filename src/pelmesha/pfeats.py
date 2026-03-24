@@ -34,6 +34,177 @@ else:
         from itertools import pairwise
 FWHM_TO_SIGMA_FACTOR = 0.4247
 ### Base functions
+# def Pgrouping_KD_refactored(feat_source, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10, norm = (None,None),draw_borders = 1.5,
+#                   dupl_drop = True,min_res = 10, pivoting4val = None, cpu_free=1, path2save=None,sample="unknwn",roi="00", coords4table=None, account_mzscale = True, draw=True, **params2mspeaks_KD):
+#     """
+#     Description
+#     ----
+#     :param feat_source:
+
+#     :param extr_columns:
+    
+#     """
+#     logger("Pgrouping_KD",{**locals()},path2save)
+    
+#     cpu_num = cpu_count()-cpu_free
+#     min_res = min_res/1e+6
+    
+#     # Доподготовка параметра extr_columns
+#     if not isinstance(extr_columns,list) and extr_columns:
+#         extr_columns = [extr_columns]
+#     if extr_columns:
+#         if KD_bandwidth.lower() =='med_fwhm':
+#             extr_columns=extr_columns+["FWHML", "FWHMR"]
+#         extr_columns=list(set(extr_columns))
+#     # Точка рекурсии для feat_source типов
+#     if isinstance(feat_source, str):
+#         ftableISAPATH=True
+#         data, path = peakl2DF([feat_source],extr_columns=extr_columns, return_source_path = True,pivoting4val=None)
+#     elif isinstance(feat_source, list):
+#         for feat_so
+#         data, path = Pgrouping_KD_refactored(ftable,extr_columns=extr_columns, return_source_path = True,pivoting4val=None)
+#         ftableISAPATH=True
+#     if isinstance(ftable, pd.DataFrame):
+#         ftableISAPATH=False
+#         median_dist = ftable['mz'].sort_values().diff().loc[ftable['mz'].sort_values().diff()>0].median()
+#         plot_start = np.float64(ftable['mz'].min()-1)
+#         plot_end = np.float64(ftable['mz'].max()+1)
+#         logger.log(f"Peaks are in range {plot_start}-{plot_end} with dtype{type(plot_start)}. Median distance: {median_dist}")    
+    
+
+#     return ftable
+# def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10, norm = (None,None),draw_borders = 1.5,
+#                   dupl_drop = True,min_res = 10, pivoting4val = None, cpu_free=1, path2save=None,sample="unknwn",roi="00", coords4table=None, account_mzscale = True, draw=True, **params2mspeaks_KD):
+#     """    
+#     Описание
+#     ----
+#     Функция группирует близкостоящие значения пиков mz к определённому значению Peak на основе оценки плотности вероятности встречаемости mz.  
+
+#     :param ftable: Источник данных. Может быть уже таблицей/датафреймом, а может быть ссылкой на папку с данными, которые надо выгрузить
+#     :param extr_columns: Лист столбцов, которые войдут в датафрейм фич, где `"spectra_ind"` и `"mz"` или `"Peak"` - экстрагируются всегда. Default: `None` - экстракция всех столбцов
+#     `"Intensity"`, `"Area"`, `"SNR"`, `"PextL"`, `"PextR"`, `"FWHML"`, `"FWHMR"`,`"Noise"`, `"Mean noise"`
+#     :param KD_bandwidth: {`"med_FWHM"`,`"mz_discret"`,`"ISJ"`,`"silverman"`,`"scott"`, `float`} - выбор полосы пропускания, либо алгоритм её определения.
+    
+#         `"med_FWHM"` - полоса пропускания - медианное значение дисперсии пиков, которая определяется из медианы ширины на полувысоте. 
+    
+#         `"mz_discret"` - полоса пропускания - медиана расстояний между точками шкалы mz, где лучше всего, если есть доступ к файлу hdf5 и imzml. 
+
+#         `"ISJ"`,`"silverman"`,`"scott"` - базовые для функции FFTKDE (из пакета KDEpy)
+#     :param bwc: коэффициент полученной/выбранной полосы пропускания
+#     :param KD_kernel: KDE ядро (see also: https://kdepy.readthedocs.io/en/latest/kernels.html#available-kernels)
+#     :param CountF: Параметр исключение из датасета редких пиков, чьё кол-во меньше данного значения
+#     :param params2mspeaks_KD: остальные параметры для функции mspeaks_KD
+#     :param norm: Default (None, None). First is type of normalization on spectrum: "l1", "l2", "max". Second is which column normalize (str or list)
+#     :param draw_borders: graphics borders extension ± m/z
+#     :param dupl_drop: `True` - полученная фича таблица фильтрует дупликаты пиков.
+#     :param min_res: минимальное разрешение прибора в ppm. Контролирует минимальное значение полосы пропускания для метода её определения `"mz_discret"` и максимальное кол-во точек при построении оценки плотности вероятности
+#     :param pivoting4val: list of columns or None (default) - resulted table is pivoted by index: spectra_ind, columns: Peak with fill_value = 0, and values: list of columns from pivoting4val. If None - do nothing about pivoting
+#     :param cpu_free: Number of CPU cores don't used in multiproccessing
+#     :param path2save: path to save if the ftable is not a path
+#     :param sample: works with path2saveand ftable is pandas DataFrame. It's a name for sample group in writing hdf5 file. Default: "unknwn"
+#     :param roi: works with path2save and ftable is pandas DataFrame. It's a name for roi group in writing hdf5 file. Default: "00"
+#     :param coords4table: works with path2save and ftable is pandas DataFrame. It's coordinates for saving in hdf5 file. Default: None
+
+#     :type ftable: `pd.Dataframe` or `path`/`str`
+#     :type columns: `list` or `None`
+#     :type KD_bandwidth: `float` or `str`
+#     :type bwc: `float`
+#     :type KD_kernel: `str`
+#     :type CountF: `int`
+#     :type params2mspeaks: `keyword` 
+#     :type norm: `tuple`
+#     :type draw_borders: `float`
+#     :type dupl_drop: `bool`
+#     :type min_res: `float`
+#     :type pivoting4val: `bool`
+#     :type cpu_free: `int`
+#     :type path2save: `str`
+#     :type sample: `str`
+#     :type roi: `str`
+#     :type coords4table: `pd.Dataframe` or `None`
+
+
+#     :return: peaklist DataFrame, where slide, sample and roi are in index. Return `tuple` if `extract_coords` is `True` with additional Coords
+
+#     :rtype: `dict` or `tuple`
+#     """
+    
+#     logger("Pgrouping_KD",{**locals()},path2save)
+
+#     if not isinstance(extr_columns,list) and extr_columns:
+#         extr_columns = [extr_columns]
+#     cpu_num = cpu_count()-cpu_free
+#     min_res = min_res/1e+6
+#     if extr_columns:
+#         if KD_bandwidth.lower() =='med_fwhm':
+#             extr_columns=extr_columns+["FWHML", "FWHMR"]
+#         extr_columns=list(set(extr_columns))
+        
+#     # Вариация для рассчётов для уже готовой таблицы или путей к таблицам features 
+#     if isinstance(ftable, str):
+#         ftableISAPATH=True
+#         data, path = peakl2DF([ftable],extr_columns=extr_columns, return_source_path = True,pivoting4val=None)
+#     elif isinstance(ftable, list):
+#         data, path = peakl2DF(ftable,extr_columns=extr_columns, return_source_path = True,pivoting4val=None)
+#         ftableISAPATH=True
+#     if isinstance(ftable, pd.DataFrame):
+#         ftableISAPATH=False
+#         median_dist = ftable['mz'].sort_values().diff().loc[ftable['mz'].sort_values().diff()>0].median()
+#         plot_start = np.float64(ftable['mz'].min()-1)
+#         plot_end = np.float64(ftable['mz'].max()+1)
+#         logger.log(f"Peaks are in range {plot_start}-{plot_end} with dtype{type(plot_start)}. Median distance: {median_dist}")
+#     # TODO: Распараллелить на этом этапе для File. Здесь произвести разбивку, и подготовить аргументы, особенно ?median_fwhm? и median_dist, разбатчить таблицы по m/z и тд. (проверить, кажется уже где-то батчилось по мз)
+
+#     if ftableISAPATH:
+#         logger.log(f"Data proccessed from file")
+#         ftable = Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel,CountF, norm,draw_borders,dupl_drop, min_res, account_mzscale ,draw,**params2mspeaks_KD)
+#         if pivoting4val:
+#             for slide in ftable.keys():
+#                 for sample in ftable[slide].keys():
+#                     for roi in ftable[slide][sample].keys():
+#                         ftable[slide][sample][roi]['features'] = ftable[slide][sample][roi]['features'].pivot_table(index="spectra_ind", columns="Peak",fill_value = 0, values =pivoting4val)
+#     else:
+#         logger.log(f"Data proccessed from table")
+#         ftable = Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end,KD_bandwidth, bwc,KD_kernel,CountF, norm,draw_borders,dupl_drop, min_res,sample=sample,roi=roi, account_mzscale = account_mzscale,draw=draw,**params2mspeaks_KD)
+#         if path2save:
+#             logger.log(f"Starting saving grouped data")
+#             try:
+#                 path2hdf5 = os.path.join(path2save,f"{sample}_{roi}")+"_features.hdf5"
+#                 del_hdf5(path2hdf5)
+#                 hdf5file = File(path2hdf5, mode="a")
+#                 hdf5file.create_dataset(sample + "/" + roi + "/features",data = ftable)
+#                 logger.log(f"Grouped table data saved in hdf5")
+#                 hdf5file[sample][roi]["features"].attrs["Column headers"] = list(ftable.columns)
+#                 logger.log(f"Table headers saved in hdf5")
+
+#                 if coords4table is not None:
+
+#                     hdf5file.create_dataset(sample + "/" + roi + "/xy",data = coords4table.values)
+#                     logger.log(f"Added coordinates saved in hdf5 succesfully")
+#                 # try:
+#                 #     hdf5file.create_dataset(sample + "/" + roi + "/z",data = Grouped_ftable[slide][sample][roi]["z"]) z-coordinates?
+#                 # except:
+#                 #     pass                        
+
+#                 print(f"Processed features of sample {sample} roi {roi} is saved in hdf5 file")
+#                 hdf5file.close()
+                
+#                 unique_num = Pgrouping_KD_table.unique_num
+#                 num_bf_raredel = Pgrouping_KD_table.num_bf_raredel 
+#                 num_raredel = Pgrouping_KD_table.num_raredel 
+#                 num_res = Pgrouping_KD_table.num_res
+#                 with open(os.path.join(path2save,"Peaks_grouping_settings.txt"), "a") as file:
+#                     file.write(f"\n\n##Grouping results of {sample} roi: {roi}\n")
+#                     file.write(f"KDE bandwidth: {KD_bandwidth}\n")
+#                     file.write(f"Grouping results:\nNumber of unique peaks before grouping: {unique_num}\nNumber of unique peaks after grouping: {num_bf_raredel}\nNumber of excluded peaks by count filter({CountF}): {num_raredel} ({num_raredel*100/num_bf_raredel:.2f}%)\nResulted feature peaks is {num_res}")             
+#             except:
+#                 print(f"Processed features of sample {sample} roi {roi} doesn't saved in hdf5 file")
+#         if pivoting4val:
+#             ftable = ftable.pivot_table(index="spectra_ind", columns="Peak",fill_value = 0, values =pivoting4val)
+
+#     logger.ended()
+#     return ftable
+
 def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10, norm = (None,None),draw_borders = 1.5,
                   dupl_drop = True,min_res = 10, pivoting4val = None, cpu_free=1, path2save=None,sample="unknwn",roi="00", coords4table=None, account_mzscale = True, draw=True, **params2mspeaks_KD):
     """    
@@ -165,30 +336,6 @@ def Pgrouping_KD(ftable, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,
 
     logger.ended()
     return ftable
-
-# def Pgrouping_KD_refactored(feat_source, extr_columns = None,KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10, norm = (None,None),draw_borders = 1.5,
-#                   dupl_drop = True,min_res = 10, pivoting4val = None, cpu_free=1, path2save=None,sample="unknwn",roi="00", coords4table=None, account_mzscale = True, draw=True, **params2mspeaks_KD):
-#     """
-#     Description
-#     ----
-#     :param feat_source:
-#     :pa
-#     """
-#     logger("Pgrouping_KD",{**locals()},path2save)
-    
-#     cpu_num = cpu_count()-cpu_free
-#     min_res = min_res/1e+6
-    
-#     # Доподготовка параметра extr_columns
-#     if not isinstance(extr_columns,list) and extr_columns:
-#         extr_columns = [extr_columns]
-#     if extr_columns:
-#         if KD_bandwidth.lower() =='med_fwhm':
-#             extr_columns=extr_columns+["FWHML", "FWHMR"]
-#         extr_columns=list(set(extr_columns))
-#     # Точка рекурсии для feat_source типов
-#     if isinstance(feat_source, str):
-#         pass
 
 def Getrefpeaks(ref_rois_paths,step=100,num_peaks_per_step=5, min_occurence = 0.1, return_weight=True,**Pgrouping_KD_kwargs):
     """    
