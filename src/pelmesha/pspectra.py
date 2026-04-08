@@ -584,7 +584,7 @@ def _noaln_sequence(func):
         logger.log('No align processing started')
         func(*args, **kwargs, dataset_name = 'peaklists_noaln')
     return wrapper
-# class DataSource: TODO: Develop a source class that we can work with. It doesn’t matter which data source we use — IMZML or HDF5 or maybe MZXML; the approach will be the same.
+# class DataSource: #TODO: Develop a source class that we can work with. It doesn’t matter which data source we use — IMZML or HDF5 or maybe MZXML; the approach will be the same.
 #     """
 #     Класс для работы с различными источниками масс-спектрометрических данных (IMZML, HDF5, MZXML).
 #     Обеспечивает унифицированный интерфейс для получения данных m/z шкалы и интенсивностей спектра.
@@ -599,7 +599,7 @@ def _noaln_sequence(func):
 #         self.path = path
 #         if path.lower().endswith(".imzml"):
 #             self.source = ImzMLParser(path)
-#             self._loader = _load_imzml_mz
+#             self._loader = _load_imzml
 
 #         elif path.lower().endswith(".mzxml"):
 #             self.source = mzxml.MzXML(path)
@@ -2595,7 +2595,7 @@ def peaks_prop_infunc(X,
             
             for idx, [lm, rm, th] in enumerate(zip(left_min, right_min, peak_thld)):
                 mask = Y[lm:rm] >= th
-                if np.sum(mask) == 0:
+                if not mask.any():
                     pkX[idx]=np.nan
                 else:
                     pkX[idx] = np.sum(Y[lm:rm][mask] * X[lm:rm][mask]) / np.sum(Y[lm:rm][mask])
@@ -2617,8 +2617,8 @@ def peaks_prop_infunc(X,
         
         for idx, [lm, rm, th] in enumerate(zip(left_min, right_min, peak_thld)):
             mask = Y[lm:rm] >= th
-            if np.sum(mask) == 0:
-                pkX[idx]=np.nan
+            if not mask.any():
+                pkX[idx] = np.nan
             else:
                 pkX[idx] = np.sum(Y[lm:rm][mask] * X[lm:rm][mask]) / np.sum(Y[lm:rm][mask])
 

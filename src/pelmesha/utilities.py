@@ -7,6 +7,7 @@ from itertools import pairwise
 import numpy as np
 import scipy.interpolate as interpolate
 
+FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2)) 
 
 def format_time(value: float) -> str:
     """Convert time to nicer format"""
@@ -197,7 +198,7 @@ def split_array_by_num_distance(array, min_distance2split, by_column = 'mz'):
     for n_batch, mz_bin in enumerate(pairwise(mz_bins)):
         mask = (array4mask > mz_bin[0]) & (array4mask < mz_bin[1])
         batched_array[n_batch] = array[mask]
-
+    
     return batched_array
 
 def chunking_datasets(data_objs, min_distance2split, index_names = None):
@@ -218,3 +219,54 @@ def chunking_datasets(data_objs, min_distance2split, index_names = None):
         index_names = index_names or data_objs.keys()
     merged_data_obj =  pd.concat(data_objs, index_names)
     return split_array_by_num_distance(merged_data_obj, min_distance2split = min_distance2split)
+
+def split_pdtable_by_medfwhm(pd_table, by_column = 'mz', min_pcount = 10, min_mz_range_load = 10):
+    """
+    Split pd.DataFrame table by median FWHM
+    args:
+        array: array to split
+        min_distance2split: minimum distance to split
+        by_column: column to split by
+    returns:
+        batched_array: array split by num distance
+    """
+    
+    if by_column is None:
+        raise ValueError("by_column is None when array is a DataFrame. Please specify by_column.")
+    if by_column not in pd_table.columns:
+        raise ValueError("by_column is not in array.columns. Please specify a valid column.")
+    mz_sequence = pd_table.sort_values(by=by_column)[by_column].unique()
+    pd_table4mask = pd_table[by_column].to_numpy()
+
+    min_distance2split = np.median(pd_table['FWHM']) * FWHM_TO_SIGMA_FACTOR * 12 # min_distance2split is 12 * median(sigma)
+
+    # getting split borders
+    mz_distance_bool = np.diff(mz_sequence) > min_distance2split
+    left_mz = mz_sequence[:-1][mz_distance_bool]
+    right_mz = mz_sequence[1:][mz_distance_bool] 
+    mz_bins = np.concatenate(([mz_sequence[0] - min_distance2split], (left_mz + right_mz)/2, [mz_sequence[-1] + min_distance2split]))
+    mz_bins_diffs = np.diff(mz_bins)
+    
+    # mz_bins correction by min split load 
+    current_sum = 0
+    mz_bins_corrected = [mz_bins[0]]
+    for n, mz_bin_diff in enumerate(mz_bins_diffs):    
+        if (current_sum + mz_bin_diff > min_mz_range_load):
+            mz_bins_corrected.append(mz_bins[n])
+            current_sum = 0
+        else:
+            current_sum += mz_bin_diff
+    if mz_bins_corrected[-1] < mz_bins[-1]:
+        mz_bins_corrected.append(mz_bins[-1])
+            
+    # bathcing pd_table with correction by min number of peaks in batch 
+    mask = np.zeros(len(pd_table4mask), dtype=bool)
+    batched_pd_table = []
+    for mz_bin in pairwise(mz_bins_corrected):
+        mask = mask | (pd_table4mask > mz_bin[0]) & (pd_table4mask < mz_bin[1])
+        if sum(mask) > min_pcount:
+            batched_pd_table.append(pd_table[mask])
+            mask.fill(0)
+    if mask.any():
+        batched_pd_table.append(pd_table[mask])
+    return batched_pd_table
