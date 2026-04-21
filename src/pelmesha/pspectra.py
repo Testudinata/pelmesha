@@ -6,6 +6,7 @@ from itertools import product, zip_longest
 from threading import Thread
 from pybaselines import Baseline
 from scipy.stats import median_abs_deviation
+from scipy.signal import savgol_filter, medfilt
 from pelmesha.loaders import find_paths, logger
 from pyimzml.ImzMLParser import ImzMLParser
 import h5py
@@ -22,7 +23,6 @@ from math import sqrt
 import warnings
 import yaml
 from typing import Callable, Union, Tuple
-from scipy.signal import savgol_filter
 from pyteomics import mzxml
 # from pelmesha.cli import calculate
 from functools import wraps
@@ -269,12 +269,12 @@ class Configs(dict):
         elif configs["Calc_peak_area"]:
             configs["headers"] = DatasetHeaders([  
                                             "spectra_ind", "mz", "Intensity", "Area",  
-                                            "PextL", "PextR", "FWHML", "FWHMR"  
+                                            "PextL", "PextR", "FWHML", "FWHMR"
                                         ])
         else: 
             configs["headers"] = DatasetHeaders([  
                                             "spectra_ind", "mz", "Intensity",  
-                                            "PextL", "PextR", "FWHML", "FWHMR"  
+                                            "PextL", "PextR", "FWHML", "FWHMR"
                                         ])
 
         ## Rearranging and hierarchical configuration setup for nested function scopes
@@ -2065,34 +2065,43 @@ def setup_spectra_batching(sample_file,
         #### 
         if dcont:
             data_mz = sample_imzml.getspectrum(indexes[0])[0].astype(dtypeconv)
+            min_discret = None
             min_mz = min(data_mz)
             max_mz = max(data_mz)
+
+
         else:
-            data_mz = sample_imzml.getspectrum(indexes[0])[0].astype(dtypeconv)
-            min_mz = min(data_mz)
-            max_mz = max(data_mz)
-            for idx in range(indexes[0]+1,indexes[0]+indexes[1]):
+            mzs = []
+            min_discret = np.inf
+            min_mz = np.inf
+            max_mz = -np.inf
+
+            for idx in range(indexes[0],indexes[0]+indexes[1]):
                 data_mz = sample_imzml.getspectrum(idx)[0].astype(dtypeconv)
+                ## getting mz_discret
+                mzs.append(data_mz)
+                min_discret = min(min_discret, np.diff(data_mz).min()) # evaluation min_discret at this step is critical
+
                 min_mz = min([min_mz,min(data_mz)])
                 max_mz = max([max_mz,max(data_mz)])
-        data_obj[sample][roi]["mz_range"] = (min_mz,max_mz)
-        
+            data_mz =  np.sort(np.unique(np.hstack(mzs)))
+
+        discret_coeffs = get_mz_discretion_coeffs(data_mz, min_discret)
+
+
+        # np.unique(np.hstack(mzs))!!!!!!!!!!!!!! Дописать! Попытаться внести в конфиг в виде класса кривой (fit), либо единым числом, но схожий способ работы. Также необходимо сделать ограничение на занимаемое место (аппенд может так подгрузить и 40 гб в оперативку...)
+        data_obj[sample][roi]["mz_range"] = (min_mz, max_mz)
+        data_obj[sample][roi]["discret_coeffs"] = discret_coeffs 
+
+
         if resample_to_dots:
-            resampled_mz = np.linspace(min_mz,max_mz,resample_to_dots).astype(dtypeconv)
+            resampled_mz = np.linspace(min_mz, max_mz, resample_to_dots).astype(dtypeconv)
             data_mz = resampled_mz
             
         else:
             resampled_mz = None
         
         if (resample_to_dots or dcont) and local_configs.get("DataProc_configs", False):
-            # smooth_window, shift_range, baseliner = _adapt_proccesing_parameters(data_mz, smooth_window, shift_range, baseliner)
-            # dots_distance = np.median(np.diff(data_mz))
-            # local_configs["DataProc_configs"]['smoothing_configs'] = local_configs["DataProc_configs"]['smoothing_configs'].copy()
-            # local_configs["DataProc_configs"]['msalign_configs'] = local_configs["DataProc_configs"]['msalign_configs'].copy()
-            # local_configs["DataProc_configs"] = local_configs["DataProc_configs"].copy()
-            # local_configs["DataProc_configs"]['smoothing_configs']['smooth_window'] = local_configs["DataProc_configs"]['smoothing_configs']['smooth_window'](dots_distance) 
-            # local_configs["DataProc_configs"]['msalign_configs']['shift_range'] = local_configs["DataProc_configs"]['msalign_configs']['shift_range'](dots_distance)
-            # local_configs["DataProc_configs"]['baseliner'] = local_configs["DataProc_configs"]['baseliner'](data_mz) 
             local_configs["DataProc_configs"] = _set_local_proc_configs(local_configs["DataProc_configs"], data_mz)
         
         linspace_values = np.linspace(
@@ -2121,6 +2130,72 @@ def setup_spectra_batching(sample_file,
     return (data_obj, par_args) #, shift_range, baseliner, smooth_window)
 
 ### Utility functions for processing
+def get_mz_discretion_DEV(mz, min_discret = None, dots_distance_steps = 2):
+    dots_distance = np.diff(mz)
+    
+    if min_discret:
+        float_error_bool = dots_distance >= min_discret - math.sqrt(np.finfo(float).eps)
+        if not float_error_bool[0]:
+            first_mz = True
+        else:
+            first_mz = False
+        float_error_bool = np.append(first_mz,float_error_bool)
+        mz = mz[float_error_bool]
+        dots_distance = np.diff(mz)
+    distance_diff = np.diff(dots_distance)
+    std_diff = np.std(dots_distance, ddof=1) / np.sqrt(len(dots_distance))
+    # print(f'std_diff {std_diff}')
+    dots_distance_bool = np.abs(distance_diff) <= std_diff
+
+    for k in range(2,min(dots_distance_steps+1,len(dots_distance))):
+        distance_diff_k = dots_distance[k:] - dots_distance[:-k]
+        dots_distance_bool_k = np.abs(distance_diff_k) <= std_diff*k
+        dots_distance_bool_k = np.append(np.ones(k-1, dtype=bool),dots_distance_bool_k)
+        dots_distance_bool = dots_distance_bool & dots_distance_bool_k
+
+    # dots_distance_bool_2 = np.abs(distance_diff_2) <= std_diff*2
+    # dots_distance_bool_2 = np.append(True,dots_distance_bool_2)
+    # dots_distance_bool = dots_distance_bool & dots_distance_bool_2
+    start_diff = (dots_distance[0] - dots_distance[1:][dots_distance_bool][0])
+    if abs(start_diff) <= std_diff:
+        dots_distance_bool = np.append(True, dots_distance_bool)
+    else:
+        dots_distance_bool = np.append(False, dots_distance_bool)
+        
+    return np.array(mz[1:][dots_distance_bool]), np.array(dots_distance[dots_distance_bool])
+
+def get_mz_discretion_coeffs(mz, min_discret = None):
+    dots_distance = np.diff(mz)
+    
+    if min_discret:
+        float_error_bool = dots_distance >= min_discret - math.sqrt(np.finfo(float).eps)
+        if not float_error_bool[0]:
+            first_mz = True
+        else:
+            first_mz = False
+        float_error_bool = np.append(first_mz,float_error_bool)
+        mz = mz[float_error_bool]
+        dots_distance = np.diff(mz)
+    distance_diff = np.diff(dots_distance)
+    std_diff = np.std(dots_distance, ddof=1) / np.sqrt(len(dots_distance))
+    dots_distance_bool = np.abs(distance_diff) <= std_diff
+    start_diff = (dots_distance[0] - dots_distance[1:][dots_distance_bool][0])
+    if abs(start_diff) <= std_diff:
+        dots_distance_bool = np.append(True, dots_distance_bool)
+    else:
+        dots_distance_bool = np.append(False, dots_distance_bool)
+    
+    mz_discret = np.array(medfilt(dots_distance[dots_distance_bool],7))
+    mz = mz[:-1][dots_distance_bool]
+
+    discret_mean = np.mean(mz_discret)
+    discret_std = np.std(mz_discret,ddof=1)
+    if discret_std/discret_mean < 0.025:
+        discret_coeffs = np.polyfit(mz, mz_discret, deg = 0)
+    else:
+        discret_coeffs = np.polyfit(mz, mz_discret, deg = 3)
+    return discret_coeffs
+
 def _poslog_parser(poslog_path,specnum):
     idx=0
     roi_idx = {} # Информация sample по индексам спектров roi=(индекс первого спектра, кол-во спектров roi)
@@ -2403,7 +2478,8 @@ def MAD(y,nan_policy):
 ### Functions for peakpicking
 def peaks_prop_array(X, 
                      Y_array,
-                     spectra_ind, 
+                     spectra_ind,
+                     mz_disret_regr_coeffs = None, 
                      fwhhfilter = None,
                      oversegmentationfilter = None,
                      heightfilter = None,
@@ -2455,6 +2531,7 @@ def peaks_prop_array(X,
                                         np.where(np.diff(Y) !=0)[0],
                                         xsize, 
                                         ind,
+                                        mz_disret_regr_coeffs,
                                         fwhhfilter,
                                         oversegmentationfilter,
                                         heightfilter,
@@ -2473,15 +2550,15 @@ def peaks_prop_infunc(X,
                       valley_dots,
                       xsize, 
                       spectra_ind,
-                      fwhhfilter,
-                      oversegmentationfilter,
-                      heightfilter,
-                      rel_heightfilter,
-                      peaklocation,
-                      noise_func,
-                      noise_est_iterations, 
-                      SNR_threshold, 
-                      Calc_peak_area, 
+                      fwhhfilter = None,
+                      oversegmentationfilter = None,
+                      heightfilter = None,
+                      rel_heightfilter = None,
+                      peaklocation = 1,
+                      noise_func = np.std,
+                      noise_est_iterations = 3, 
+                      SNR_threshold = None, 
+                      Calc_peak_area = True, 
                       headers = ["spectra_ind", "mz", "Intensity", "Area", "SNR", "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"]):
     """
     Общее описание
@@ -2527,25 +2604,29 @@ def peaks_prop_infunc(X,
     # Compute max for every peak
     size = left_min.shape
     val_max = np.empty(size)
+    pos_peak = np.empty(size,dtype=int)
     for idx, [lm, rm] in enumerate(zip(left_min, right_min)):
         val_max[idx] = np.max(Y[lm:rm])
-    
+        pos_peak[idx] = lm + np.argmax(Y[lm:rm])
     # Remove peaks below the height, relative height
     if heightfilter and rel_heightfilter:
         k = (val_max >= heightfilter) & (val_max/max(Y) >= rel_heightfilter)
         val_max = val_max[k]
         left_min = left_min[k]
         right_min = right_min[k]
+        pos_peak = pos_peak[k]
     elif heightfilter:
         k = (val_max >= heightfilter)
         val_max = val_max[k]
         left_min = left_min[k]
         right_min = right_min[k]
+        pos_peak = pos_peak[k]
     elif rel_heightfilter:
         k = (val_max/max(Y) >= rel_heightfilter)
         val_max = val_max[k]
         left_min = left_min[k]
         right_min = right_min[k]
+        pos_peak = pos_peak[k]
 
     # Remove peaks below the SNR thresholds
     if SNR_threshold:
@@ -2563,15 +2644,12 @@ def peaks_prop_infunc(X,
         val_max=val_max[k]
         left_min=left_min[k]
         right_min=right_min[k]
-
+        pos_peak = pos_peak[k]
     # Compute FWHH for every peak
     size = left_min.shape
     props["FWHML"] = np.empty(size)
     props["FWHMR"]  = np.empty(size)
-    pos_peak = np.empty(size)
-    for idx, [lm, rm, vm] in enumerate(zip(left_min, right_min,val_max)):
-        pp = lm + np.argmax(Y[lm:rm])
-        pos_peak[idx] = pp
+    for idx, [lm, rm, vm, pp] in enumerate(zip(left_min, right_min, val_max, pos_peak)):
         props["FWHML"][idx] = np.interp(vm/2,Y[lm:pp+1], X[lm:pp+1])
         props["FWHMR"][idx] = np.interp(vm/2,Y[pp:rm+1][::-1], X[pp:rm+1][::-1])
     # Remove peaks with FWHH thresholds
@@ -2585,6 +2663,7 @@ def peaks_prop_infunc(X,
         props["FWHMR"] = props["FWHMR"][k]
         left_min = left_min[k]
         right_min = right_min[k]
+        pos_peak = pos_peak[k]
     # Remove oversegmented peaks
     if oversegmentationfilter:
         if isinstance(oversegmentationfilter,str):
@@ -2608,9 +2687,22 @@ def peaks_prop_infunc(X,
             right_min = np.delete(right_min, j)
             props["FWHML"] = np.delete(props["FWHML"], j + 1)
             props["FWHMR"] = np.delete(props["FWHMR"], j)
-            
-            val_max[j] = np.maximum(val_max[j], val_max[j + 1])
+            ## New TODO: Test
+            stack_j = np.vstack((j,j+1))
+            pos_peak_oversegmentation = pos_peak[stack_j]
+            val_max_oversegmentation = val_max[stack_j]
+            max_idx = np.argmax(val_max_oversegmentation, axis = 0)
+            range_j = np.arange(len(j))
+            val_max[j] = val_max_oversegmentation[max_idx, range_j]
+            pos_peak[j] = pos_peak_oversegmentation[max_idx, range_j]
             val_max = np.delete(val_max, j + 1)
+            pos_peak = np.delete(pos_peak, j + 1)
+
+            ## New
+            ### OLD
+            # val_max[j] = np.maximum(val_max[j], val_max[j + 1])
+            # val_max = np.delete(val_max, j + 1)
+            ### OLD
     else:
         peak_thld = val_max * peaklocation - math.sqrt(np.finfo(float).eps)
         pkX = np.empty(left_min.shape)
@@ -2636,12 +2728,17 @@ def peaks_prop_infunc(X,
         props["SNR"] = (val_max - props["Mean noise"])/props["Noise"]
         props["Noise"] = [props["Noise"]]*signal_num
         props["Mean noise"]= [props["Mean noise"]]*signal_num
-    big_peak_bool = (np.array(right_min) - np.array(left_min))>=5
-    left_min[big_peak_bool] += 1
-    right_min[big_peak_bool] -= 1
+    # big_peak_bool = (np.array(right_min) - np.array(left_min))>=5
+    # left_min[big_peak_bool] += 1
+    # right_min[big_peak_bool] -= 1
+    left_bool = np.array(pos_peak - left_min) > 2
+    right_bool = np.array(right_min - pos_peak) > 2
+    if left_bool.any():
+        left_min[left_bool] += 1
+    if right_bool.any():
+        right_min[right_bool] -= 1
     props["PextL"] = X[left_min] 
     props["PextR"] = X[right_min]
-
     return np.column_stack(([spectra_ind]*signal_num,pkX, val_max, *(props[key] for key in headers[3:])))
 ### Utility
 def draw_data(

@@ -2,10 +2,10 @@ import pandas as pd
 import numpy as np
 from itertools import product
 from pelmesha.loaders import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger, hdf5_metadata, del_hdf5
-from pelmesha.utilities import split_pdtable_by_medfwhm
+from pelmesha.utilities import split_pdtable_by_peaks_gap
 import matplotlib.pyplot as plt
 from h5py import File
-from KDEpy import FFTKDE
+from KDEpy import FFTKDE, TreeKDE
 from pyimzml.ImzMLParser import ImzMLParser
 from sklearn.preprocessing import normalize
 from tqdm.auto import tqdm
@@ -41,7 +41,7 @@ else:
 FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2))  # Фактор пересчета FWHM в sigma
 
 
-def Pgrouping_KD(ftable, extr_columns = None, KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian",CountF = 10, norm = (None,None), draw_borders = 1.5, dots_distance = None, 
+def Pgrouping_KD(ftable, extr_columns = None, KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian", discret_coeffs = None,CountF = 10, norm = (None,None), draw_borders = 1.5, 
                   dupl_drop = True,min_res = 10, pivoting4val = None, cpu_free=1, path2save=None,sample="unknwn",roi="00", coords4table=None, account_mzscale = True, draw=True, 
                   split_mz_min = 10, split_peaks_min = 25, **params2mspeaks_KD):
     """    
@@ -118,7 +118,6 @@ def Pgrouping_KD(ftable, extr_columns = None, KD_bandwidth = "med_fwhm", bwc = 1
         ftableISAPATH=True
     if isinstance(ftable, pd.DataFrame):
         ftableISAPATH=False
-        median_dist = dots_distance
 
     if ftableISAPATH:
         logger.log(f"Data proccessed from file")
@@ -136,7 +135,7 @@ def Pgrouping_KD(ftable, extr_columns = None, KD_bandwidth = "med_fwhm", bwc = 1
         
         logger.log(f"Data proccessed from table")
         
-        ftable = Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end,KD_bandwidth, bwc,KD_kernel,CountF, norm,draw_borders,dupl_drop, min_res, split_params, sample=sample,roi=roi, account_mzscale = account_mzscale,draw=draw,**params2mspeaks_KD)
+        ftable = Pgrouping_KD_table(ftable,cpu_num,plot_start,plot_end,KD_bandwidth, bwc,KD_kernel,CountF, norm,draw_borders,dupl_drop, split_params, discret_coeffs, sample=sample,roi=roi, account_mzscale = account_mzscale,draw=draw,**params2mspeaks_KD)
         if path2save:
             logger.log(f"Starting saving grouped data")
             try:
@@ -367,47 +366,48 @@ def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF, no
 
                     spectrums_source=spec_data[slide][sample][roi].attrs['source']
                     idx_start, num_spec = spec_data[slide][sample][roi].attrs['idxroi']
-                    dcont = spec_data[slide][sample][roi].attrs['continuous']
+                    # dcont = spec_data[slide][sample][roi].attrs['continuous']
                     spec_data = ImzMLParser(spectrums_source)
                     
-                    if dcont:
-                        idx = np.random.randint(idx_start,idx_start+num_spec)
-                        mz = spec_data.getspectrum(idx)[0]
-                        median_dist = np.median(np.diff(mz))
-                        plot_start = mz[0]-1
-                        plot_end = mz[-1]+1
-                        #min_dist = min(np.diff(mz))
-                    else:
-                        mz= spec_data.getspectrum(idx_start)[0]
-                        #min_dist=min(np.diff(mz))
-                        median_dist = [None]*num_spec
-                        median_dist[0] = np.median(np.diff(mz))
-                        plot_start = mz[0]-1
-                        plot_end = mz[-1]+1
-                        for n,idx in enumerate(range(idx_start+1,idx_start+num_spec)):
-                            mz= spec_data.getspectrum(idx)[0]
-                            #min_dist=min(min_dist,min(np.diff(mz)))
-                            median_dist[n+1]=np.median(np.diff(mz))
-                            plot_start = min(mz[0]-1,plot_start)
-                            plot_end = max(mz[-1]+1,plot_end)
-                        median_dist=np.mean(median_dist)
-                    pass
+                    # if dcont:
+                    #     idx = np.random.randint(idx_start,idx_start+num_spec)
+                    #     mz = spec_data.getspectrum(idx)[0]
+                    #     median_dist = np.median(np.diff(mz))
+                    #     plot_start = mz[0]-1
+                    #     plot_end = mz[-1]+1
+                    #     #min_dist = min(np.diff(mz))
+                    # else:
+                    #     mz= spec_data.getspectrum(idx_start)[0]
+                    #     #min_dist=min(np.diff(mz))
+                    #     median_dist = [None]*num_spec
+                    #     median_dist[0] = np.median(np.diff(mz))
+                    #     plot_start = mz[0]-1
+                    #     plot_end = mz[-1]+1
+                    #     for n,idx in enumerate(range(idx_start+1,idx_start+num_spec)):
+                    #         mz= spec_data.getspectrum(idx)[0]
+                    #         #min_dist=min(min_dist,min(np.diff(mz)))
+                    #         median_dist[n+1]=np.median(np.diff(mz))
+                    #         plot_start = min(mz[0]-1,plot_start)
+                    #         plot_end = max(mz[-1]+1,plot_end)
+                    #     median_dist=np.mean(median_dist)
+                    # pass
                     
                 except:
                     source='hdf5'
-                    try:
-                        min_dist = np.diff(np.sort(spec_data[slide][sample][roi]["mz"][:]))
+                    # try:
+                    #     min_dist = np.diff(np.sort(spec_data[slide][sample][roi]["mz"][:]))
                         
-                        #min_dist = min_dist[min_dist>0]
-                        median_dist = np.median(min_dist[min_dist>0])
+                    #     #min_dist = min_dist[min_dist>0]
+                    #     median_dist = np.median(min_dist[min_dist>0])
                         
-                        plot_start = spec_data[slide][sample][roi]["mz"][:].min()-1
-                        plot_end = spec_data[slide][sample][roi]["mz"][:].max()+1
-                    except:
-                        median_dist = np.median(np.diff(np.sort(ftable["mz"].unique())))
-                        plot_start = ftable["mz"].min()-1
-                        plot_end = ftable["mz"][:].max()+1
-                Grouped_ftable[slide][sample][roi]["features"] = Pgrouping_KD_table(ftable, cpu_num, median_dist, plot_start, plot_end, 
+                    #     plot_start = spec_data[slide][sample][roi]["mz"][:].min()-1
+                    #     plot_end = spec_data[slide][sample][roi]["mz"][:].max()+1
+                    # except:
+                    #     median_dist = np.median(np.diff(np.sort(ftable["mz"].unique())))
+                    #     plot_start = ftable["mz"].min()-1
+                    #     plot_end = ftable["mz"][:].max()+1
+                plot_start, plot_end = data[slide][sample][roi].attrs['mz_range']
+                Grouped_ftable[slide][sample][roi]["features"] = Pgrouping_KD_table(ftable, cpu_num, plot_start, plot_end, 
                                                                                     KD_bandwidth, bwc, KD_kernel, CountF, norm, 
                                                                                     draw_borders, dupl_drop,min_res, split_params, sample, roi, account_mzscale,draw, **params2mspeaks_KD)  
                 if draw:
@@ -477,7 +477,7 @@ def Pgrouping_KD_file(data,path,cpu_num, KD_bandwidth, bwc,KD_kernel, CountF, no
     
     return Grouped_ftable
 # @profile  # TODO: удалить перед релизом
-def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwidth, bwc,KD_kernel, CountF, norm, draw_borders, dupl_drop, min_res, split_params, sample = None, roi=None, account_mzscale = True, draw=True, **params2mspeaks_KD):
+def Pgrouping_KD_table(ftable,cpu_num,plot_start,plot_end, KD_bandwidth, bwc,KD_kernel, CountF, norm, draw_borders, dupl_drop, split_params, discret_coeffs, sample = None, roi=None, account_mzscale = True, draw=True, **params2mspeaks_KD):
     """    
     Описание
     ----
@@ -503,112 +503,98 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
         ftable=pd.concat(ftable)
         ftable.reset_index(level='spectra_ind', inplace=True)
     ### Нормализация end
-    ftable.loc[:,'FWHM'] = ftable['FWHMR'] - ftable['FWHML']
-    
+    mz_model = np.poly1d(discret_coeffs)
+    # Здесь заранее реализовать ширину полосы пропускания векторными операциями, которые же и пойдут в gap!!!
+    if KD_bandwidth == "med_fwhm":
+        ftable.loc[:,'KD_bandwidth'] = (ftable['FWHMR'] - ftable['FWHML'])*bwc*(FWHM_TO_SIGMA_FACTOR/4.5)
+        if account_mzscale:
+            mz_discret = mz_model(ftable['mz'])
+            low_band_bool = (ftable['KD_bandwidth'] - mz_discret*2) < 0
+            ftable.loc[low_band_bool,'KD_bandwidth'] = mz_discret[low_band_bool]*bwc
+            # if dist_loc > med_fwhm/1.06: # Для ситуации когда dist_loc нереалистично больше ширины на полувысоте пика TODO Оценить реалистичность такого сценария и добавить
+            #         # print(f"mz segment {min_loc} - {max_loc}")
+            #         # print(f"dist_loc {dist_loc}")
+            #     KD_bandwidth_loc = med_fwhm*bwc*FWHM_TO_SIGMA_FACTOR
+    elif KD_bandwidth == "mz_discret":
+        ftable.loc[:,'KD_bandwidth'] = np.poly1d(discret_coeffs)(ftable['mz'])*bwc
+    else:
+        ftable.loc[:,'KD_bandwidth'] = KD_bandwidth*bwc
     # double-splitting array 
-    ftable_batch = split_pdtable_by_medfwhm(ftable,**split_params)
-    ftable_batch = [result for ft in ftable_batch for result in split_pdtable_by_medfwhm(ft,**split_params)]
-    
+    ftable_batch = split_pdtable_by_peaks_gap(ftable, split_mz_min = split_params['split_mz_min'], split_peaks_min = split_params['split_peaks_min'])
+    # ftable_batch = [result for ft in ftable_batch for result in split_pdtable_by_medfwhm(ft,**split_params)]
+
     # TODO: Проблемы с median_dist:
     # 1) нужны из сырых данных получить настоящие dist между точками
     # 2) Если нет возможности получить из сырых данных... 
     #   а. Брать между разницей пиков. Вариант хороший и упор будет на FWHM тогда, а если его нет - тоже неплохо. Но плохо, если у нас в данных сугубо шумы,
     #      которые далеко друг от друга и в итоге fwhm шума будет сильно меньше dist и dist будет нашей bw, что создаст ложноположительный результат
-    #   б. Использовать только ppm прибора. Из плюсов: ложноположительного результата не будет. Минусы: если вдруг bw полученная от fwhm будет сильно ниже расстояния между точками, то спектры точно будут overfitted
+    #  NO б. Использовать только ppm прибора. Из плюсов: ложноположительного результата не будет. Минусы: если вдруг bw полученная от fwhm будет сильно ниже расстояния между точками, то спектры точно будут overfitted
     # TODO !!!!!!!!!!!! Написать защиту от малого кол-ва точек в сегменте при определении сигма и дистанции
     #################################################
-    # написать функцию
-    X_plot = _set_KDE_X_plot(ftable, plot_start, plot_end, median_dist = median_dist, min_res = min_res)
     
-    segnum = len(ftable_batch)
-    par_args = [0]*segnum
-    for n, ftable_segment in enumerate(ftable_batch, start = 1):
-        reversed_n = segnum - n
-        min_loc = ftable_segment['mz'].min()
-        max_loc = ftable_segment['mz'].max()
-        local_resolution = min_res*(min_loc + max_loc)/2
-        peaks_count = len(ftable_segment)
-        if peaks_count <= CountF: 
-            logger.log(f"Segment {min_loc} - {max_loc} has less than {CountF} points. Skipping.")
-            del par_args[reversed_n]
-            continue
+    # plt.figure(figsize=(25,5))
+    # plt.plot(X_plot,pred_fwhm(X_plot))
+    # plt.scatter(ftable['mz'], ftable['FWHM'], s = 0.01)
+    # segnum = len(ftable_batch)
+    # par_args = [0]*segnum
+    # dist_loc = None
 
-        if median_dist is None:
-            mz_diffs = np.diff(ftable_segment['mz'].sort_values().unique())
-            median_dist_loc = np.median(mz_diffs)
-        else:
-            median_dist_loc = median_dist
-        if (median_dist_loc < local_resolution):
-            median_dist_loc = local_resolution
+    # for n, ftable_segment in enumerate(ftable_batch, start = 1):
+    #     reversed_n = segnum - n
+    #     min_loc = ftable_segment['mz'].min()
+    #     max_loc = ftable_segment['mz'].max()
+    #     peaks_count = len(ftable_segment)
+    #     if peaks_count <= CountF: 
+    #         logger.log(f"Segment {min_loc} - {max_loc} has less than {CountF} points. Skipping.")
+    #         del par_args[reversed_n]
+    #         continue
+        
+    #     if discret_coeffs is None:
+    #         mz_diffs = np.diff(ftable_segment['mz'].sort_values().unique())
+    #         if mz_diffs.size != 0:
+    #             dist_loc = np.quantile(mz_diffs,0.33)
 
-        if KD_bandwidth == "mz_discret":
-            #KD_bandwidth = min_dist*bwc
-            KD_bandwidth_loc = median_dist_loc*bwc
-        elif KD_bandwidth == "med_fwhm":
-            med_fwhm = np.median(np.array(ftable_segment["FWHM"])) 
-            KD_bandwidth_loc = med_fwhm*bwc*(FWHM_TO_SIGMA_FACTOR/4.5) #(TODO Изменить либо делитель 6, либо проверку минимальный размер расстояния между дискретными точками - не подошло даже после выравнивания. Спектр нередко переcглажен)
-            
-            # loc_segnum = len(par_args)
-            # right_ended = False
-            # while not KD_bandwidth_loc > 0:
-            #     if reversed_n + 1 < loc_segnum:
-            #         KD_bandwidth_loc = par_args[reversed_n + 1][1]
-            #         break
-                
+    #     if KD_bandwidth == "mz_discret":
+    #         #KD_bandwidth = min_dist*bwc
+    #         KD_bandwidth_loc = dist_loc*bwc
+    #     elif KD_bandwidth == "med_fwhm":
+    #         med_fwhm = np.median(np.array(ftable_segment["FWHM"])) 
+    #         KD_bandwidth_loc = med_fwhm*bwc*(FWHM_TO_SIGMA_FACTOR/4.5) #(TODO Изменить либо делитель 6, либо проверку минимальный размер расстояния между дискретными точками - не подошло даже после выравнивания. Спектр нередко переcглажен)
 
-            # @!!!!!!!!!!!!!!!! Попытаться реализовать индивидуальный вклад каждого пика!!!!!!!!!!!!!!!!!! "Технология" для этого уже есть
-            # Оценить возможность с одновременной подгрузкой спектра, чтобы получать честные mdeian_dist локально для пика
-            # факт: на fwhm ничто не влияет, кроме слияния пиков, то есть не зависит от заряда (или незначительно) и имеет зависимость сугубо от m/z, то есть возможно построить кривую fwhm и заменить в спорных моментах рассчитанный fwhm на регрессированный
-            if (median_dist_loc > KD_bandwidth_loc/3) and account_mzscale:
-                if median_dist_loc > med_fwhm/1.06: # Для ситуации когда median_dist_loc нереалистично больше ширины на полувысоте пика TODO доделать здесь, как закончу почему так медленно считает
-                    print(f"mz segment {min_loc} - {max_loc}")
-                    print(f"median_dist_loc {median_dist_loc}")
-                    KD_bandwidth_loc = med_fwhm*bwc*FWHM_TO_SIGMA_FACTOR
-                else:
-                    KD_bandwidth_loc = median_dist_loc*bwc
-                    print(f"mz segment {min_loc} - {max_loc}")
-                    print(f"mz KD_bandwidth_loc {KD_bandwidth_loc}")
-                # TODO: попробовать не с медианной разницей между пиками, а с:
-                # 1) min
-                # 2) первый квартиль
-                #     !!!! нужно создать мат обоснование верхней границы полосы пропускания
-                # 1) медианное расстояние между точками никак не может быть больше fwhm, так как иначе fwhm и не построился бы
-                # 2) Но максимальное расстояние между точками возможно при ситуации, если пик состоит из трёх точек и дистанция там fwhm/0.53
-                # # 3) Максимальное кол-во пиков в сегменте: нужно как-то ограничить. Если оно уже попадает по CountF - не считать
-                # # 4) Максимальное кол-во пиков в сегменте: попытатьтся взять ближайшее достоверное значение сигмы с корректировкой в ppm?
-                
-                # logger.warn(
-                #             f"The estimated KD bandwidth value ({KD_bandwidth_loc}) with coefficient {bwc} has been adjusted to {k*median_dist_loc} for segment {ftable_segment['mz'].min()} - {ftable_segment['mz'].max()}. "
-                #             f"The adjustment was necessary because the m/z scale distance between raw signal points is "
-                #             f"{median_dist_loc / KD_bandwidth_loc:.2f} times larger than the KDE bandwidth."
-                # )
+    #         # @!!!!!!!!!!!!!!!! Попытаться реализовать индивидуальный вклад каждого пика!!!!!!!!!!!!!!!!!! "Технология" для этого уже есть
+    #         # Оценить возможность с одновременной подгрузкой спектра, чтобы получать честные mdeian_dist локально для пика
+    #         # факт: на fwhm ничто не влияет, кроме слияния пиков, то есть не зависит от заряда (или незначительно) и имеет зависимость сугубо от m/z, то есть возможно построить кривую fwhm и заменить в спорных моментах рассчитанный fwhm на регрессированный
+    #         if (dist_loc > KD_bandwidth_loc/2) and account_mzscale:
+    #             if dist_loc > med_fwhm/1.06: # Для ситуации когда dist_loc нереалистично больше ширины на полувысоте пика TODO доделать здесь, как закончу почему так медленно считает
+    #                 # print(f"mz segment {min_loc} - {max_loc}")
+    #                 # print(f"dist_loc {dist_loc}")
+    #                 KD_bandwidth_loc = med_fwhm*bwc*FWHM_TO_SIGMA_FACTOR
+    #             else:
+    #                 KD_bandwidth_loc = dist_loc*bwc
+    #                 # print(f"mz segment {min_loc} - {max_loc}")
+    #                 # print(f"mz KD_bandwidth_loc {KD_bandwidth_loc}")
+    #             # TODO: попробовать не с медианной разницей между пиками, а с:
+    #             # 1) min
+    #             # 2) первый квартиль
+    #             #     !!!! нужно создать мат обоснование верхней границы полосы пропускания
+    #             # 1) медианное расстояние между точками никак не может быть больше fwhm, так как иначе fwhm и не построился бы
+    #             # # 2) Но максимальное расстояние между точками возможно при ситуации, если пик состоит из трёх точек и дистанция там fwhm/0.53
+    #             # # 3) Максимальное кол-во пиков в сегменте: нужно как-то ограничить. Если оно уже попадает по CountF - не считать
+    #             # # 4) Максимальное кол-во пиков в сегменте: попытатьтся взять ближайшее достоверное значение сигмы с корректировкой в ppm?
 
-        # gap = KD_bandwidth_loc*12
-        # ftable_min = ftable_segment['mz'].min() - gap
-        # ftable_max = ftable_segment['mz'].max() + gap
-        # X_plot_slice =  slice(*np.searchsorted(X_plot, [ftable_min, ftable_max]))
-        # # print(KD_bandwidth_loc)
-        # # print(ftable_min)
-        # # print(ftable_max)
-        # # print(f'Xplot{X_plot[X_plot_slice]}')
-        # FFTKDE(kernel = KD_kernel, bw = KD_bandwidth_loc).fit(ftable_segment['mz'].values)(X_plot[X_plot_slice])*len(ftable_segment['mz']), X_plot_slice
-        par_args[reversed_n] = (ftable_segment, KD_bandwidth_loc)
+    #     par_args[reversed_n] = (ftable_segment, KD_bandwidth_loc)
+    mz_sequence = np.sort(ftable['mz'].unique())
+    min_dist = mz_model(mz_sequence).min()
+    X_plot = _set_KDE_X_plot(ftable, plot_start, plot_end, min_dist)
     Y_plot = np.zeros(len(X_plot))
 
     partial_worker = partial(peaks_probability_distribution, X_plot, KD_kernel)
     with Pool(cpu_num) as p:
-        for result, plot_slice in tqdm(p.imap_unordered(partial_worker,par_args), total = len(par_args), unit = 'segment', desc = 'Peaks probability distribution calculation'):
+        for result, plot_slice in tqdm(p.imap_unordered(partial_worker,ftable_batch), total = len(ftable_batch), unit = 'segment', desc = 'Peaks probability distribution calculation'):
             Y_plot[plot_slice] += result
     Y_plot = normalize(Y_plot.reshape(1,-1), norm = 'l1').squeeze() # Normalize the probability distribution
 
-    # print(np.sum(Y_plot))
 
-    # Сегментирование с помощью KDE
-    ##
-    ##Построение графика функции плотности вероятности по всей шкале mz
-    #Y_plot = FFTKDE(kernel = KD_kernel, bw = KD_bandwidth).fit(ftable['mz'].values)(X_plot)
-    ################################################################################################
-    ##
     ##Определение пиков графика плотности вероятности и их оснований
     ##### ПОпробовать разбить спектр на доли, чтобы более комфортно что-то строить
     logger.log("Peaks search is started")
@@ -620,19 +606,19 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     ##Проверка попадания нескольких пиков с одного спектра в этот диапазон
     ##Batching по диапазону
     ### Определим индексы значений m/z для диапазонов
-    sorted_mz = np.sort(ftable['mz'].unique())
-    mz_num = len(sorted_mz)
+
+    mz_num = len(mz_sequence)
     if mz_num < cpu_num*3:
         batches_num = mz_num
     else:
         batches_num = cpu_num*3
-    idxmz_batches = list(pairwise(np.linspace(0,sorted_mz.shape[0],batches_num,dtype=int))) 
+    idxmz_batches = list(pairwise(np.linspace(0,mz_sequence.shape[0],batches_num,dtype=int))) 
     ### Организуем аргументы для параллельного назначения
     par_args=[None]*len(idxmz_batches)
     logger.log("Organizing arguments for parallelization")
     for batch_n,idx_batch in enumerate(idxmz_batches):
-        mzb_min = sorted_mz[idx_batch[0]]
-        mzb_max = sorted_mz[idx_batch[1]-1]
+        mzb_min = mz_sequence[idx_batch[0]]
+        mzb_max = mz_sequence[idx_batch[1]-1]
         Xl_min = Xl[Xl<=mzb_min][-1]
         Xr_max = Xr[Xr>=mzb_max][0]
         batch_indexes = (Xp>=Xl_min) & (Xp<=Xr_max)
@@ -737,7 +723,7 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     num_bf_raredel = len(grftable["Peak"].unique())
     num_raredel = len(excluded["Peak"].unique())
     unique_num =len(ftable["mz"].unique())
-    textw=f"Grouping results of {sample} {roi}:\nNumber of unique peaks before grouping: {unique_num}\nNumber of unique peaks after grouping: {num_bf_raredel}\nNumber of excluded peaks by count filter({CountF}): {num_raredel} ({num_raredel*100/num_bf_raredel:.2f}%)\nResulted feature peaks is {num_res}"
+    textw=f"Grouping results of {sample} {roi}:\nUnique peaks before grouping: {unique_num}\nUnique peaks after grouping: {num_bf_raredel}\nExcluded peaks by count filter({CountF}): {num_raredel} ({num_raredel*100/num_bf_raredel:.2f}%)\nResulted feature peaks is {num_res}"
     logger.log(textw)
     print(textw)
 
@@ -754,13 +740,13 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
         # plt.figure(figsize=(17.5, 7.5/1.5), dpi=600)
         dots_bord = (np.array(X_plot)>=mz_draw_borders[0]) & (np.array(X_plot)<=mz_draw_borders[1])
         plt.plot(np.array(X_plot)[dots_bord],np.array(Y_plot)[dots_bord], color="k",alpha=0.85)
-        leg = ["Probability function graphic"]
+        leg = ["Probability density function"]
         plt.xlim(mz_draw_borders)
         quered_results = result.query("mz>=@mz_draw_borders[0] and mz<=@mz_draw_borders[1]")
         Peaks_list=quered_results["Peak"].sort_values().unique()
         plt.xlabel('m/z')
         plt.ylabel("Probability Density")
-        plt.gca().set_title(f"Grouping results around peak {peak_mz:.3f} (as example) of sample {sample} {roi}.")
+        plt.gca().set_title(f"Grouping results around peak {peak_mz:.3f}. Sample: {sample} {roi}.")
 
         for peak in Peaks_list:
             temp_query = quered_results.query("Peak == @peak")
@@ -768,7 +754,7 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
             leg+=[f"{peak:.3f} peak"]
         plt.plot(excluded["mz"],[0]*excluded.shape[0],"|",c="k",alpha=1)
         leg+=["Excluded peaks"]
-        plt.legend(leg)
+        plt.legend(leg, loc = 'upper right')
         plt.minorticks_on()
         plt.grid(visible=True,which="both")
     
@@ -809,13 +795,18 @@ def Pgrouping_KD_table(ftable,cpu_num,median_dist,plot_start,plot_end, KD_bandwi
     logger.log(f"Shape of the dataframe after drop:{result.shape} ({grftable.shape[0]-result.shape[0]})")
     return result#.reindex(columns=ftable_colarrange)
 
-def peaks_probability_distribution(X_plot, KD_kernel, args):
-    ftable, KD_bandwidth = args
-    gap = KD_bandwidth*12
-    ftable_min = ftable['mz'].min() - gap
-    ftable_max = ftable['mz'].max() + gap
+def peaks_probability_distribution(X_plot, KD_kernel, ftable):
+    ftable.sort_values('mz',inplace=True)
+    ftable_min = ftable.loc[0,'mz'] - ftable.loc[0,'KD_bandwidth']*12
+    ftable_max = ftable.loc[-1,'mz'] + ftable.loc[-1,'KD_bandwidth']*12
     X_plot_slice =  slice(*np.searchsorted(X_plot, [ftable_min, ftable_max]))
-    return FFTKDE(kernel = KD_kernel, bw = KD_bandwidth).fit(ftable['mz'].values)(X_plot[X_plot_slice])*len(ftable['mz']), X_plot_slice
+    return FFTKDE(kernel = KD_kernel, bw = ftable.loc[:,'KD_bandwidth'].median()).fit(ftable['mz'].values)(X_plot[X_plot_slice])*len(ftable['mz']), X_plot_slice 
+def peaks_probability_distribution_tree(X_plot, KD_kernel, ftable):
+    ftable.sort_values('mz',inplace=True)
+    ftable_min = ftable.loc[0,'mz'] - ftable.loc[0,'KD_bandwidth']*12
+    ftable_max = ftable.loc[-1,'mz'] + ftable.loc[-1,'KD_bandwidth']*12
+    X_plot_slice =  slice(*np.searchsorted(X_plot, [ftable_min, ftable_max]))
+    return TreeKDE(kernel = KD_kernel, bw = ftable['KD_bandwidth']).fit(ftable['mz'].values)(X_plot[X_plot_slice])*len(ftable['mz']), X_plot_slice  
 
 def batching(features4batch,mz):
     """
@@ -945,23 +936,12 @@ def mspeaks_KD(X, Y,oversegmentationfilter=None,peaklocation=1, return_pkY = Fal
         return np.array((pkX, X[left_min], X[right_min], val_max))
     return np.array((pkX, X[left_min], X[right_min]))
 
-def _set_KDE_X_plot(ftable, plot_start, plot_end, median_dist=None, min_res = 10*10e-6):
+def _set_KDE_X_plot(ftable, plot_start, plot_end, discret_coeffs):
     mz_range = plot_end - plot_start
-    min_dist = plot_start*min_res/10
-    if median_dist is None:
-        First_quarter_FWHM = np.quantile(ftable['FWHM'], 0.25) 
-        num_of_dots = int((mz_range)*10/(First_quarter_FWHM*FWHM_TO_SIGMA_FACTOR))+1 #!!!!!!!!!! Определить автоматически точность построения KDE, чтобы было и не избыточно, но и не грубовато. Использовать снова сигму?, чтобы на пик приходилось не менее 10 точек?
-    else:
-        num_of_dots = int((mz_range)*10/median_dist)+1
-    if mz_range/num_of_dots < min_dist:
-        num_of_dots = int((mz_range)/min_dist)+1
+    num_of_dots = int((mz_range)*20/min_dist)+1
     X_plot = np.linspace(np.float64(plot_start),np.float64(plot_end),num_of_dots)
     diffs = np.diff(X_plot)
-    
-    if diffs[0] < min_dist:
-        logger.warn(f"too many points in X_plot: {num_of_dots}. Reducing number of dots for X_plot by 2 times")
-        num_of_dots = int((mz_range)*10/min_dist)+1
-        X_plot = np.linspace(plot_start,plot_end,num_of_dots)
+
     while not np.allclose(np.ones_like(diffs) * diffs[0], diffs):
         logger.warn(f"X_plot is not uniform between {plot_start} and {plot_end} with num of dots: {num_of_dots} and distances between points {np.unique_values(diffs)}. Reducing number of dots for X_plot by 2 times")
         num_of_dots=int(num_of_dots/2)

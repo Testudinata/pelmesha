@@ -220,7 +220,7 @@ def chunking_datasets(data_objs, min_distance2split, index_names = None):
     merged_data_obj =  pd.concat(data_objs, index_names)
     return split_array_by_num_distance(merged_data_obj, min_distance2split = min_distance2split)
 
-def split_pdtable_by_medfwhm(pd_table, by_column = 'mz', min_pcount = 10, min_mz_range_load = 10):
+def split_pdtable_by_medfwhm(pd_table, split_peaks_min = 25, split_mz_min = 10): # TODO del if func lower is actual
     """
     Split pd.DataFrame table by median FWHM
     args:
@@ -231,12 +231,8 @@ def split_pdtable_by_medfwhm(pd_table, by_column = 'mz', min_pcount = 10, min_mz
         batched_array: array split by num distance
     """
     
-    if by_column is None:
-        raise ValueError("by_column is None when array is a DataFrame. Please specify by_column.")
-    if by_column not in pd_table.columns:
-        raise ValueError("by_column is not in array.columns. Please specify a valid column.")
-    mz_sequence = pd_table.sort_values(by=by_column)[by_column].unique()
-    pd_table4mask = pd_table[by_column].to_numpy()
+    mz_sequence = pd_table.sort_values(by="mz")['mz'].unique()
+    pd_table4mask = pd_table['mz'].to_numpy()
 
     min_distance2split = np.median(pd_table['FWHM']) * FWHM_TO_SIGMA_FACTOR * 12 # min_distance2split is 12 * median(sigma)
 
@@ -246,27 +242,111 @@ def split_pdtable_by_medfwhm(pd_table, by_column = 'mz', min_pcount = 10, min_mz
     right_mz = mz_sequence[1:][mz_distance_bool] 
     mz_bins = np.concatenate(([mz_sequence[0] - min_distance2split], (left_mz + right_mz)/2, [mz_sequence[-1] + min_distance2split]))
     mz_bins_diffs = np.diff(mz_bins)
-    
+   
     # mz_bins correction by min split load 
-    current_sum = 0
-    mz_bins_corrected = [mz_bins[0]]
-    for n, mz_bin_diff in enumerate(mz_bins_diffs):    
-        if (current_sum + mz_bin_diff > min_mz_range_load):
-            mz_bins_corrected.append(mz_bins[n])
-            current_sum = 0
-        else:
-            current_sum += mz_bin_diff
-    if mz_bins_corrected[-1] < mz_bins[-1]:
-        mz_bins_corrected.append(mz_bins[-1])
-            
+    if split_mz_min is not None:
+        # split_mz_min = min_distance2split * split_mz_min # split_mz_min is min_distance2split * split_mz_minl
+        current_sum = 0
+        mz_bins_corrected = [mz_bins[0]]
+        for n, mz_bin_diff in enumerate(mz_bins_diffs,start=1):
+            if (current_sum + mz_bin_diff) > split_mz_min:
+                mz_bins_corrected.append(mz_bins[n])
+                current_sum = 0
+            else:
+                current_sum += mz_bin_diff
+        if mz_bins_corrected[-1] < mz_bins[-1]:
+            mz_bins_corrected.append(mz_bins[-1])
+
+    mz_bins = mz_bins_corrected
+
     # bathcing pd_table with correction by min number of peaks in batch 
     mask = np.zeros(len(pd_table4mask), dtype=bool)
     batched_pd_table = []
-    for mz_bin in pairwise(mz_bins_corrected):
-        mask = mask | (pd_table4mask > mz_bin[0]) & (pd_table4mask < mz_bin[1])
-        if sum(mask) > min_pcount:
+    if split_peaks_min is not None:
+        for mz_bin in pairwise(mz_bins):
+            mask = mask | (pd_table4mask > mz_bin[0]) & (pd_table4mask < mz_bin[1])
+            if sum(mask) > split_peaks_min:
+                batched_pd_table.append(pd_table[mask])
+                mask.fill(0)
+        if mask.any():
             batched_pd_table.append(pd_table[mask])
-            mask.fill(0)
-    if mask.any():
-        batched_pd_table.append(pd_table[mask])
+    else:
+        batched_pd_table = [0]*(len(mz_bins) - 1)
+        for n_batch, mz_bin in enumerate(pairwise(mz_bins)):
+            mask = (pd_table4mask > mz_bin[0]) & (pd_table4mask < mz_bin[1])
+            batched_pd_table[n_batch] = pd_table[mask]
+    return batched_pd_table
+
+def split_pdtable_by_peaks_gap(pd_table, split_peaks_min = 25, split_mz_min = 10):
+    """
+    Split pd.DataFrame table by median FWHM
+    args:
+        array: array to split
+        min_distance2split: minimum distance to split
+        by_column: column to split by
+    returns:
+        batched_array: array split by num distance
+    """
+    
+    pd_table.sort_values(by = "mz", inplace = True, ignore_index = True)
+    mz_distance_bool = (np.diff(pd_table['mz'].to_numpy()) - np.max( np.hstack(pd_table.loc[1:,'KD_bandwidth'].to_numpy(), pd_table.loc[:-1,'KD_bandwidth'].to_numpy()), axis = 0)*12) > 0
+
+    mz_distance_bool[-1] = True
+    borders_idx = np.where(np.concatenate(([True], mz_distance_bool)))[0]
+    mz_bins_diffs = np.diff(pd_table.loc[borders_idx,'mz'])
+    # borders_idx = pairwise(borders_idx)
+    
+    # !!!!!!!!!!!!!!! Тут остановился. Нужно решить как сплитить таблицу. Либо по новым индексам после сортировки (pairwise(левый и правый индекс сегмента)) и тут же найти размер сегмента по mz, либо вернуться к бинам
+    # mz_bins = np.concatenate(([mz_sequence[0] - min_distance2split], (left_mz + right_mz)/2, [mz_sequence[-1] + min_distance2split]))
+    # mz_bins_diffs = np.diff(mz_bins)
+   
+    ## mz_bins correction by min split load 
+    # if split_mz_min is not None:
+    #     # split_mz_min = min_distance2split * split_mz_min # split_mz_min is min_distance2split * split_mz_minl
+    #     current_sum = 0
+    #     mz_bins_corrected = [mz_bins[0]]
+    #     for n, mz_bin_diff in enumerate(mz_bins_diffs,start=1):
+    #         if (current_sum + mz_bin_diff) > split_mz_min:
+    #             mz_bins_corrected.append(mz_bins[n])
+    #             current_sum = 0
+    #         else:
+    #             current_sum += mz_bin_diff
+    #     if mz_bins_corrected[-1] < mz_bins[-1]:
+    #         mz_bins_corrected.append(mz_bins[-1])
+
+    # mz_bins = mz_bins_corrected
+    if split_mz_min is not None:
+        current_sum = 0
+        borders_idx_corrected = []
+        left_idx = borders_idx[0]
+        for n, mz_bin_diff in enumerate(mz_bins_diffs,start=1):
+            if (current_sum + mz_bin_diff) > split_mz_min:
+                borders_idx_corrected.append((left_idx, borders_idx[n]))
+                current_sum = 0
+                left_idx = borders_idx[n]
+            else:
+                current_sum += mz_bin_diff
+        if borders_idx_corrected[-1][1] < borders_idx[-1]:
+            borders_idx_corrected.append((left_idx, borders_idx[-1]))
+    else:
+        borders_idx = pairwise(borders_idx)
+    borders_idx = borders_idx_corrected
+    # mz_bins = borders_idx_corrected
+
+    # bathcing pd_table with correction by min number of peaks in batch 
+    # mask = np.zeros(len(pd_table4mask), dtype=bool)
+    batched_pd_table = []
+    if split_peaks_min is not None:
+        left_idx = borders_idx[0][0]
+        for border_idx in borders_idx:
+            if border_idx[1] - left_idx + 1 >= split_peaks_min:
+                batched_pd_table.append(pd_table.loc[slice(left_idx, border_idx[1]),:])
+            else:
+                left_idx = border_idx[0]
+        if border_idx[1] - left_idx + 1 < split_peaks_min:
+            batched_pd_table.append(pd_table.loc[slice(left_idx, border_idx[1]),:])
+    else:
+        batched_pd_table = [0]*(len(borders_idx))
+        for n_batch, border_idx in enumerate(borders_idx):
+            batched_pd_table[n_batch] = pd_table.loc[slice(*border_idx),:]
     return batched_pd_table
