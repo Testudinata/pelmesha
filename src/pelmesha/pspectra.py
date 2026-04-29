@@ -1,13 +1,11 @@
 import pandas as pd
 import numpy as np
-import collections
-from pelmesha.loaders import hdf5_Load, specdata_Load, hdf5_close, create_file_path, del_datasets_hdf5, del_hdf5, repack_hdf5, hdf5_metadata
+from pelmesha.loaders import hdf5_Load, specdata_Load, hdf5_close, create_file_path, del_datasets_hdf5, del_hdf5, repack_hdf5, hdf5_metadata, _hdf5_get_metadata, find_paths, logger, source_search
 from itertools import product, zip_longest
 from threading import Thread
 from pybaselines import Baseline
 from scipy.stats import median_abs_deviation
 from scipy.signal import savgol_filter, medfilt
-from pelmesha.loaders import find_paths, logger
 from pyimzml.ImzMLParser import ImzMLParser
 import h5py
 from h5py import File
@@ -496,7 +494,7 @@ class Configs(dict):
         
         if isinstance(baseliner_temp,AdaptiveParameter):
             nest["baseliner"] = baseliner_temp
-def _set_local_proc_configs(DataProc_configs, data_mz):
+def _set_local_proc_configs(DataProc_configs, data_mz): #TODO: сделать адаптивное окно??? со знанием локального dots_distance
     dots_distance = np.median(np.diff(data_mz))
     local_configs = copy.deepcopy(DataProc_configs)
     local_configs['smoothing_configs']['smooth_window'](dots_distance) 
@@ -2004,7 +2002,7 @@ def setup_spectra_batching(sample_file,
         else:
             spectrum_points = int(np.quantile(dpoints, 0.95))
         specnum = len(dpoints)
-    resample_to_dots = configs.get("resample_to_dots", None)
+    resample_to_dots = configs.get("resample_to_dots", False)
     if resample_to_dots:
         spectrum_points = resample_to_dots
     poslog_path = base_path + "_poslog.txt"
@@ -2080,14 +2078,15 @@ def setup_spectra_batching(sample_file,
                 data_mz = sample_imzml.getspectrum(idx)[0].astype(dtypeconv)
                 ## getting mz_discret
                 mzs.append(data_mz)
-                min_discret = min(min_discret, np.diff(data_mz).min()) # evaluation min_discret at this step is critical
+                min_discret = min(min_discret, np.diff(data_mz).min()) # min_discret evaluation at this step is critical
 
                 min_mz = min([min_mz,min(data_mz)])
                 max_mz = max([max_mz,max(data_mz)])
             data_mz =  np.sort(np.unique(np.hstack(mzs)))
 
-        discret_coeffs = get_mz_discretion_coeffs(data_mz, min_discret)
-
+        discret_coeffs = get_mz_discretion_coeffs(data_mz, min_discret)#, draw = draw_data)### TODO сделать опциональность рисовки
+        plt.title(f'm/z discretization in sample {sample} roi {roi}')
+        plt.show()
 
         # np.unique(np.hstack(mzs))!!!!!!!!!!!!!! Дописать! Попытаться внести в конфиг в виде класса кривой (fit), либо единым числом, но схожий способ работы. Также необходимо сделать ограничение на занимаемое место (аппенд может так подгрузить и 40 гб в оперативку...)
         data_obj[sample][roi]["mz_range"] = (min_mz, max_mz)
@@ -2130,41 +2129,7 @@ def setup_spectra_batching(sample_file,
     return (data_obj, par_args) #, shift_range, baseliner, smooth_window)
 
 ### Utility functions for processing
-def get_mz_discretion_DEV(mz, min_discret = None, dots_distance_steps = 2):
-    dots_distance = np.diff(mz)
-    
-    if min_discret:
-        float_error_bool = dots_distance >= min_discret - math.sqrt(np.finfo(float).eps)
-        if not float_error_bool[0]:
-            first_mz = True
-        else:
-            first_mz = False
-        float_error_bool = np.append(first_mz,float_error_bool)
-        mz = mz[float_error_bool]
-        dots_distance = np.diff(mz)
-    distance_diff = np.diff(dots_distance)
-    std_diff = np.std(dots_distance, ddof=1) / np.sqrt(len(dots_distance))
-    # print(f'std_diff {std_diff}')
-    dots_distance_bool = np.abs(distance_diff) <= std_diff
-
-    for k in range(2,min(dots_distance_steps+1,len(dots_distance))):
-        distance_diff_k = dots_distance[k:] - dots_distance[:-k]
-        dots_distance_bool_k = np.abs(distance_diff_k) <= std_diff*k
-        dots_distance_bool_k = np.append(np.ones(k-1, dtype=bool),dots_distance_bool_k)
-        dots_distance_bool = dots_distance_bool & dots_distance_bool_k
-
-    # dots_distance_bool_2 = np.abs(distance_diff_2) <= std_diff*2
-    # dots_distance_bool_2 = np.append(True,dots_distance_bool_2)
-    # dots_distance_bool = dots_distance_bool & dots_distance_bool_2
-    start_diff = (dots_distance[0] - dots_distance[1:][dots_distance_bool][0])
-    if abs(start_diff) <= std_diff:
-        dots_distance_bool = np.append(True, dots_distance_bool)
-    else:
-        dots_distance_bool = np.append(False, dots_distance_bool)
-        
-    return np.array(mz[1:][dots_distance_bool]), np.array(dots_distance[dots_distance_bool])
-
-def get_mz_discretion_coeffs(mz, min_discret = None):
+def get_mz_discretion_coeffs(mz, min_discret = None, draw = True):
     dots_distance = np.diff(mz)
     
     if min_discret:
@@ -2194,6 +2159,13 @@ def get_mz_discretion_coeffs(mz, min_discret = None):
         discret_coeffs = np.polyfit(mz, mz_discret, deg = 0)
     else:
         discret_coeffs = np.polyfit(mz, mz_discret, deg = 3)
+        if draw:
+            plt.figure(figsize = (25,4))
+            plt.plot(mz, mz_discret)
+            plt.plot(mz, np.poly1d(discret_coeffs)(mz))
+            plt.legend(["m/z discretization", "m/z discretization regression"])
+            plt.xlabel('m/z')
+            plt.ylabel('m/z discretion')
     return discret_coeffs
 
 def _poslog_parser(poslog_path,specnum):
@@ -2479,7 +2451,6 @@ def MAD(y,nan_policy):
 def peaks_prop_array(X, 
                      Y_array,
                      spectra_ind,
-                     mz_disret_regr_coeffs = None, 
                      fwhhfilter = None,
                      oversegmentationfilter = None,
                      heightfilter = None,
@@ -2531,7 +2502,6 @@ def peaks_prop_array(X,
                                         np.where(np.diff(Y) !=0)[0],
                                         xsize, 
                                         ind,
-                                        mz_disret_regr_coeffs,
                                         fwhhfilter,
                                         oversegmentationfilter,
                                         heightfilter,
@@ -2972,7 +2942,7 @@ def audit_processing_quality(
     :rtype: `NoneType`
     """
     path_dict=find_imzml_roots(input_data_paths)
-    configs = Configs([msalign,smoothing,peaks_prop_array,DataProc_array],config_path=config_path,**kwargs)
+    configs = Configs([msalign,smoothing,peaks_prop_array,DataProc_array], config_path = config_path, **kwargs)
     for key in list(path_dict.keys()):
         slide = os.path.basename(key)
         path_dict[slide] = {}
@@ -2989,34 +2959,11 @@ def audit_processing_quality(
             path_dict[slide][sample]['No_roi'].attrs['source'] = path
             path_dict[slide][sample]['No_roi'].attrs['idxroi'] = (0,len(ImzMLParser(path).mzLengths))
             path_dict[slide][sample]['No_roi'].attrs['dtype'] = dtypeconv
-            path_dict[slide][sample]['No_roi'].attrs['N_resampled'] = configs.get("resample_to_dots",None) 
+            path_dict[slide][sample]['No_roi'].attrs['N_resampled'] = configs.get("resample_to_dots",False)
         path_dict.pop(key)   
 
     draw_data(path_dict, plot_mz_range=plot_mz_range, sample_spectra_idx=sample_spectra_idx, **configs)
     return
-
-def source_search(hdf5_object):
-    if isinstance(hdf5_object, str):
-        hdf5_object = File(hdf5_object, 'r')
-    hdf5_metadata = {}
-    if isinstance(hdf5_object, h5py.Group):
-        source = hdf5_object.attrs.get('source', False)
-        if source:
-            hdf5_metadata[source] = {}
-            for attr_name, attr_value in hdf5_object.attrs.items():
-                if not attr_name == 'source':
-                    hdf5_metadata[source][attr_name] = attr_value
-    for name, obj in hdf5_object.items():
-        if isinstance(obj, h5py.Group):
-            source = obj.attrs.get('source', False)
-            if source:
-                hdf5_metadata[source] = {}
-                for attr_name, attr_value in obj.attrs.items():
-                    if not attr_name == 'source':
-                        hdf5_metadata[source][attr_name] = attr_value
-            else:
-                hdf5_metadata.update(source_search(obj))
-    return hdf5_metadata
 
 def add_procc_data(hdf5_object, 
                    func, 
@@ -3140,7 +3087,7 @@ def add_procc_data(hdf5_object,
             if n_int<cpu_num*2:
                 n_int = int(cpu_num*2)+1
 
-            if resample_to_dots is not None:
+            if resample_to_dots:
                 resampled_mz = np.linspace(*mz_range, resample_to_dots, dtype= dtypeconv)
                 data_mz = resampled_mz
             else:
@@ -3192,7 +3139,7 @@ def add_procc_data(hdf5_object,
 def _get_local_metadata(obj, datasets_list = None):
     for _, local_obj in obj.items():
         if isinstance(local_obj,(h5py.Group, h5py.File)):
-            for sample, roi, roi_idx, dtypeconv, source_path, dcont, resample_to_dots, mz_range in _get_local_metadata(local_obj,datasets_list):
+            for sample, roi, roi_idx, dtypeconv, source_path, dcont, resample_to_dots, mz_range in _get_local_metadata(local_obj,datasets_list):#TODO - явно переделать. Не все метаданные будут вытаскиваться
                 yield sample, roi, roi_idx, dtypeconv, source_path, dcont, resample_to_dots, mz_range
         else:
             if isinstance(datasets_list, list):
@@ -3214,7 +3161,7 @@ def _get_local_metadata(obj, datasets_list = None):
                     dtypeconv = obj.attrs['dtype']
                     source_path = obj.attrs['source']
                     dcont = obj.attrs['continuous']
-                    resample_to_dots = obj.attrs.get('N_resampled', None)
+                    resample_to_dots = obj.attrs.get('N_resampled', False)
                     mz_range = obj.attrs['mz_range']
                     yield sample, roi, roi_idx, dtypeconv, source_path, dcont, resample_to_dots, mz_range
                     break
@@ -3263,7 +3210,7 @@ def _find_dots_process(specdata_sources, save_results = True, **kwargs):
                 _find_dots_process(Slide_data[slide], save_results = save_results, **kwargs)
         source_list = []
 
-    elif isinstance(specdata_sources, dict): #TODO: Добавить поддержку вносимых hdf5 файлов
+    elif isinstance(specdata_sources, dict):
         source_keys=list(specdata_sources.keys())
         if isinstance(specdata_sources[source_keys[0]], (h5py._hl.files.File,h5py.File, h5py.Group, h5py.Dataset)):
             # new_specdata_sources = {}

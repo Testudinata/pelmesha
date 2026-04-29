@@ -102,9 +102,9 @@ def peakl2DF(batch_path, extr_columns=None, extract_coords = True, return_source
     ### hdf5 load
     Slide_data = specdata_Load(batch_path)
     if return_source_path:
-        table,sourcse_path = table2DF(Slide_data, peaks_dataset_name, extr_columns, extract_coords, return_source_path, pivoting4val)
+        table, source_path = table2DF(Slide_data, peaks_dataset_name, extr_columns, extract_coords, return_source_path, pivoting4val)
         logger.ended()
-        return table,sourcse_path
+        return table, source_path
     else:
         logger.ended()
         return table2DF(Slide_data, peaks_dataset_name, extr_columns, extract_coords, return_source_path, pivoting4val) 
@@ -164,8 +164,9 @@ def table2DF(Slide_data, dataset_name, extr_columns=None,extract_coords = True, 
         Source_path = Slide_data.filename
         slides = Source_path.split("\\")[-2]
         for sample in Slide_data.keys():
-            DataFeat[sample]={}
+            DataFeat[sample] = {}
             for roi in Slide_data[sample].keys():
+
                 try:
                     headers = list(Slide_data[sample][roi][dataset_name].attrs['Column headers'])
                 except KeyError as error:
@@ -229,6 +230,10 @@ def table2DF(Slide_data, dataset_name, extr_columns=None,extract_coords = True, 
                     DataFeat[sample][roi][dataset_name] = DataFeat[sample][roi][dataset_name].pivot_table(index="spectra_ind", columns="Peak",fill_value = 0, values =pivoting4val)
             if not DataFeat[sample]:
                 DataFeat.pop(sample,None)
+    ## adding to DataFrame metadata
+    for sample, roi, metadata in _hdf5_get_metadata(Slide_data):
+        if sample is not None:
+            DataFeat[sample][roi][dataset_name].attrs.update(metadata)
     if close and not isinstance(Slide_data, dict):
         Slide_data.close()
     if not DataFeat:
@@ -383,7 +388,7 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
         if not Slide_data:
             logger.warn(f'For path: {path}, data doesn\'t loaded')
         for slide in list(Slide_data.keys()):
-
+            
             ### samples to load
             if samples:
                 s_iter = paths[path]
@@ -445,7 +450,7 @@ def IMGfeats_concat(paths,extr_columns,extracts_coords=True,processed_feat = Fal
                         print("spectra_ind to int is unsuccessful")
                         pass
                     #n =DataFeat[slide][sample][roi].shape[0]
-                    n =DataFeat.shape[0]
+                    n = DataFeat.shape[0]
                     #DataFeat[slide][sample][roi].set_index([pd.Index([slide]*n,name='slide'),pd.Index([sample]*n,name='sample'),pd.Index([roi]*n,name='roi')],inplace = True)
                     DataFeat.set_index([pd.Index([slide]*n),pd.Index([sample]*n),pd.Index([roi]*n)],inplace = True)
                     
@@ -623,30 +628,15 @@ def hdf5_metadata(file_path, data_obj_metadata_donor, chunk_size = None):
                 if rf"{groups_path}/z" not in data_obj and "z" in data_obj_metadata_donor[sample][roi].keys():     
                         data_obj.create_dataset(rf"{groups_path}/z",data=data_obj_metadata_donor[sample][roi]["z"])
                 if isinstance(data_obj_metadata_donor, File):
-                    source = data_obj_metadata_donor[sample][roi].attrs['source']
-                    configs = data_obj_metadata_donor[sample][roi].attrs['configs']
-                    continuous = data_obj_metadata_donor[sample][roi].attrs['continuous']
-                    idxroi = data_obj_metadata_donor[sample][roi].attrs['idxroi']
-                    dtype = data_obj_metadata_donor[sample][roi].attrs['dtype']
-                    N_resampled = data_obj_metadata_donor[sample][roi].attrs.get('N_resampled',None)
-                    mz_range = data_obj_metadata_donor[sample][roi].attrs['mz_range']
+                    for attr_name, attr_value in data_obj_metadata_donor[sample][roi].attrs.items():
+                        data_obj[sample][roi].attrs[attr_name] = attr_value
                 else:
-                    source = data_obj_metadata_donor[sample][roi]['source']
-                    configs = data_obj_metadata_donor[sample][roi]['configs']
-                    continuous = data_obj_metadata_donor[sample][roi]['continuous']
-                    idxroi = data_obj_metadata_donor[sample][roi]['idxroi']
-                    dtype = data_obj_metadata_donor[sample][roi]['dtype']
-                    N_resampled = data_obj_metadata_donor[sample][roi].get('N_resampled',None)
-                    mz_range = data_obj_metadata_donor[sample][roi]['mz_range']
-                data_obj[sample][roi].attrs['source'] = source
-                data_obj[sample][roi].attrs['configs'] = configs
-                data_obj[sample][roi].attrs['continuous'] = continuous
-                data_obj[sample][roi].attrs['idxroi'] = idxroi
-                data_obj[sample][roi].attrs['dtype'] = dtype
-                if N_resampled is not None:
-                    data_obj[sample][roi].attrs['N_resampled'] = N_resampled
-                data_obj[sample][roi].attrs['mz_range'] = mz_range
-    return
+                    for key in ['xy','z','peaklists', 'features','int','mz']:
+                        if key in data_obj_metadata_donor[sample][roi]:
+                            del data_obj_metadata_donor[sample][roi][key]
+                    
+                    for attr_name, attr_value in data_obj_metadata_donor[sample][roi].items():
+                        data_obj[sample][roi].attrs[attr_name] = attr_value
 class logger:
     """
     logging messages in local package format:
@@ -707,4 +697,62 @@ class logger:
                     logger.getted_log.removeHandler(handler)
         else:
             del logger.name[-1]
-    
+def source_search(hdf5_object):
+    if isinstance(hdf5_object, str):
+        hdf5_object = File(hdf5_object, 'r')
+    hdf5_metadata = {}
+    if isinstance(hdf5_object, h5py.Group):
+        source = hdf5_object.attrs.get('source', False)
+        if source:
+            hdf5_metadata[source] = {}
+            for attr_name, attr_value in hdf5_object.attrs.items():
+                if not attr_name == 'source':
+                    hdf5_metadata[source][attr_name] = attr_value
+    for name, obj in hdf5_object.items():
+        if isinstance(obj, h5py.Group):
+            source = obj.attrs.get('source', False)
+            if source:
+                hdf5_metadata[source] = {}
+                for attr_name, attr_value in obj.attrs.items():
+                    if not attr_name == 'source':
+                        hdf5_metadata[source][attr_name] = attr_value
+            else:
+                hdf5_metadata.update(source_search(obj))
+    return hdf5_metadata
+
+def _hdf5_get_metadata(obj, datasets_list = None):
+    local_read = False
+    if isinstance(obj, str):
+        local_read = True
+        obj = File(obj, 'r')
+    metadata = {}
+    for _, local_obj in obj.items():
+        if isinstance(local_obj,(h5py.Group, h5py.File)):
+            for sample, roi, metadata in _hdf5_get_metadata(local_obj,datasets_list):
+                yield sample, roi, metadata
+        else:
+            samples = {}
+            if isinstance(datasets_list, list):
+                rois = []
+                for dataset in datasets_list:
+                    if isinstance(dataset, (list,tuple)):
+                        if len(dataset) > 1:
+                            rois = dataset[1]
+                        else:
+                            rois = None
+                        samples[dataset[0]] =  rois
+            _, sample, roi = obj.name.split("/")
+            
+            if (sample in samples) or (datasets_list is None):
+                metadata = {}
+                if (roi in samples.get(sample, [])) or (samples.get(sample, None) is None):
+                    for attr_name, attr_value in obj.attrs.items():
+                        metadata[attr_name] = attr_value
+                    yield sample, roi, metadata
+                    break
+            
+            yield None, None, {}
+            break
+
+    if local_read:
+        obj.close()

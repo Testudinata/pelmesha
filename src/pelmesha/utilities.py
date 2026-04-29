@@ -289,32 +289,15 @@ def split_pdtable_by_peaks_gap(pd_table, split_peaks_min = 25, split_mz_min = 10
     """
     
     pd_table.sort_values(by = "mz", inplace = True, ignore_index = True)
-    mz_distance_bool = (np.diff(pd_table['mz'].to_numpy()) - np.max( np.hstack(pd_table.loc[1:,'KD_bandwidth'].to_numpy(), pd_table.loc[:-1,'KD_bandwidth'].to_numpy()), axis = 0)*12) > 0
+    mz = pd_table['mz'].to_numpy()
+    KD_bandwidth = pd_table['KD_bandwidth'].to_numpy()
 
+    mz_distance_bool = np.diff(mz) > np.max( np.vstack((KD_bandwidth[1:], KD_bandwidth[:-1])), axis = 0)*12
     mz_distance_bool[-1] = True
     borders_idx = np.where(np.concatenate(([True], mz_distance_bool)))[0]
-    mz_bins_diffs = np.diff(pd_table.loc[borders_idx,'mz'])
-    # borders_idx = pairwise(borders_idx)
-    
-    # !!!!!!!!!!!!!!! Тут остановился. Нужно решить как сплитить таблицу. Либо по новым индексам после сортировки (pairwise(левый и правый индекс сегмента)) и тут же найти размер сегмента по mz, либо вернуться к бинам
-    # mz_bins = np.concatenate(([mz_sequence[0] - min_distance2split], (left_mz + right_mz)/2, [mz_sequence[-1] + min_distance2split]))
-    # mz_bins_diffs = np.diff(mz_bins)
-   
-    ## mz_bins correction by min split load 
-    # if split_mz_min is not None:
-    #     # split_mz_min = min_distance2split * split_mz_min # split_mz_min is min_distance2split * split_mz_minl
-    #     current_sum = 0
-    #     mz_bins_corrected = [mz_bins[0]]
-    #     for n, mz_bin_diff in enumerate(mz_bins_diffs,start=1):
-    #         if (current_sum + mz_bin_diff) > split_mz_min:
-    #             mz_bins_corrected.append(mz_bins[n])
-    #             current_sum = 0
-    #         else:
-    #             current_sum += mz_bin_diff
-    #     if mz_bins_corrected[-1] < mz_bins[-1]:
-    #         mz_bins_corrected.append(mz_bins[-1])
+    mz_bins_diffs = np.diff(mz[borders_idx])
+    borders_idx[-1] +=1
 
-    # mz_bins = mz_bins_corrected
     if split_mz_min is not None:
         current_sum = 0
         borders_idx_corrected = []
@@ -328,25 +311,31 @@ def split_pdtable_by_peaks_gap(pd_table, split_peaks_min = 25, split_mz_min = 10
                 current_sum += mz_bin_diff
         if borders_idx_corrected[-1][1] < borders_idx[-1]:
             borders_idx_corrected.append((left_idx, borders_idx[-1]))
+        borders_idx = borders_idx_corrected
     else:
-        borders_idx = pairwise(borders_idx)
-    borders_idx = borders_idx_corrected
+        borders_idx = list(pairwise(borders_idx))
+   
     # mz_bins = borders_idx_corrected
 
     # bathcing pd_table with correction by min number of peaks in batch 
     # mask = np.zeros(len(pd_table4mask), dtype=bool)
-    batched_pd_table = []
+    
     if split_peaks_min is not None:
+        batched_pd_table = []
         left_idx = borders_idx[0][0]
         for border_idx in borders_idx:
             if border_idx[1] - left_idx + 1 >= split_peaks_min:
-                batched_pd_table.append(pd_table.loc[slice(left_idx, border_idx[1]),:])
-            else:
-                left_idx = border_idx[0]
-        if border_idx[1] - left_idx + 1 < split_peaks_min:
-            batched_pd_table.append(pd_table.loc[slice(left_idx, border_idx[1]),:])
+                slc = slice(left_idx, border_idx[1])
+                batched_pd_table.append((mz[slc], KD_bandwidth[slc]))
+                left_idx = border_idx[1]
+            # else:
+            #     left_idx = border_idx[0]
+        if border_idx[1] != left_idx:
+            slc = slice(left_idx, border_idx[1])
+            batched_pd_table.append((mz[slc], KD_bandwidth[slc]))
     else:
         batched_pd_table = [0]*(len(borders_idx))
         for n_batch, border_idx in enumerate(borders_idx):
-            batched_pd_table[n_batch] = pd_table.loc[slice(*border_idx),:]
+            slc = slice(*border_idx)
+            batched_pd_table[n_batch] = (mz[slc], KD_bandwidth[slc])
     return batched_pd_table

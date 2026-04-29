@@ -1,5 +1,5 @@
 baseline_algo : null #DataProc
-resample_to_dots : null #DataProc 
+resample_to_dots : False #DataProc 
 lam : 50000 #baseline_correction
 align_peaks : null #msalign 
 align_pweights : null #msalign
