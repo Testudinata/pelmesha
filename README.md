@@ -1,3 +1,9 @@
+## Status
+![WIP](https://img.shields.io/badge/Status-WIP-orange)
+![Documentation is outdated](https://img.shields.io/badge/Documentation%20Status-Outdated-red.svg)
+
+> 🛑 **Attention!** The documentation temporarily does not correspond to the current version of the project. I am actively working on updating it (or not). Use at your own risk.
+> If you’ve figured out how it works, pull requests are welcome!
 # Package pelmesha
 
 `pelmesha` (Peak Extraction Library for Mass spectrometry Enhanced by Statistical High-throughput Analysis) is a Python package that allows users to process Mass Spectrometry Imaging (MSI) data from imzml files. It provides several features, including:
