@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
-from pelmesha.loaders import hdf5_Load, specdata_Load, hdf5_close, create_file_path, del_datasets_hdf5, del_hdf5, repack_hdf5, hdf5_metadata, _hdf5_get_metadata, find_paths, logger, source_search
-from itertools import product, zip_longest
+from pelmesha.loaders import hdf5_Load, specdata_Load, hdf5_close, create_file_path, del_datasets_hdf5, del_hdf5, repack_hdf5, hdf5_metadata, _hdf5_get_metadata, find_paths, logger, source_search, get_mean_spectrum
+from itertools import product, zip_longest, batched
 from threading import Thread
 from pybaselines import Baseline
 from scipy.stats import median_abs_deviation
@@ -582,81 +582,6 @@ def _noaln_sequence(func):
         logger.log('No align processing started')
         func(*args, **kwargs, dataset_name = 'peaklists_noaln')
     return wrapper
-# class DataSource: #TODO: Develop a source class that we can work with. It doesn’t matter which data source we use — IMZML or HDF5 or maybe MZXML; the approach will be the same.
-#     """
-#     Класс для работы с различными источниками масс-спектрометрических данных (IMZML, HDF5, MZXML).
-#     Обеспечивает унифицированный интерфейс для получения данных m/z шкалы и интенсивностей спектра.
-#     """
-
-#     def __init__(self, path, dtypeconv):
-#         """
-#         Инициализация источника данных.
-#         :param path: путь к файлу данных
-#         """
-#         self.dtypeconv = dtypeconv
-#         self.path = path
-#         if path.lower().endswith(".imzml"):
-#             self.source = ImzMLParser(path)
-#             self._loader = _load_imzml
-
-#         elif path.lower().endswith(".mzxml"):
-#             self.source = mzxml.MzXML(path)
-#             self._loader_intensity =
-#             self._loader_mz =
-#         elif path.lower().endswith(".hdf5"): !!!!!!!!!!!!!!!!!!! Разработать через idxroi. где определяем какой именно roi и sample используется
-#             # self.source = File(path, 'r', libver='latest')
-#             # self._loader_intensity =
-#             # self._loader_mz =
-#             raise ValueError("Неподдерживаемый формат файла")
-#         else:
-#             raise ValueError("Неподдерживаемый формат файла")
-
-#     def _load_imzml(self, idx):
-#         """
-#         Загрузка данных из источника.
-#         В зависимости от формата файла, данные загружаются разными способами.
-#         """
-#         mz, intens = zip(*(self.source.getspectrum(i) for i in idx))
-#         return np.array(mz).astype(self.dtypeconv), np.array(intens).astype(self.dtypeconv)
-#     def _load_hdf5(self, idx):
-#         """
-#         Загрузка данных из источника.
-#         В зависимости от формата файла, данные загружаются разными способами.
-#         """
-#         return self.source
-#         elif isinstance(self.source, h5py._hl.files.File):
-#             # Для HDF5 структура может отличаться, пример предполагает стандартные группы
-#             self.mz_scales = self.source['mz_scale']
-#             self.intensities = self.source['intensities']
-#         elif isinstance(self.source, mzxml.MzXML):
-#             self.spectra = [spectrum for spectrum in self.source]
-    
-#     def __getitem__(self, index):
-#         """
-#         Получение спектра по индексу.
-#         :param index: индекс спектра
-#         :return: кортеж (mz_scale, intensities) для заданного спектра
-#         """
-#         if not hasattr(self, 'mz_scales') or not hasattr(self, 'intensities') and not hasattr(self, 'spectra'):
-#             self._load_data()
-
-#         if isinstance(self.source, ImzMLParser):
-#             mz_scale, intensities = self.source.get_spectrum(index)
-#         elif isinstance(self.source, h5py._hl.files.File):
-#             # Предполагаем, что данные хранятся в виде массивов, где каждый спектр — это строка
-#             mz_scale = self.mz_scales[index]
-#             intensities = self.intensities[index]
-#         elif isinstance(self.source, mzxml.MzXML):
-#             spectrum = self.spectra[index]
-#             mz_scale = spectrum['m/z array']
-#             intensities = spectrum['intensity array']
-#         return mz_scale, intensities
-
-#     def close(self):
-#         """
-#         Закрытие источника данных.
-#         """
-#         self.source.close()
 
 def _shift_range_to_dots(window_shift_mz, dots_distance):
 
@@ -929,7 +854,8 @@ def Raw2proc(data_obj_path,
                                                    [configs],
                                                    [queue],
                                                    [chunk_size_dict],
-                                                   [dataset_name]
+                                                   [dataset_name],
+                                                   [draw]
                                                    )
                                                    )
                                                    )
@@ -1091,7 +1017,7 @@ def Raw2peaklist(data_obj_path,
     Ram_GB = Ram_GB*1e+9
     batch_bsize = Ram_GB/cpu_num
     bytes_flsize = BYTES_FLOAT_SIZE[dtypeconv]
-    chunk_size = max(1,np.ceil(h5chunk_size_MB*1e+6/(bytes_flsize*len(configs['peaks_configs']["headers"]))))
+    chunk_size = int(max(1,np.ceil(h5chunk_size_MB*1e+6/(bytes_flsize*len(configs['peaks_configs']["headers"])))))
 
     ###I. Finding slide directory for rawdata of samples (imzml)
     path_dict=find_imzml_roots(data_obj_path)
@@ -1124,7 +1050,8 @@ def Raw2peaklist(data_obj_path,
                                           [configs],
                                           [queue],
                                           [chunk_size],
-                                          [dataset_name]
+                                          [dataset_name],
+                                          [draw]
                                           )
                                           )
                                           )
@@ -1254,11 +1181,11 @@ def proc2peaklist(data_obj_path,
         data_obj_path=[data_obj_path]
     # Определение количества пула процессов
     cpu_num = cpu_count()-free_cores
-    Ram_GB = Ram_GB*1e+9
+    Ram_GB = Ram_GB*(1024 ** 3)
     h5chunk_size_MB=h5chunk_size_MB
     bytes_flsize = BYTES_FLOAT_SIZE[dtypeconv]  
     ##
-    chunk_size = max(1,np.ceil(h5chunk_size_MB*1e+6/(bytes_flsize*len(configs['peaks_configs']["headers"]))))
+    chunk_size = max(1,np.ceil(h5chunk_size_MB*(1024 ** 2)/(bytes_flsize*len(configs['peaks_configs']["headers"]))))
     if not file_end.endswith(".hdf5"):
         file_end+=".hdf5"
     path_list=find_paths(data_obj_path,file_end = file_end)
@@ -1928,7 +1855,8 @@ def setup_spectra_batching(sample_file,
                            configs, 
                            queue, 
                            chunk_size, 
-                           dataset_name): #resample_to_dots, shift_range, baseliner, smooth_window): 
+                           dataset_name,
+                           draw = True): #resample_to_dots, shift_range, baseliner, smooth_window): 
     """
     General description
     ----
@@ -1990,12 +1918,12 @@ def setup_spectra_batching(sample_file,
         return
     
     #### Stage 2. Get spectra sizes
-    try:
+    if os.path.exists(base_path+"_info.txt"):
         with open(base_path+"_info.txt") as f:
             data_info = f.readlines()
             spectrum_points = int(data_info[12].split(' ')[1]) # Информация по кол-ву точек спектра
             specnum = int(data_info[2].split(' ')[-1]) # Информация по кол-ву спектров в sample
-    except:   
+    else: 
         dpoints = sample_imzml.mzLengths
         if dcont:
             spectrum_points = dpoints[0]
@@ -2009,7 +1937,6 @@ def setup_spectra_batching(sample_file,
     ### Stage 3. Data extraction
     if os.path.exists(poslog_path): ### Extraction from _poslog and _info text files
         roi_list, roi_idx, poslog_specdata = _poslog_parser(poslog_path, specnum)
-        
         for roi in roi_list:
             data_obj[sample][roi]={}
             data_obj[sample][roi]["xy"] = np.empty((roi_idx[roi][1],2))
@@ -2059,39 +1986,44 @@ def setup_spectra_batching(sample_file,
         data_obj[sample][roi]["dtype"] = dtypeconv
         data_obj[sample][roi]["N_resampled"] = resample_to_dots
         data_obj[sample][roi]['configs'] = config_path2save
+        # mz_mean_spectrum, int_mean_spectrum = get_mean_spectrum(sample_imzml, indexes, batch_bsize)['00']
+
+        # data_obj[sample][roi]['mean_spectrum'] = np.vstack((mz_mean_spectrum, int_mean_spectrum), dtype = dtypeconv)
+
         
-        #### 
+        # TODO В будущем попробовать объеденить get_mean_spectrum и get_mz_discretion_coefs на этапе подготовки mz. Upd. Нет! Не надо. оно и так ест много ресурсов для определённых данных (orbitrap к примеру)
+        
+        ####
         if dcont:
             data_mz = sample_imzml.getspectrum(indexes[0])[0].astype(dtypeconv)
             min_discret = None
             min_mz = min(data_mz)
             max_mz = max(data_mz)
 
-
         else:
             mzs = []
             min_discret = np.inf
             min_mz = np.inf
             max_mz = -np.inf
+            for batch in batched(range(indexes[0],indexes[0]+indexes[1]), chunk_size[sample_file] if isinstance(chunk_size, dict) else chunk_size):
+                for idx in batch:
+                    data_mz = sample_imzml.getspectrum(idx)[0].astype(dtypeconv)
+                    ## getting mz_discret
+                    mzs.append(data_mz)
+                    min_discret = min(min_discret, np.diff(data_mz).min()) # min_discret evaluation at this step is critical
 
-            for idx in range(indexes[0],indexes[0]+indexes[1]):
-                data_mz = sample_imzml.getspectrum(idx)[0].astype(dtypeconv)
-                ## getting mz_discret
-                mzs.append(data_mz)
-                min_discret = min(min_discret, np.diff(data_mz).min()) # min_discret evaluation at this step is critical
+                    min_mz = min([min_mz,min(data_mz)])
+                    max_mz = max([max_mz,max(data_mz)])
+                # data_mz =  np.sort(np.unique(np.hstack(mzs))) ??? Так было
+            data_mz =  np.sort(np.unique(np.hstack(mzs))) #??? Так сделал на поверку.
 
-                min_mz = min([min_mz,min(data_mz)])
-                max_mz = max([max_mz,max(data_mz)])
-            data_mz =  np.sort(np.unique(np.hstack(mzs)))
+        discret_coeffs = get_mz_discretion_coeffs(data_mz, min_discret, draw)#, draw = draw_data)### TODO сделать опциональность рисовки
+        if len(discret_coeffs) > 1:
+            plt.title(f'm/z discretization in sample {sample} roi {roi}')
+            plt.show()
 
-        discret_coeffs = get_mz_discretion_coeffs(data_mz, min_discret)#, draw = draw_data)### TODO сделать опциональность рисовки
-        plt.title(f'm/z discretization in sample {sample} roi {roi}')
-        plt.show()
-
-        # np.unique(np.hstack(mzs))!!!!!!!!!!!!!! Дописать! Попытаться внести в конфиг в виде класса кривой (fit), либо единым числом, но схожий способ работы. Также необходимо сделать ограничение на занимаемое место (аппенд может так подгрузить и 40 гб в оперативку...)
         data_obj[sample][roi]["mz_range"] = (min_mz, max_mz)
         data_obj[sample][roi]["discret_coeffs"] = discret_coeffs 
-
 
         if resample_to_dots:
             resampled_mz = np.linspace(min_mz, max_mz, resample_to_dots).astype(dtypeconv)
@@ -2168,7 +2100,7 @@ def get_mz_discretion_coeffs(mz, min_discret = None, draw = True):
             plt.ylabel('m/z discretion')
     return discret_coeffs
 
-def _poslog_parser(poslog_path,specnum):
+def _poslog_parser(poslog_path,specnum): # TODO: Удалить, когда напишется DataSource
     idx=0
     roi_idx = {} # Информация sample по индексам спектров roi=(индекс первого спектра, кол-во спектров roi)
     roi_list = []
@@ -3325,7 +3257,7 @@ def _find_dots_process(specdata_sources, save_results = True, **kwargs):
                     # TODO 4) Убрать вопросы записи данных и куда сохранять метаданные
                     # TODO 5) СДелать возможность отрисовки графиков результатов
                     # TODO 6) Разобраться в применяемой статистике определения что всё гуд
-                    # TODO 7) Разобраться с работой венгерского алгоритма в данной штуке и в его необходимости
+                    # TODO 7) Разобраться с работой венгерского алгоритма в данной функции и в его необходимости
                     calculate(path_to_hdf5,f"{sample}/{roi}/peaklists_noaln",f"{sample}/{roi}/peaklists", ref = 0, dev=0.15, bandwidth=0.025, n_dots=100000, save_results = save_results)
     
 ### Constants and base configs

@@ -41,7 +41,7 @@ else:
 FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2))  # Фактор пересчета FWHM в sigma
 
 
-def Pgrouping_KD(ftable, extr_columns = None, KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian", KD_func = None, discret_coeffs = None,CountF = 10, norm = (None,None), draw_borders = 1.5, 
+def Pgrouping_KD(ftable, extr_columns = None, KD_bandwidth = "med_fwhm", bwc = 1,KD_kernel = "gaussian", KD_func = None,CountF = 10, norm = (None,None), draw_borders = 1.5, 
                   dupl_drop = True,min_res = 10, pivoting4val = None, cpu_free=1, path2save=None,sample="unknwn",roi="00", coords4table=None, account_mzscale = True, draw=True, 
                   split_mz_min = 10, split_peaks_min = 25, **params2mspeaks_KD):
     """    
@@ -397,6 +397,19 @@ def Pgrouping_KD_file(data, path,
                 if draw:
                     rand_spec_1 = Pgrouping_KD_table.rand_spec_1
                     rand_spec_2 = Pgrouping_KD_table.rand_spec_2
+                    try:
+                        if data[slide][sample][roi].get('int_mean', False):
+                            mean_fmz = data[slide][sample][roi]['mz_scale']
+                            mean_fint = data[slide][sample][roi]['int_mean']
+                        else:
+                            mean_fmz, mean_fint = get_mean_spectrum(spec_data[slide][sample][roi].attrs['source'], spec_data[slide][sample][roi].attrs['idxroi'])[roi]
+                        mean_leg = ['Mean spectrum']
+                    except Exception as e:
+                        print(f'Error occur during extraction mean intensity: {e}')
+                        mean_fmz = None
+                        mean_fint = None
+                        mean_leg = []
+                    
                     if rand_spec_1:
                         rand_spec = rand_spec_1[-1]
                         plt.figure(num=plt.get_fignums()[-2])
@@ -406,14 +419,19 @@ def Pgrouping_KD_file(data, path,
 
                         except:
                             x,y = spec_data.getspectrum(rand_spec+idx_start)
-
+                        
                         mz_draw_borders = plt.xlim()
                         dots_bord_spec = (np.array(x)>=mz_draw_borders[0]) & (np.array(x)<=mz_draw_borders[1])
                         ax = plt.gca().twinx()
                         ax.plot(np.array(x)[dots_bord_spec],np.array(y)[dots_bord_spec],alpha=0.85)
+                        #mean spectrum
+                        if mean_fint:
+                            mean_mz_dots = (np.array(mean_fmz)>=mz_draw_borders[0]) & (np.array(mean_fmz)<=mz_draw_borders[1])
+                            ax.plot(mean_fmz[mean_mz_dots], mean_fint[mean_mz_dots]*(-1), color = 'g')
+                        
                         plt.gcf().tight_layout()
                         plt.ylabel("Intensity")
-                        plt.legend([f"Mass spectrum N{rand_spec}"],loc='upper left')
+                        plt.legend([f"Mass spectrum N{rand_spec}"] + mean_leg,loc='upper left')
                     
                     
                     plt.figure(num=plt.get_fignums()[-1])
@@ -425,12 +443,16 @@ def Pgrouping_KD_file(data, path,
                         y = spec_data[slide][sample][roi]["int"][rand_spec_2,:]
                     mz_draw_borders = plt.xlim()
                     dots_bord_spec = (np.array(x)>=mz_draw_borders[0]) & (np.array(x)<=mz_draw_borders[1])
-
                     ax = plt.gca().twinx() 
                     ax.plot(np.array(x)[dots_bord_spec],np.array(y)[dots_bord_spec], alpha=0.85)
+                    
+                    # Mean spectrum
+                    if mean_fint:
+                        mean_mz_dots = (np.array(mean_fmz)>=mz_draw_borders[0]) & (np.array(mean_fmz)<=mz_draw_borders[1])
+                        ax.plot(mean_fmz[mean_mz_dots], mean_fint[mean_mz_dots]*(-1), color = 'g')
                     plt.gcf().tight_layout()
                     plt.ylabel("Intensity")
-                    plt.legend([f"Mass spectrum N{rand_spec_2}"], loc='upper left')
+                    plt.legend([f"Mass spectrum N{rand_spec_2}"] + mean_leg, loc='upper left')
                     if source == 'hdf5':
                         spec_data[slide].close()
                    
@@ -461,7 +483,6 @@ def Pgrouping_KD_table(ftable,
                        KD_bandwidth, bwc, KD_kernel, KD_func, 
                        CountF, norm, draw_borders, 
                        dupl_drop, split_params, 
-                       #discret_coeffs, 
                        sample = None, roi=None, 
                        account_mzscale = True, 
                        draw = True, 
@@ -472,7 +493,7 @@ def Pgrouping_KD_table(ftable,
     Вспомогательная функция к основной `Pgrouping_KD`. В ней производятся основные рассчёты функции и работает только с табличными данными `pd.DataFrame`.  
     """
     ind_norm = len(ftable.index.names)==1 and not ftable.index.names[0] # Определяем тип индексации (Обычная без названия (TRUE) "as is" или информативная по принадлежности к чему-либо)
-    
+    FWHM2sigma = bwc*(FWHM_TO_SIGMA_FACTOR/5.5)
     ## Заглушка, если не определены sample и roi
     if not sample:
         sample = "unknwn"
@@ -484,12 +505,15 @@ def Pgrouping_KD_table(ftable,
     if norm[0] is not None:
         batch_SpN=np.array_split(np.array(ftable.set_index('spectra_ind',append = not ind_norm).index.unique()),cpu_num*3)
         ftable=ftable.set_index('spectra_ind',append = not ind_norm)
+        metadata = ftable.attrs
+        ftable.attrs = {}
         SpecNorm_parargs = product([ftable.loc[batch_SpN[i]].copy() for i in range(len(batch_SpN))],[norm])
         with Pool(cpu_num) as p:
             ftable = p.starmap(SpecNorm,SpecNorm_parargs)
 
         ftable=pd.concat(ftable)
         ftable.reset_index(level='spectra_ind', inplace=True)
+        ftable.attrs.update(metadata)
     ### Нормализация end
     discret_coeffs = ftable.attrs.get('discret_coeffs')
     mz_model = np.poly1d(discret_coeffs)
@@ -497,24 +521,20 @@ def Pgrouping_KD_table(ftable,
     # print(ftable['mz'])
     # Здесь заранее реализовать ширину полосы пропускания векторными операциями, которые же и пойдут в gap!!!
     if KD_bandwidth == "med_fwhm":
-        ftable.loc[:,'KD_bandwidth'] = (ftable['FWHMR'] - ftable['FWHML'])*bwc*(FWHM_TO_SIGMA_FACTOR/5.5)
+        ftable.loc[:,'KD_bandwidth'] = (ftable['FWHMR'] - ftable['FWHML'])*FWHM2sigma
         if account_mzscale:
             mz_discret = mz_model(ftable['mz'])
 
             low_band_bool = ftable['KD_bandwidth'] < mz_discret*2
+            # unreal_discret_bool = mz_discret > ftable['KD_bandwidth']/FWHM2sigma # Для ситуации когда dist_loc нереалистично больше ширины на полувысоте пика TODO Оценить реалистичность такого сценария и добавить
+            # total_bool = low_band_bool^unreal_discret_bool
             ftable.loc[low_band_bool,'KD_bandwidth'] = (mz_discret[low_band_bool]*bwc).astype(ftable['KD_bandwidth'].dtype)
-            # if dist_loc > med_fwhm/1.06: # Для ситуации когда dist_loc нереалистично больше ширины на полувысоте пика TODO Оценить реалистичность такого сценария и добавить
-            #         # print(f"mz segment {min_loc} - {max_loc}")
-            #         # print(f"dist_loc {dist_loc}")
-            #     KD_bandwidth_loc = med_fwhm*bwc*FWHM_TO_SIGMA_FACTOR
     elif KD_bandwidth == "mz_discret":
         ftable.loc[:,'KD_bandwidth'] = mz_model(ftable['mz'])*bwc
     else:
         ftable.loc[:,'KD_bandwidth'] = KD_bandwidth*bwc
     # double-splitting array 
     KD_data = split_pdtable_by_peaks_gap(ftable, split_mz_min = split_params['split_mz_min'], split_peaks_min = split_params['split_peaks_min'])
-    
-    # ftable_batch = [result for ft in ftable_batch for result in split_pdtable_by_medfwhm(ft,**split_params)]
 
     # TODO: Проблемы с median_dist:
     # 1) нужны из сырых данных получить настоящие dist между точками
@@ -525,47 +545,6 @@ def Pgrouping_KD_table(ftable,
     # TODO !!!!!!!!!!!! Написать защиту от малого кол-ва точек в сегменте при определении сигма и дистанции
     #################################################
     
-    # plt.figure(figsize=(25,5))
-    # plt.plot(X_plot,pred_fwhm(X_plot))
-    # plt.scatter(ftable['mz'], ftable['FWHM'], s = 0.01)
-    # segnum = len(ftable_batch)
-    # par_args = [0]*segnum
-    # dist_loc = None
-
-    # for n, ftable_segment in enumerate(ftable_batch, start = 1):
-    #     reversed_n = segnum - n
-    #     min_loc = ftable_segment['mz'].min()
-    #     max_loc = ftable_segment['mz'].max()
-    #     peaks_count = len(ftable_segment)
-    #     if peaks_count <= CountF: 
-    #         logger.log(f"Segment {min_loc} - {max_loc} has less than {CountF} points. Skipping.")
-    #         del par_args[reversed_n]
-    #         continue
-        
-    #     if discret_coeffs is None:
-    #         mz_diffs = np.diff(ftable_segment['mz'].sort_values().unique())
-    #         if mz_diffs.size != 0:
-    #             dist_loc = np.quantile(mz_diffs,0.33)
-
-    #     if KD_bandwidth == "mz_discret":
-    #         #KD_bandwidth = min_dist*bwc
-    #         KD_bandwidth_loc = dist_loc*bwc
-    #     elif KD_bandwidth == "med_fwhm":
-    #         med_fwhm = np.median(np.array(ftable_segment["FWHM"])) 
-    #         KD_bandwidth_loc = med_fwhm*bwc*(FWHM_TO_SIGMA_FACTOR/4.5) #(TODO Изменить либо делитель 6, либо проверку минимальный размер расстояния между дискретными точками - не подошло даже после выравнивания. Спектр нередко переcглажен)
-
-    #         # @!!!!!!!!!!!!!!!! Попытаться реализовать индивидуальный вклад каждого пика!!!!!!!!!!!!!!!!!! "Технология" для этого уже есть
-    #         # Оценить возможность с одновременной подгрузкой спектра, чтобы получать честные mdeian_dist локально для пика
-    #         # факт: на fwhm ничто не влияет, кроме слияния пиков, то есть не зависит от заряда (или незначительно) и имеет зависимость сугубо от m/z, то есть возможно построить кривую fwhm и заменить в спорных моментах рассчитанный fwhm на регрессированный
-    #         if (dist_loc > KD_bandwidth_loc/2) and account_mzscale:
-    #             if dist_loc > med_fwhm/1.06: # Для ситуации когда dist_loc нереалистично больше ширины на полувысоте пика TODO доделать здесь, как закончу почему так медленно считает
-    #                 # print(f"mz segment {min_loc} - {max_loc}")
-    #                 # print(f"dist_loc {dist_loc}")
-    #                 KD_bandwidth_loc = med_fwhm*bwc*FWHM_TO_SIGMA_FACTOR
-    #             else:
-    #                 KD_bandwidth_loc = dist_loc*bwc
-    #                 # print(f"mz segment {min_loc} - {max_loc}")
-    #                 # print(f"mz KD_bandwidth_loc {KD_bandwidth_loc}")
     #             # TODO: попробовать не с медианной разницей между пиками, а с:
     #             # 1) min
     #             # 2) первый квартиль
@@ -577,20 +556,13 @@ def Pgrouping_KD_table(ftable,
 
     #     par_args[reversed_n] = (ftable_segment, KD_bandwidth_loc)
     mz_sequence = np.sort(ftable['mz'].unique())
-    # min_dist = mz_model(mz_sequence).min()
-    
-    # X_plot = _set_KDE_X_plot(plot_start, plot_end, min_dist) !!!!!!!!!!!!!! Если на пик приходится более 100-1000 точек - необходимо расплитить X_plot с даннными. При этом сохранить, чтобы в идеале было минимум 20-25 точек на пик. Или придумать критерий с мин_dist
-    # Y_plot = np.zeros(len(X_plot))
-
-    # partial_worker = partial(peaks_probability_distribution, X_plot, KD_kernel)
-    # with Pool(cpu_num) as p:
-    #     for result, plot_slice in tqdm(p.imap_unordered(partial_worker,KD_data), total = len(KD_data), unit = 'segment', desc = 'Peaks probability distribution calculation'):
-    #         Y_plot[plot_slice] += result
     X_plot = []
     Y_plot = []
     partial_worker = partial(peaks_probability_distribution, KD_func, KD_kernel, discret_coeffs)
     with Pool(cpu_num) as p:
+        Last_segment_max_mz = 0
         for X_plot_segment, Y_plot_segment in tqdm(p.imap_unordered(partial_worker,KD_data), total = len(KD_data), unit = 'segment', desc = 'Peaks probability distribution calculation'):
+            assert Last_segment_max_mz < X_plot_segment.min() #TODO удалить при выкладывании
             X_plot.append(X_plot_segment)
             Y_plot.append(Y_plot_segment)
             
@@ -688,13 +660,14 @@ def Pgrouping_KD_table(ftable,
         
 
         if draw:
+            
             rand_num = np.random.randint(0,temp_pivo.shape[0])
             rand_spec = temp_pivo.iloc[rand_num].name
             peak_mz = rand_spec[-1]
             rand_spec = rand_spec[:-1]
             mz_draw_borders = (peak_mz-draw_borders,peak_mz+draw_borders)
             dots_bord = (np.array(X_plot)>=mz_draw_borders[0]) & (np.array(X_plot)<=mz_draw_borders[1])
-            plt.figure(figsize=(25, 4), dpi=600)
+            plt.figure(figsize=(25, 6), dpi=600)
             # plt.figure(figsize=(17.5, 7.5/1.5), dpi=600)
             plt.plot(np.array(X_plot)[dots_bord],np.array(Y_plot)[dots_bord],color='k',alpha = 0.85)
             if len(ftable.index.names)==1:
@@ -718,7 +691,7 @@ def Pgrouping_KD_table(ftable,
             Pgrouping_KD_table.rand_spec_1 = rand_spec
             plt.minorticks_on()
             plt.grid(visible=True,which="both")
-            plt.gca().set_title(f"Duplicated peak {peak_mz:.3f} in the spectra of {sample} {roi}.")
+            plt.gca().set_title(f"Duplicated peak {peak_mz:.3f} in the spectra. Sample: {sample} {roi}.")
         else:
             Pgrouping_KD_table.rand_spec_1 = None
     else:
@@ -746,10 +719,11 @@ def Pgrouping_KD_table(ftable,
     if draw:
         rand_num = np.random.randint(0,result.shape[0])
         rand_spec, peak_mz = result.iloc[rand_num][["spectra_ind","Peak"]]
-
-        mz_draw_borders = (peak_mz-draw_borders,peak_mz+draw_borders)
-        plt.figure(figsize=(25, 4), dpi=600)
+        
+        # TODO: !!!!!!! Дописать, чтобы были все положительные шкалы игрик
+        plt.figure(figsize=(25, 6), dpi=600)
         # plt.figure(figsize=(17.5, 7.5/1.5), dpi=600)
+        mz_draw_borders = (peak_mz-draw_borders,peak_mz+draw_borders)
         dots_bord = (np.array(X_plot)>=mz_draw_borders[0]) & (np.array(X_plot)<=mz_draw_borders[1])
         plt.plot(np.array(X_plot)[dots_bord],np.array(Y_plot)[dots_bord], color="k",alpha=0.85)
         leg = ["Probability density function"]
@@ -809,8 +783,8 @@ def Pgrouping_KD_table(ftable,
 
 def peaks_probability_distribution(KDE_func, KD_kernel, mz_discret_coeffs, KD_data): # Пока медленно
     mz, KD_bandwidth = KD_data
-    ftable_min = mz[0] - KD_bandwidth[0]*12
-    ftable_max = mz[-1] + KD_bandwidth[-1]*12
+    ftable_min = mz[0] - KD_bandwidth[0]*6
+    ftable_max = mz[-1] + KD_bandwidth[-1]*6
     min_dist = np.poly1d(mz_discret_coeffs)(mz).min()
     X_plot_segment = _set_KDE_X_plot(ftable_min, ftable_max, min_dist = min_dist)
     if KDE_func == 'FFT':# or (len(mz_discret_coeffs) == 1):

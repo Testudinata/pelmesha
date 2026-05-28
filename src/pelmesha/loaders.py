@@ -1,10 +1,21 @@
 import os
+import re
+import numpy as np
 from h5py import File
 import h5py
 import gc
 import warnings
 import logging
 import pandas as pd 
+import xarray as xr
+from pyteomics import mzxml
+from pyimzml.ImzMLParser import ImzMLParser
+import matplotlib.pyplot as plt
+from scipy.signal import medfilt
+import math
+from multiprocessing import Pool, cpu_count
+from itertools import product
+from functools import cached_property
 # Иерархия структур в наименованиях и в HDF5: 
 # 1.Slide - слайд или пара слайдов, на котором/ых находятся образцы (Sample) (= одному пайплану эксперимента (образцы->стекло->нанесение матрицы->измерение), это может быть корневой папкой, в которой сохраняются все измерения одного такого эксперимента) 
 # 2.Sample - образец измерения, в котором может быть несколько изучаемых областей (roi: region of interest). (= одному измерению области/ей, которые пользователь сам выбрал как отдельные по каким-либо параметрам) 
@@ -157,7 +168,7 @@ def table2DF(Slide_data, dataset_name, extr_columns=None,extract_coords = True, 
     if isinstance(Slide_data, dict):
         for slides in list(Slide_data.keys()):
             Source_path[slides] = Slide_data[slides].filename
-            DataFeat[slides]= table2DF(Slide_data[slides], dataset_name, extr_columns = extr_columns, extract_coords = extract_coords, return_source_path = False, pivoting4val = pivoting4val)
+            DataFeat[slides]= table2DF(Slide_data[slides], dataset_name, extr_columns = extr_columns, extract_coords = extract_coords, return_source_path = False, pivoting4val = pivoting4val, close = False)
             if not DataFeat[slides]:
                 DataFeat.pop(slides,None)
     else:
@@ -230,10 +241,13 @@ def table2DF(Slide_data, dataset_name, extr_columns=None,extract_coords = True, 
                     DataFeat[sample][roi][dataset_name] = DataFeat[sample][roi][dataset_name].pivot_table(index="spectra_ind", columns="Peak",fill_value = 0, values =pivoting4val)
             if not DataFeat[sample]:
                 DataFeat.pop(sample,None)
-    ## adding to DataFrame metadata
-    for sample, roi, metadata in _hdf5_get_metadata(Slide_data):
-        if sample is not None:
-            DataFeat[sample][roi][dataset_name].attrs.update(metadata)
+        ## adding to DataFrame metadata
+        for sample, roi, metadata in _hdf5_get_metadata(Slide_data):
+            if sample is not None:
+                DataFeat[sample][roi][dataset_name].attrs.update(metadata)
+                if 'mean_spectrum' in Slide_data[sample][roi]:
+                    DataFeat[sample][roi][dataset_name].attrs['mean_spectrum'] = Slide_data[sample][roi]['mean_spectrum'][:]
+
     if close and not isinstance(Slide_data, dict):
         Slide_data.close()
     if not DataFeat:
@@ -634,6 +648,9 @@ def hdf5_metadata(file_path, data_obj_metadata_donor, chunk_size = None):
                     for key in ['xy','z','peaklists', 'features','int','mz']:
                         if key in data_obj_metadata_donor[sample][roi]:
                             del data_obj_metadata_donor[sample][roi][key]
+                    if 'mean_spectrum' in data_obj_metadata_donor[sample][roi]:
+                        data_obj.create_dataset(rf"{groups_path}/mean_spectrum",data=data_obj_metadata_donor[sample][roi]["mean_spectrum"])
+                        del data_obj_metadata_donor[sample][roi]['mean_spectrum']
                     
                     for attr_name, attr_value in data_obj_metadata_donor[sample][roi].items():
                         data_obj[sample][roi].attrs[attr_name] = attr_value
@@ -756,3 +773,421 @@ def _hdf5_get_metadata(obj, datasets_list = None):
 
     if local_read:
         obj.close()
+
+class Dataset(dict):
+    """
+    WIP
+    1. Объединяет датасеты для группировки фич в одну таблицу, с сохранением всех метаданных и ссылок на них. 
+    2. При этом освобождает RAM от индивидуальных подгрузок.
+    3. Ищет источники по списку путей, если найденный файл не имеет обработанного рядом результата - просит конфиг для обработки. Если есть обработанный, то сравнивает конфиги, если он передан в аргумент. 
+    И если они не совпадают производит новую обработку по новому конфигу.
+    4. Должен исключать конфликты в названиях sample. WIP ПРидумать как.
+    """
+    def __init__(self, path_list, dtypeconv):
+        self.samples = {}
+        if not isinstance(path_list, list):
+            path_list = [path_list]
+        for path in path_list:
+            ## Getting names
+            sample_folder_path = os.path.dirname(path)
+            sample_name = os.path.splitext(os.path.basename(path))[0]
+            folder_name = os.path.basename(sample_folder_path)
+            # base_path = os.path.join(sample_folder_path, sample_name)
+            if folder_name == sample_name:
+                sample = sample_name
+            else:
+                sample = folder_name + "_" + sample_name
+            
+            self.samples[sample] = DataSource(path, dtypeconv)
+    def __getitem__(self, sample):
+        return self.samples[sample]
+    def __getattr__(self, sample):
+        return self.samples[sample]
+    def __iter__(self):
+        return iter(self.samples.values())
+    def close(self, samples = None):
+        """
+        Close the data source.
+        """
+        if samples is not None:
+            if isinstance(samples, list):
+                for s in samples:
+                    self.samples[s].close()
+            else:
+                self.samples[samples].close()
+        else:
+            for s in self.samples:
+                self.samples[s].close()
+# TODO: Основная причина написания класса - это сделать чётко контролируемую и гибкую систему, 
+# с помощью которой можно будет подгружать усреднённый спектр при надобности 
+# (ввиду того, что он может быть слишком тяжёлым - лучше создавать его непосредственно перед использованием).
+class DataSource(dict): #TODO: Develop a source class that we can work with. It doesn’t matter which data source we use — IMZML or HDF5 or maybe MZXML; the approach will be the same.
+    # TODO: Необходимо разработать обращение к единичному источнику данных типа imzml и hdf5, который является агрегацией данных из нескольких источников с разбивкой. 
+    # Возможно, для создания общности - попробовать сделать как в hdf5 - создать класс DataSource/_loader_imzml для imzml, который может оперировать с несколькими источниками сразу и работал бы схоже с hdf5.
+    # В дальнейшем, возможно, это будет затравкой для глобального рефакторинга.
+ 
+    """
+    WIP
+    Класс основного управления обработкой данных от ОДНОГО файла. Использует класс DataManager для получения источника данных с унифицированным интерфейсом подгрузки.
+    СОдержит в себе метаданные источника данных. Сохранные метаданные и конфиги данных.
+    Сохраняет всю обработку рядом с источником данных. (может даже для удобства в одной папке с файлом источника данных)
+    Подаёдтся непосредственное обращение к источнику данных.
+    WIP Отработать подгрузку континуальных и неконтинуальных данных.
+    """
+
+    def __init__(self, path):
+        """
+        Инициализация источника данных.
+        :param path: путь к файлу данных
+        """
+        self.manager = DataManager()
+        self.source = self.manager.get_loader(path)(path)
+        del self.manager # удаляем за ненадобностью более
+        self.metadata, self.roi_metadata = self.source.get_metadata()
+    def close(self):
+        """
+        Close the data source.
+        """
+        self.source.close()
+###################### IMZML
+class loader_imzml(): # TODO написать класс для загрузки данных из imzML и также их метадату
+    def __init__(self, file_path):
+        self.file_path = file_path
+        source = ImzMLParser(file_path)
+
+        # Создание функций для батчинговой подгрузки
+        def get_batch_cont(self, idxs): 
+            yield self.mz_scale_cont, np.fromiter(self._get_batch_intensities(idxs))
+        
+        def get_batch_discont(self, idxs):
+            for idx in idxs:
+                yield self.source.getspectrum(idx)
+
+        # Назначение функции подгрузки в зависимости от континуальности данных 
+        mzoffsets = source.mzOffsets
+        if mzoffsets[0] == mzoffsets[1]:
+            self.dcont = True
+            self.mz_scale_cont = source.getspectrum(0)[0]
+            self.get_batch = get_batch_cont
+        else:
+            self.dcont = False
+            self.get_batch = get_batch_discont
+    @cached_property
+    def source(self):
+        return ImzMLParser(self.file_path)
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('source', None) 
+        return state
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+    def _get_batch_intensities(self, idxs):
+        for idx in idxs:
+            yield self.source.getspectrum(idx)[1]
+    def get_spectrum(self, idx):
+        return self.source.getspectrum(idx)
+    def get_mz(self, idx):
+        if self.dcont:
+            return self.mz_scale_cont
+        else:
+            return self.source.getspectrum(idx)[0]
+    def _get_mz_stream(self, idxs = None):
+        if idxs is None:
+            idxs = range(len(self.source.mzLengths))
+        for idx in idxs:
+            yield self.source.getspectrum(idx)[0]
+
+    def get_metadata(self, Ram_Gb_usage = 1, free_cpu = 1, draw = True): # TODO разобрать 
+        Ram_Gb_usage = Ram_Gb_usage * (1024 ** 3)
+        self.metadata = {}
+        self.roi_metadata = {}
+        file_path = self.file_path
+        sample_name = os.path.splitext(os.path.basename(file_path))[0] # Имя файла без расширения
+        folder_path = os.path.dirname(file_path)
+
+        base_path = os.path.join(folder_path, sample_name) # Базовый стринг пути к файлам без расширения
+        poslog_path = os.path.join(folder_path, sample_name) + "_poslog.txt"
+        if os.path.exists(base_path+"_info.txt"):
+            with open(base_path+"_info.txt") as f:
+                data_info = f.readlines()
+                specnum = int(data_info[2].split(' ')[-1]) # Информация по кол-ву спектров в sample
+        else:
+            dpoints = self.source.mzLengths
+            specnum = len(dpoints)
+        if os.path.exists(poslog_path):
+            roi_list, roi_idx, poslog_specdata = self._poslog_parser(poslog_path, specnum)
+            for roi in roi_list:
+                self.roi_metadata[roi]={}
+                self.roi_metadata[roi]["xy"] = np.empty((roi_idx[roi][1],2))
+                self.roi_metadata[roi]["z"] = np.empty((roi_idx[roi][1],1))
+            for idx, (roi,x,y,z) in enumerate(poslog_specdata):            
+                self.roi_metadata[roi]["xy"][idx-roi_idx[roi][0],:] = [x, y]
+                self.roi_metadata[roi]["z"][idx-roi_idx[roi][0]]  = z
+        else: ### If there is no poslog file in the folder, take coordinates from imzml
+            #### Stage 3 from imzml. Get base info and coordinates
+            #### Initialization
+            roi = "00" # Only one roi
+            roi_list = [roi]
+            roi_idx = {}
+            self.roi_metadata[roi]={}
+            roi_idx[roi] = (0,specnum)
+            try:
+                self.roi_metadata[roi]['xy'] = np.fromiter(self.get_physical_coordinates(range(specnum)))
+            except:
+                self.roi_metadata[roi]['xy'] = np.array(self.source.coordinates)[:,[0,1]]
+            self.roi_metadata[roi]["z"] = np.array([0]*specnum) # Заглушка z- координаты нигде не узнать
+        
+        for roi in roi_list:
+            indexes = roi_idx[roi]
+            self.roi_metadata[roi]["idxroi"] = indexes
+
+
+        self.metadata["continuous"] = self.dcont
+        self.metadata["dtype_raw"] = self.source.get_spectrum(0)[1].dtype
+        cpu_usage_count = cpu_count() - free_cpu
+        Element_size_per_cpu = Ram_Gb_usage / (self.metadata["dtype_raw"].itemsize * cpu_usage_count)
+
+        for roi in roi_list:
+            # Определяем дискретизацию шкалы mz
+            if self.dcont:
+                mz_scale = self.mz_scale_cont
+                min_discret = None
+                min_mz = min(mz_scale)
+                max_mz = max(mz_scale)
+            else: #для неконтинуальных данных пытаемся восстановить полную дискретную mz шкалу перебирая уникальные значениия
+                #new
+                mz_scale = np.empty(0)
+                min_discret = np.inf
+                batching = []
+                start = 0
+                current_el_size = 0
+                for idx in range(*roi_idx[roi]):
+                    if current_el_size > Element_size_per_cpu:
+                        batching.append((start, idx))
+                        start = idx
+                        current_el_size = dpoints[idx]
+                    else:
+                        current_el_size += dpoints[idx]
+                batching.append((start,idx))
+                with Pool(cpu_usage_count) as p:
+                    for mz_batch, min_discret_batch in p.imap_unordered(_batch_mz_discret_props, product([self], batching)):
+                        mz_scale = np.sort(np.unique(np.hstack((mz_scale, mz_batch))))
+                        min_discret = min(min_discret_batch, min_discret)
+                
+                min_mz = mz_scale[0]
+                max_mz = mz_scale[-1]
+                # #old
+                # mzs = []
+                # mz_scale = np.empty(0)
+                # min_discret = np.inf
+                # dpoints = self.source.mzLengths
+                # current_el_size = 0
+                # for idx, mz in enumerate(self._get_mz_stream(range(*roi_idx[roi]))):
+                #     mzs.append(mz)
+                #     min_discret = min([min_discret, np.diff(mz).min()])
+                #     current_el_size += dpoints[idx]
+                #     if current_el_size > Element_size:
+                #         mz_scale = np.sort(np.unique(np.hstack(mzs)))
+                #         mzs = [mz_scale]
+                #         current_el_size = mz_scale.shape[0]
+                #         print(idx)
+                # if len(mzs) > 1:
+                #     mz_scale = np.sort(np.unique(np.hstack(mzs)))
+                # min_mz = mz_scale[0]
+                # max_mz = mz_scale[-1]
+            # находим коэффициенты для интерполяции дискретизации (для экономии хранения в метаданных, так как mz_scale может выйти на некоторых приборах в несколько ГБ)
+            discret_coeffs = get_mz_discretion_coeffs(mz_scale, min_discret, draw)
+            if len(discret_coeffs) > 1:
+                plt.title(f'm/z discretization in sample {os.path.basename(file_path)} and roi {roi}')
+                plt.show()
+            self.roi_metadata[roi]["mz_range"] = (min_mz, max_mz)
+            self.roi_metadata[roi]["discret_coeffs"] = discret_coeffs
+        return self.metadata, self.roi_metadata
+    def _poslog_parser(self, poslog_path,specnum): # TODO сделать рефакторинг, так как это легаси код до создания фабрики загрузки данных
+        idx=0
+        roi_idx = {} # Информация sample по индексам спектров roi=(индекс первого спектра, кол-во спектров roi)
+        roi_list = []
+        current_roi = None
+        poslog_specdata = [None]*specnum
+        roi_pattern = re.compile(r'R(.+?)X')
+
+        with open(poslog_path) as f:
+            data = f.readlines()[2:]
+        for line in data:
+            line_search = roi_pattern.search(line)
+            if not line_search:
+                continue
+            roi_num = line_search.group(1)
+            coords =  line.split(' ')[-3:]
+            try:
+                x, y, z = map(float, coords)
+            except (ValueError, IndexError):
+                continue 
+            if roi_num != current_roi:
+                if current_roi is not None:
+                    roi_idx[current_roi] = (start_idx, idx - start_idx)
+                current_roi = roi_num
+                start_idx = idx
+                roi_list.append(roi_num)
+            poslog_specdata[idx]=(roi_num, x, y, z)
+            idx += 1
+        
+        # Final ROI update
+        if current_roi:
+            roi_idx[current_roi] = (start_idx, idx - start_idx)
+        return roi_list, roi_idx, poslog_specdata
+    def get_physical_coordinates(self, idxs):
+        for idx in idxs:
+            yield self.source.get_physical_coordinates(idx)
+class loader_hdf5(): #TODO: Написать
+        """
+        Загрузка данных из источника.
+        В зависимости от формата файла, данные загружаются разными способами.
+        """
+        def __init__(self, source, dtypeconv):
+            self.source = source
+            self.dtypeconv = dtypeconv
+            self.mz_scale = source.getspectrum(0)[0]
+            self.sample_metadata = {}
+
+
+
+class loader_mzxml(): # TODO дописать.
+    def __init__(self, path, dtypeconv):
+        self.source = source
+        self.dtypeconv = dtypeconv
+class loader_cdf(): # TODO дописать.
+    def __init__(self, source, dtypeconv):
+        self.source = source
+        self.dtypeconv = dtypeconv
+
+class DataManager():
+    """
+    WIP
+    для работы с различными источниками масс-спектрометрических данных (IMZML, HDF5, MZXML). Подгружает необходимый класс для загрузки данных и
+    Обеспечивает унифицированный интерфейс для получения данных m/z шкалы и интенсивностей спектра."""
+    def __init__(self):
+        self._loaders = {
+            'imzml': loader_imzml,
+            'hdf5': loader_hdf5,
+            'mzxml': loader_mzxml,
+            'cdf': loader_cdf        
+        }
+    def get_loader(self, file_path):
+        file_ext = os.path.splitext(file_path)[1][1:]
+        loader = self._loaders.get(file_ext.lower(), None)
+        if not loader:
+            raise ValueError(f'Format {file_ext} is not supported')
+        return loader
+
+############### Utility functions
+def get_mz_discretion_coeffs(mz, min_discret = None, draw = True):
+    dots_distance = np.diff(mz)
+    
+    if min_discret:
+        float_error_bool = dots_distance >= min_discret - math.sqrt(np.finfo(float).eps)
+        if not float_error_bool[0]:
+            first_mz = True
+        else:
+            first_mz = False
+        float_error_bool = np.append(first_mz,float_error_bool)
+        mz = mz[float_error_bool]
+        dots_distance = np.diff(mz)
+    distance_diff = np.diff(dots_distance)
+    std_diff = np.std(dots_distance, ddof=1) / np.sqrt(len(dots_distance))
+    dots_distance_bool = np.abs(distance_diff) <= std_diff
+    start_diff = (dots_distance[0] - dots_distance[1:][dots_distance_bool][0])
+    if abs(start_diff) <= std_diff:
+        dots_distance_bool = np.append(True, dots_distance_bool)
+    else:
+        dots_distance_bool = np.append(False, dots_distance_bool)
+    
+    mz_discret = np.array(medfilt(dots_distance[dots_distance_bool],7))
+    mz = mz[:-1][dots_distance_bool]
+
+    discret_mean = np.mean(mz_discret)
+    discret_std = np.std(mz_discret,ddof=1)
+    if discret_std/discret_mean < 0.025:
+        discret_coeffs = np.polyfit(mz, mz_discret, deg = 0)
+    else:
+        discret_coeffs = np.polyfit(mz, mz_discret, deg = 3)
+        if draw:
+            plt.figure(figsize = (25,4))
+            plt.plot(mz, mz_discret)
+            plt.plot(mz, np.poly1d(discret_coeffs)(mz))
+            plt.legend(["m/z discretization", "m/z discretization regression"])
+            plt.xlabel('m/z')
+            plt.ylabel('m/z discretion')
+    return discret_coeffs
+def _batch_mz_discret_props(source, idxs):
+    mzs = []
+    min_discret_batch = np.inf
+    for mz in source._get_mz_stream(range(*idxs)):
+        mzs.append(mz)
+        min_discret_batch = min(min_discret_batch, np.diff(mz).min())
+    mz_batch = np.unique(np.hstack(mzs))
+    return mz_batch, min_discret_batch
+def get_mean_spectrum(file_path, roi_idx = None, Ram_Gb = 2): #TODO: need refactoring. Especially with integration to DataSource
+    if isinstance(file_path, ImzMLParser):
+        source = file_path
+        file_path = source.filename
+    else:
+        source = ImzMLParser(file_path)
+    Ram_Gb = Ram_Gb * (1024 ** 3)
+    mean_spectrum ={}
+    specnum = len(source.mzLengths)
+    if roi_idx is None:
+        sample_folder_path = os.path.dirname(file_path)
+        sample_name = os.path.splitext(os.path.basename(file_path))[0]
+        base_path = os.path.join(sample_folder_path, sample_name)
+        poslog_path = os.path.join(base_path+'_poslog.txt')
+        if os.path.exists(poslog_path): ### Extraction from _poslog and _info text files
+            roi_list, roi_idx, poslog_specdata = _poslog_parser(poslog_path, specnum)
+        else:
+            roi = "00" # Only one roi
+            roi_list = [roi]
+            roi_idx = {}
+            roi_idx[roi] = (0,specnum)
+    else:
+        if isinstance(roi_idx, (list,tuple)):
+            roi_list = ['00']
+            roi_idx = {roi_list[0]:roi_idx}
+        elif isinstance(roi_idx, dict):
+            roi_list = list(roi_idx.keys())
+        else:
+            raise ValueError('roi_idx must be a list, tuple or dict')
+        
+    for roi in roi_list:
+        stats = pd.DataFrame(columns=['sum','count'])
+        stats.index.name = 'mz'
+        start_idx, end_idx = roi_idx[roi]
+        batch = []
+        Ram_usage = stats.memory_usage(deep=True, index=True).sum()
+        for idx in range(start_idx, end_idx):
+            spectrum = pd.DataFrame(np.vstack(source.getspectrum(idx)).T, columns=['mz', 'intensities'])
+            Ram_usage += spectrum.memory_usage(deep=True, index=True).sum()
+            batch.append(spectrum)
+            if Ram_usage > Ram_Gb:
+                stats = stats.add(
+                                pd.concat(batch, axis=0, ignore_index=True)
+                                .groupby('mz')['intensities']
+                                .agg(sum='sum', count='count'),
+                                fill_value = 0
+                                )
+                batch = []
+                Ram_by_stats = stats.memory_usage(deep=True, index=True).sum()
+                Ram_usage = Ram_by_stats if Ram_by_stats < Ram_Gb/2 else 0
+        if batch:
+            stats = stats.add(
+                                pd.concat(batch, axis=0, ignore_index=True)
+                                .groupby('mz')['intensities']
+                                .agg(sum='sum', count='count'),
+                                fill_value = 0
+                                )
+            del batch, Ram_usage, spectrum
+        mean_spectrum[roi] = (np.array(list(stats.index)), np.array(list(stats['sum']/stats['count'])))
+        del stats
+    if isinstance(roi_idx, (list,tuple)):
+        return mean_spectrum[roi]
+    else:
+        return mean_spectrum
