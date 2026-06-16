@@ -1989,9 +1989,6 @@ def setup_spectra_batching(sample_file,
         # mz_mean_spectrum, int_mean_spectrum = get_mean_spectrum(sample_imzml, indexes, batch_bsize)['00']
 
         # data_obj[sample][roi]['mean_spectrum'] = np.vstack((mz_mean_spectrum, int_mean_spectrum), dtype = dtypeconv)
-
-        
-        # TODO В будущем попробовать объеденить get_mean_spectrum и get_mz_discretion_coefs на этапе подготовки mz. Upd. Нет! Не надо. оно и так ест много ресурсов для определённых данных (orbitrap к примеру)
         
         ####
         if dcont:
