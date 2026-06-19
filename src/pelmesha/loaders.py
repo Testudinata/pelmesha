@@ -17,6 +17,8 @@ from multiprocessing import Pool, cpu_count
 from abc import ABC, abstractmethod
 from itertools import product, pairwise
 from functools import cached_property, partial
+import yaml
+from pelmesha.pspectra import Configs
 # Иерархия структур в наименованиях и в HDF5: 
 # 1.Slide - слайд или пара слайдов, на котором/ых находятся образцы (Sample) (= одному пайплану эксперимента (образцы->стекло->нанесение матрицы->измерение), это может быть корневой папкой, в которой сохраняются все измерения одного такого эксперимента) 
 # 2.Sample - образец измерения, в котором может быть несколько изучаемых областей (roi: region of interest). (= одному измерению области/ей, которые пользователь сам выбрал как отдельные по каким-либо параметрам) 
@@ -866,56 +868,566 @@ def _hdf5_get_metadata(obj, datasets_list = None):
     if local_read:
         obj.close()
 
-class Dataset(dict):
+class DataSet(dict):
+    # TODO:
+    # 1. Инициализация класса с возможностью опционального добавления словаря по типу: {path: config}, если конфиг None или просто список path, то пытается использовать записанный конфиг файл в папке
+    # 2. Метод add_source(path, config или {path: config}), который вносит в список путей
+    # 3. Метод ({path: config}), также вносит в список путей, как и инит или add_source
+    # 4. Добавить защиту от добавления уже какого-то пути, который есть
+    # 5. Добавить метод add_sources_from_paths(path_list, extensions, config), который ищет определённые расширения в пути и вносит в список. Минус:  При этом нужно исключить сразу те названия, которые уже связаны с обработкой (типа определённых hdf5)  
+    # 6. Создать хранение конфигов в DataSource (путь и сам выгруженный конфиг класс в подпапке) и, собственно, выгрузку при инициализации пути к файлу. Если файл конфигов yaml отсутствует - создать и внести поверх базовой основы новый 
+    # 7. Добавить проверку об изменениях параметров обработки или их соответствию старым, если они есть. Отметка, что старых не было тоже
+    # 8. Добавить возможность автоматической сверки наличия обработанных данных и их конфигов обработки с поставляемыми, если совпадают - повторная обработка не производится.
+    # 9. Написать метод, который бы запустил обработку данных записанных в списке путей и на основе индивидиуальных конфигов (с вариантами: чисто пик-пикинг (по сути последний метод с изменёнными конфигами), 
+    # чисто обработка спектров, пик-пикинг с обработкой и сохранение в hdf5 спектров). При этом, проводится проверка наличия атрибута рефернсного файла. Обработка "индивидуальная"
+    # 10. Написать атрибут, который хранил бы путь выбранного "референсного файла" для создания референсного пиклиста, также хранил бы и свой особый конфиг для обработки 
+    # (отличный от того, когда файл используется для обработки и анализа, а не референсный).
+    # 11. Написать атрибут, со списком референсных пиков от референсного файла
+    # 12. Если менять конфиг рефернсного атрибута, то список рефернсных пиков удаляется/None-ится.
+    # 13. Мерджинг координат, метадаты и датасетов с сохранением принадлежности к определённому файлу и roi (Мультииндекс в датафрейме?). 
+    # Подумать насчёт сохранения в атрибут результата. Либо каждый раз доставать заново
+    # 14. Создать метод финальной коррекции m/z методом Pgrouping_KD для объединённых датасетов. Подумать над тем, как результирующие данные сохранять. По сути ведь лишь появляется новая колонка, 
+    # но стоит как-то зафиксировать как она была получена (какие датасеты смерджены и какие были параметры их обработки?)
+    # 15. Метод мерджинга основного датасета с координатами? По сути пользователи и сами смогут сделать, но тут фишка в упрощении действа, так как большинство моментов спратаны в классе.
+
+    # New TODO (TODO выше написана нейросеткой и на ревизии, ниже результаты ревизии)
+    # 1. Придумать способ и реализовать исключения совпадений названий образцов (с одинаковыми sample названиями).
     """
-    WIP
-    
-    1. Объединяет датасеты для группировки фич в одну таблицу, с сохранением всех метаданных и ссылок на них. 
+    Central class for managing multiple mass spectrometry data sources.
+
+    Combines datasets from multiple files into unified tables with metadata,
+    coordinates, and processing pipeline support. Handles config management,
+    duplicate detection, reference peaks, and batch processing.
+
+    Основные возможности:
+    1. Объединяет датасеты для группировки фич в одну таблицу, с сохранением всех метаданных и ссылок на них.
     2. При этом освобождает RAM от индивидуальных подгрузок.
-    3. Ищет источники по списку путей, если найденный файл не имеет обработанного рядом результата - просит конфиг для обработки. Если есть обработанный, то сравнивает конфиги, если он передан в аргумент. 
-    И если они не совпадают производит новую обработку по новому конфигу.
-    4. Должен исключать конфликты в названиях sample. WIP ПРидумать как.
-    5. по "призыву" функции по мердженгу: создаёт и мерджит в единый DF все датасеты внутри
-    6. На выходе функции по смёрдживанию датасетов (пункт 5) не только основная датасет таблица, но и метадаты с координатами, ?которые потом также при желании пользователь сам может легко смерджить?
+    3. Ищет источники по списку путей, если найденный файл не имеет обработанного рядом результата - просит конфиг для обработки. Если есть обработанный, то сравнивает конфиги, если он передан в аргумент.
+       И если они не совпадают производит новую обработку по новому конфигу.
+    4. Должен исключать конфликты в названиях sample.
+    5. По "призыву" функции по мердженгу: создаёт и мерджит в единый DF все датасеты внутри.
+    6. На выходе функции по смёрдживанию датасетов (пункт 5) не только основная датасет таблица, но и метадаты с координатами.
+
+    :param sources: Optional initial sources. Can be:
+        - A list of file paths (configs loaded from disk if available)
+        - A dict ``{path: config_or_None}`` where config is a  or path to a YAML file
+        - ``None`` (empty DataSet, add sources later)
+    :param RamGb_limit_usage: RAM limit in GB for batch processing. Default ``2``.
+
+    :type sources: list or dict or None
+    :type RamGb_limit_usage: int or float
     """
-    def __init__(self, path_list, dtypeconv):
+    _EXCLUDED_EXTENSIONS = {'ingredients.hdf5', '_specdata.hdf5', '_features.hdf5'}
+
+    def __init__(self, sources = None, RamGb_limit_usage = 2):
         self.sources = {}
-        if not isinstance(path_list, list):
-            path_list = [path_list]
-        for path in path_list:
-            ## Getting names
-            sample_folder_path = os.path.dirname(path)
-            sample_name = os.path.splitext(os.path.basename(path))[0]
-            folder_name = os.path.basename(sample_folder_path)
-            # base_path = os.path.join(sample_folder_path, sample_name)
-            if folder_name == sample_name:
-                sample = sample_name
+        self.RamGb_limit_usage = RamGb_limit_usage
+        self._reference_file_path = None
+        self._reference_config = None
+        self._reference_peaks = None
+        self._merged_result = None
+
+        if sources is not None:
+            self.add_source(sources)
+        print(f"DataSet class is initialized. Current data samples:", *self.sources.keys())
+
+    def add_source(self, source, config = None):
+        """
+        Add one or more data sources to the DataSet.
+
+        :param source: A single file path, a list of paths, or a dict ``{path: config_or_None}``.
+        :param config: Config dict or path to a YAML file. Ignored if ``source`` is a dict.
+            If ``None``, attempts to load a saved config from the source directory.
+
+        :type source: str or list or dict
+        :type config: dict or str or None
+
+        :raises FileNotFoundError: If a source path does not exist.
+        :raises ValueError: If a source path has already been added.
+        """
+        if isinstance(source, dict):
+            for path, cfg in source.items():
+                self._add_single_source(path, cfg)
+        elif isinstance(source, [list, tuple]):
+            for path in source:
+                self._add_single_source(path, config)
+        elif isinstance(source, str):
+            self._add_single_source(source, config)
+        else:
+            raise TypeError(f"Unsupported source type: {type(source)}")
+
+    def __call__(self, source, config = None):
+        """
+        Callable interface — same as :meth:`add_source`.
+
+        Usage: ``dataset(path, config)`` or ``dataset({path: config})``.
+        """
+        self.add_source(source, config)
+        return self
+
+    def _add_single_source(self, path, config = None):
+        """Internal: add a single source with duplicate protection."""
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Source path does not exist: {path}")
+
+        sample_name = os.path.splitext(os.path.basename(path))[0]
+        folder_name = os.path.basename(os.path.dirname(path))
+        if folder_name != sample_name:
+            sample_name = folder_name + "_" + sample_name
+
+        if sample_name in self.sources:
+            raise ValueError(
+                f"Sample '{sample_name}' (from {path}) already exists in DataSet. "
+                f"Existing path: {self.sources[sample_name].file_path}"
+                f"Please, rename file name '{sample_name}' or folder '{folder_name}'"
+            )
+        if any(ds.file_path == path for ds in self.sources.values()):
+            raise ValueError(f"Path '{path}' has already been added to DataSet")
+
+        resolved_config = self._resolve_config(path, config)
+
+        source = DataSource(path, RamGb_limit_usage = self.RamGb_limit_usage)
+        source.config = resolved_config
+        self.sources[sample_name] = source
+
+    @staticmethod
+    def _resolve_config(path, config):
+        """
+        Resolve the processing config for a given source path.
+
+        1. If ``config`` is a dict — use it directly.
+        2. If ``config`` is a str path to a YAML — load it.
+        3. If ``config`` is ``None`` — look for a saved config in the source directory
+           (``raw_pelmesha/config.yaml``). If not found, load the default from
+           ``Base_configs.yaml``.
+
+        :param path: Path to the data source file.
+        :param config: User-provided config (dict, str, or None).
+
+        :type path: str
+        :type config: dict or str or None
+
+        :return: Resolved config dictionary.
+        :rtype: dict
+        """
+        if isinstance(config, dict):
+            return config
+        if isinstance(config, str):
+            if os.path.exists(config):
+                with open(config, 'r') as f:
+                    return yaml.safe_load(f)
             else:
-                sample = folder_name + "_" + sample_name
-            
-            self.sources[sample] = DataSource(path, dtypeconv)
+                raise FileNotFoundError(f"Config file not found: {config}")
+
+        saved_config_path = os.path.join(os.path.dirname(path), 'raw_pelmesha', 'config.yaml')
+        if os.path.exists(saved_config_path):
+            with open(saved_config_path, 'r') as f:
+                return yaml.safe_load(f)
+
+        base_config_path = os.path.join(os.path.dirname(__file__), 'Base_configs.yaml')
+        if os.path.exists(base_config_path):
+            with open(base_config_path, 'r') as f:
+                return yaml.safe_load(f)
+        return {}
+
+    def add_sources_from_paths(self, path_list, extensions = None, config = None):
+        """
+        Search directories for data files with given extensions and add them as sources.
+
+        Automatically excludes files with processed-data extensions (``.hdf5``, etc.).
+
+        :param path_list: List of directories or file paths to search.
+        :param extensions: List of file extensions to look for (e.g. ``['.imzML', '.mzXML']``).
+            If ``None``, uses ``['.imzML', '.mzXML', '.cdf']``.
+        :param config: Config to apply to all discovered sources. If ``None``, each source
+            will try to load its own saved config.
+
+        :type path_list: list
+        :type extensions: list or None
+        :type config: dict or str or None
+        """
+        if extensions is None:
+            extensions = ['.imzML', '.mzXML', '.cdf']
+
+        found_paths = []
+        for entry in path_list:
+            if os.path.isfile(entry):
+                ext = os.path.splitext(entry)[1].lower()
+                if ext in extensions:
+                    found_paths.append(entry)
+            elif os.path.isdir(entry):
+                for root, _, files in os.walk(entry):
+                    for f in files:
+                        ext = os.path.splitext(f)[1].lower()
+                        if ext in extensions:
+                            full_path = os.path.join(root, f)
+                            if not any(excl in full_path.lower() for excl in self._EXCLUDED_EXTENSIONS):
+                                found_paths.append(full_path)
+
+        for path in found_paths:
+            try:
+                self._add_single_source(path, config)
+            except (ValueError, FileNotFoundError) as e:
+                warnings.warn(f"Skipping {path}: {e}")
+
+    def save_configs(self):
+        """
+        Save the current config for each source to its ``raw_pelmesha/config.yaml`` file.
+
+        Creates the ``raw_pelmesha`` directory if it does not exist.
+        """
+        for sample_name, ds in self.sources.items():
+            if hasattr(ds, 'config') and ds.config:
+                config_dir = os.path.join(os.path.dirname(ds.file_path), 'raw_pelmesha')
+                os.makedirs(config_dir, exist_ok = True)
+                config_path = os.path.join(config_dir, 'config.yaml')
+                with open(config_path, 'w') as f:
+                    yaml.dump(ds.config, f, default_flow_style = False)
+
+    def check_config_changes(self):
+        """
+        Compare current configs with saved configs for each source.
+
+        :return: Dict mapping sample names to change info:
+            ``{"sample_name": {"status": "unchanged"|"changed"|"new", "old": dict|None, "new": dict}}``
+        :rtype: dict
+        """
+        changes = {}
+        for sample_name, ds in self.sources.items():
+            saved_config_path = os.path.join(os.path.dirname(ds.file_path), 'raw_pelmesha', 'config.yaml')
+            current_config = getattr(ds, 'config', {})
+
+            if os.path.exists(saved_config_path):
+                with open(saved_config_path, 'r') as f:
+                    saved_config = yaml.safe_load(f) or {}
+                if saved_config == current_config:
+                    changes[sample_name] = {"status": "unchanged", "old": saved_config, "new": current_config}
+                else:
+                    changes[sample_name] = {"status": "changed", "old": saved_config, "new": current_config}
+            else:
+                changes[sample_name] = {"status": "new", "old": None, "new": current_config}
+        return changes
+
+    def has_processed_data(self, dataset_name = "peaklists"):
+        """
+        Check which sources already have processed data matching their configs.
+
+        :param dataset_name: Dataset name to check for (e.g. ``"peaklists"``, ``"features"``).
+
+        :type dataset_name: str
+
+        :return: Dict mapping sample names to ``True``/``False``.
+        :rtype: dict
+        """
+        result = {}
+        for sample_name, ds in self.sources.items():
+            try:
+                hdf5_path = create_file_path(
+                    os.path.dirname(ds.file_path),
+                    slide_name = ds.sample_name,
+                    hdf5_end = f'_{"specdata" if dataset_name == "peaklists" else dataset_name}'
+                )
+                if os.path.exists(hdf5_path):
+                    with File(hdf5_path, 'r') as f:
+                        found = False
+                        for sample in f.keys():
+                            for roi in f[sample].keys():
+                                if dataset_name in f[sample][roi]:
+                                    found = True
+                                    break
+                            if found:
+                                break
+                    result[sample_name] = found
+                else:
+                    result[sample_name] = False
+            except Exception:
+                result[sample_name] = False
+        return result
+
+    def process(self, mode = "Raw2peaklist", **kwargs):
+        """
+        Run the processing pipeline on all sources.
+
+        :param mode: Processing mode. One of:
+            - ``"Raw2peaklist"`` — full processing: smoothing -> baseline -> alignment -> peak-picking
+            - ``"Raw2proc"`` — spectra processing only (no peak-picking)
+            - ``"proc2peaklist"`` — peak-picking only on already processed spectra
+        :param kwargs: Additional keyword arguments passed to the processing function.
+
+        :type mode: str
+
+        :raises ValueError: If ``mode`` is not recognised.
+        """
+        from pelmesha.pspectra import add_procc_data, int2proc2peaklist_parbatched, DataProc_array, peaks_prop_array, smoothing, msalign
+
+        mode_map = {
+            "Raw2peaklist": [msalign, smoothing, DataProc_array, peaks_prop_array],
+            "Raw2proc":     [msalign, smoothing, DataProc_array],
+            "proc2peaklist": [peaks_prop_array],
+        }
+
+        if mode not in mode_map:
+            raise ValueError(f"Unknown processing mode '{mode}'. Choose from: {list(mode_map.keys())}")
+
+        functions = mode_map[mode]
+        dataset_name = "peaklists" if "peaklist" in mode else "int"
+
+        config_changes = self.check_config_changes()
+        needs_processing = {
+            s: info for s, info in config_changes.items()
+            if info["status"] in ("changed", "new")
+        }
+
+        if not needs_processing:
+            has_data = self.has_processed_data(dataset_name)
+            needs_processing = {s: config_changes[s] for s in has_data if not has_data[s]}
+
+        if not needs_processing:
+            logger.log("All sources already have processed data matching current configs. Skipping.")
+            return
+
+        hdf5_object = {}
+        for sample_name in needs_processing:
+            ds = self.sources[sample_name]
+            hdf5_path = create_file_path(
+                os.path.dirname(ds.file_path),
+                slide_name = ds.sample_name,
+                hdf5_end = '_specdata'
+            )
+            hdf5_object[hdf5_path] = [[sample_name, None]]
+
+        add_procc_data(
+            hdf5_object,
+            func = functions,
+            configs_source = {s: self.sources[s].config for s in needs_processing},
+            dataset_name = dataset_name,
+            **kwargs
+        )
+
+        self.save_configs()
+
+    @property
+    def reference_file_path(self):
+        """Path to the reference data file used for reference peak list generation."""
+        return self._reference_file_path
+
+    @reference_file_path.setter
+    def reference_file_path(self, path):
+        """Set reference file path. Resets reference peaks if config changes."""
+        if path != self._reference_file_path:
+            self._reference_file_path = path
+            self._reference_peaks = None
+
+    @property
+    def reference_config(self):
+        """Config dict for reference file processing (may differ from analysis config)."""
+        return self._reference_config
+
+    @reference_config.setter
+    def reference_config(self, config):
+        """Set reference config. Resets cached reference peaks."""
+        self._reference_config = config
+        self._reference_peaks = None
+
+    @property
+    def reference_peaks(self):
+        """
+        List of reference peaks (m/z values) from the reference file.
+
+        Lazily computed on first access. Returns ``None`` if no reference file is set.
+        """
+        if self._reference_peaks is None and self._reference_file_path is not None:
+            self._compute_reference_peaks()
+        return self._reference_peaks
+
+    def _compute_reference_peaks(self):
+        """
+        Compute reference peaks from the reference file using its config.
+
+        Processes the reference file through the peak-picking pipeline and stores
+        the resulting peak m/z values.
+        """
+        if self._reference_file_path is None:
+            return
+
+        from pelmesha.pspectra import add_procc_data, peaks_prop_array
+
+        ref_config = self._reference_config or {}
+        ref_name = os.path.splitext(os.path.basename(self._reference_file_path))[0]
+
+        ref_ds = DataSource(self._reference_file_path, RamGb_limit_usage = self.RamGb_limit_usage)
+        ref_ds.config = ref_config
+
+        hdf5_path = create_file_path(
+            os.path.dirname(self._reference_file_path),
+            slide_name = ref_name,
+            hdf5_end = '_specdata'
+        )
+
+        add_procc_data(
+            {hdf5_path: [[ref_name, None]]},
+            func = [peaks_prop_array],
+            configs_source = {ref_name: ref_config},
+            dataset_name = "peaklists"
+        )
+
+        with File(hdf5_path, 'r') as f:
+            peaks = []
+            for sample in f.keys():
+                for roi in f[sample].keys():
+                    if 'peaklists' in f[sample][roi]:
+                        headers = list(f[sample][roi]['peaklists'].attrs['Column headers'])
+                        if 'Peak' in headers:
+                            peak_idx = headers.index('Peak')
+                            peaks.extend(f[sample][roi]['peaklists'][:, peak_idx])
+
+        self._reference_peaks = np.unique(peaks) if peaks else np.array([])
+
+    def merge(self, extr_columns = None, extract_coords = True, pivoting4val = None,
+              processed_feat = False, force = False):
+        """
+        Merge all sources into a single DataFrame with multi-index ``(slide, sample, roi)``.
+
+        Results are cached. Use ``force=True`` to recompute.
+
+        :param extr_columns: Columns to extract. See :func:`IMGfeats_concat`.
+        :param extract_coords: If ``True``, also return coordinates DataFrame.
+        :param pivoting4val: If set, pivot the result table.
+        :param processed_feat: If ``True``, use feature data instead of peaklists.
+        :param force: If ``True``, recompute even if cached.
+
+        :type extr_columns: list or None
+        :type extract_coords: bool
+        :type pivoting4val: list or None
+        :type processed_feat: bool
+        :type force: bool
+
+        :return: Merged DataFrame (and optionally coordinates DataFrame).
+        :rtype: pd.DataFrame or tuple
+        """
+        if self._merged_result is not None and not force:
+            return self._merged_result
+
+        paths = {}
+        for sample_name, ds in self.sources.items():
+            hdf5_dir = os.path.dirname(ds.file_path)
+            paths[hdf5_dir] = [[sample_name, None]]
+
+        result = IMGfeats_concat(
+            paths,
+            extr_columns = extr_columns,
+            extracts_coords = extract_coords,
+            processed_feat = processed_feat
+        )
+
+        self._merged_result = result
+        return result
+
+    def correct_mz(self, ftable = None, **kwargs):
+        """
+        Apply Pgrouping_KD m/z correction to the merged dataset.
+
+        Groups closely-spaced m/z values across spectra using kernel density estimation.
+
+        :param ftable: Input feature table. If ``None``, uses the merged result from :meth:`merge`.
+        :param kwargs: Additional parameters passed to :func:`Pgrouping_KD`.
+
+        :type ftable: pd.DataFrame or None
+
+        :return: Corrected feature table with a new ``Peak`` column.
+        :rtype: pd.DataFrame
+        """
+        from pelmesha.pfeats import Pgrouping_KD
+
+        if ftable is None:
+            merged = self.merge(extract_coords = False)
+            if isinstance(merged, tuple):
+                ftable = merged[0]
+            else:
+                ftable = merged
+
+        result = Pgrouping_KD(ftable, **kwargs)
+        return result
+
+    def merge_with_coords(self, extr_columns = None, pivoting4val = None,
+                          processed_feat = False, force = False):
+        """
+        Merge all sources and return a combined DataFrame with coordinates joined.
+
+        The result has a multi-index ``(slide, sample, roi, spectra_ind)`` and includes
+        ``x``, ``y`` (and optionally ``z``) columns alongside the feature data.
+
+        :param extr_columns: Columns to extract from feature data.
+        :param pivoting4val: If set, pivot the feature table.
+        :param processed_feat: If ``True``, use feature data instead of peaklists.
+        :param force: If ``True``, recompute even if cached.
+
+        :type extr_columns: list or None
+        :type pivoting4val: list or None
+        :type processed_feat: bool
+        :type force: bool
+
+        :return: DataFrame with feature columns and ``x``, ``y`` coordinates.
+        :rtype: pd.DataFrame
+        """
+        features, coords = self.merge(
+            extr_columns = extr_columns,
+            extract_coords = True,
+            pivoting4val = pivoting4val,
+            processed_feat = processed_feat,
+            force = force
+        )
+
+        combined = features.join(coords, how = 'left')
+        return combined
+
     def __getitem__(self, sample):
         return self.sources[sample]
-    def __getattr__(self, sample): # Осознать как использовать
-        return self.sources[sample]
+
+    def __getattr__(self, sample):
+        if sample.startswith('_'):
+            raise AttributeError(sample)
+        if sample in self.sources:
+            return self.sources[sample]
+        raise AttributeError(f"DataSet has no source '{sample}'")
+
     def __iter__(self):
         return iter(self.sources.values())
+
+    def __len__(self):
+        return len(self.sources)
+
+    def __contains__(self, item):
+        return item in self.sources
+
+    def keys(self):
+        return self.sources.keys()
+
+    def values(self):
+        return self.sources.values()
+
+    def items(self):
+        return self.sources.items()
+
     def close(self, samples = None):
         """
-        Close the data source.
+        Close one or all data sources.
+
+        :param samples: Sample name or list of sample names to close.
+            If ``None``, closes all sources.
+        :type samples: str or list or None
         """
         if samples is not None:
             if isinstance(samples, list):
                 for s in samples:
-                    self.samples[s].close()
+                    if s in self.sources:
+                        self.sources[s].close()
             else:
-                self.samples[samples].close()
+                if samples in self.sources:
+                    self.sources[samples].close()
         else:
-            for s in self.samples:
-                self.samples[s].close()
-# TODO: Основная причина написания класса - это сделать чётко контролируемую и гибкую систему, 
-# с помощью которой можно будет подгружать усреднённый спектр при надобности 
-# (ввиду того, что он может быть слишком тяжёлым - лучше создавать его непосредственно перед использованием).
+            for s in self.sources.values():
+                s.close()
 class DataSource(dict): 
     """
     WIP
@@ -944,44 +1456,51 @@ class DataSource(dict):
         self.loader = self.manager.get_loader(path)(path, respec = respec)
         
         del self.manager # удаляем за ненадобностью более
+
+        # Выгрузка метаданных
         self.meta_file_path = os.path.join(os.path.dirname(self.file_path),'raw_pelmesha','ingredients.hdf5')
+        if not os.path.exists(self.meta_file_path):
+            raise FileNotFoundError("Metadata file not found")
         with File(self.meta_file_path,"r") as hdf5:
-            self.metadata = pd.DataFrame([dict(hdf5.attrs.items())], index = [self.sample_name])
+            self.metadata = pd.DataFrame([dict(hdf5['metadata'].attrs.items())], index = [self.sample_name])
             columns_list = set()
             metadata_dict = {}
-            for roi in hdf5:
-                columns_list.update(hdf5[roi].attrs.keys())
-                metadata_dict[roi] = dict(hdf5[roi].attrs.items())
+            for roi in hdf5['metadata']:
+                columns_list.update(hdf5[f'metadata/{roi}'].attrs.keys())
+                metadata_dict[roi] = dict(hdf5[f'metadata/{roi}'].attrs.items())
             self.roi_metadata = pd.DataFrame.from_dict(metadata_dict, orient='index', columns=list(columns_list))
-            
-            # self.roi_metadata = pd.DataFrame(columns = list(columns_list))
-            # for roi in hdf5:
-            #     self.roi_metadata.loc[roi] = pd.Series([dict(hdf5[roi].attrs.items())])
-        # TODO, нужен загрузчик координат. С ориентировать гибридный подход: метод coords, который загружает полные данные только при вызове и уже превращается почти в атрибут (это возможно бессмысленно);
-        #   И отдельный метод get_coords, который всегда подгружает необходимые данные.
-        # self.configs
-    # TODO WIP функция получения координат по индексу. Вопрос куда их получать :/, где будет "кэширован" датафрейм? В отдельном классе Dataset?
-    # Тогда основная роль DataSet:
-    # 1) по "призыву" создаёт и мерджит в единую таблицу все датасеты внутри
-    # 2) на выходе не только основная датасет таблица, но и метадаты с координатами, ?которые потом также при желании пользователь сам может легко смерджить?
-    def get_coords(self, idxs = None):
-        """
-        Retrieve spatial coordinates for the given spectrum indices.
-
-        WIP — currently a stub.
-
-        :param idxs: Spectrum indices to retrieve coordinates for. If ``None``, uses all available indices.
-        :type idxs: np.ndarray or None
-        """
+    
+    def _normalize_indices(self, idxs):
         if idxs is None:
             idxs = np.concatenate(self.roi_metadata['idxroi'].to_numpy())
+        elif isinstance(idxs, (Indexator, SliceIndexator)):
+            idxs = idxs.view(np.ndarray)
+        elif isinstance(idxs, str):
+            idxs = self.roi_metadata.loc[idxs, 'idxroi'].to_numpy()
+        elif isinstance(idxs,slice):
+            idxs = np.array((idxs.start,idxs.stop))
+        elif isinstance(idxs,int):
+            idxs = np.array([idxs,idxs+1])
+        elif isinstance(idxs,(list, tuple)):
+            idxs = np.array(idxs)
+
+        if len(idxs.shape) == 1:
+            idxs = idxs[np.newaxis, :]
+        return idxs
+    def get_coords(self, idxs = None, extract = None):
+        idxs = self._normalize_indices(idxs)
 
         with File(self.meta_file_path,"r") as hdf5:
+            coords = []
+            if extract is None:
+                extract = hdf5['coords'].keys()
             for idx in SliceIndexator(idxs):
-                spec_id = range(idx)
-                roi = self._get_roi(idx)
-                hdf5
-        return
+                coords_slice = np.vstack((range(idx.start, idx.stop), *(hdf5[f'coords/{coord}'][idx] for coord in extract))).T
+                coords.append(coords_slice)
+            coords = pd.DataFrame(np.vstack(coords), columns = ['spectra_ind', *extract])
+        coords['spectra_ind'] = coords['spectra_ind'].astype(np.int64)
+        
+        return coords.set_index('spectra_ind')
     # WIP функция назначения датафрейму наименований roi (добавляется либо индекс к мультииндексу, либо отдельная колонка)
     def _df_set_roi_by_index(self, ):
         pass
@@ -1000,13 +1519,6 @@ class DataSource(dict):
         :raises ValueError: If no ROI matches the given index.
         """ # TODO Доработать для использования в объединённых датасетах (с мультиинексом, где ещё и sample)
         # in_bool = np.zeros(len(self.roi_metadata), dtype = bool) # TODO: Оставить до момента решения судьбы функции на вопрос её усложнения и возвращения нескольких roi
-        
-        # Перевод в стандартизированный тип данных 
-        if isinstance(idx, (Indexator, SliceIndexator)):
-            idx = idx.view(np.ndarray)
-        if isinstance(idx, np.ndarray):
-            if len(idx.shape) == 1:
-                idx = idx[np.newaxis, :]
         
         for roi_num, indexes in enumerate(self.roi_metadata['idxroi'].values):
             if isinstance(idx, np.ndarray):
@@ -1028,15 +1540,6 @@ class DataSource(dict):
                     return self.roi_metadata.index[roi_num]
 
         raise ValueError(f"ROI with index/indexes {idx} not found in {self.roi_metadata['idxroi'].values}")
-    def _get_rois(self, idxs):
-        # Перевод в стандартизированный тип данных 
-        if isinstance(idx, (Indexator, SliceIndexator)):
-            idx = idx.view(np.ndarray)
-        if isinstance(idx, np.ndarray):
-            if len(idx.shape) == 1:
-                idx = idx[np.newaxis, :]
-
-        
 
     def get_mean_spectrum(self, idxs = None, mz_range = None):
         """
@@ -1344,27 +1847,29 @@ class BaseLoader(ABC):  #TODO необходимо провести везде �
             os.makedirs(meta_file_folder)
         if (not meta_file_exist) or respec:
             chunk_Mbsize = chunk_Mbsize * (1024**2)
-            metadata, roi_metadata, roi_data = self.get_metadata(draw)
-            if meta_file_exist:
-                os.remove(meta_file_path)
+            metadata, roi_metadata, coords = self.get_metadata(draw)
+
+            del_hdf5(meta_file_path) # del hdf5 if it exists
+            
             with h5py.File(meta_file_path, 'w') as f:
+                f.create_group('metadata')
                 for key, value in metadata.items():
-                    f.attrs[key] = value
-                for roi, data in roi_data.items():
-                    f.create_group(roi)
+                    f['metadata'].attrs[key] = value
+
+                for roi in roi_metadata.keys():
+                    f['metadata'].create_group(roi)
                     for key, value in roi_metadata[roi].items():
-                        f[roi].attrs[key] = value
-                    for key, value in data.items():
-                        dataset = value.pop()
-                        val_size = dataset.shape
-                        if len(val_size) == 1:
-                            f.create_dataset(f'{roi}/{key}', data=dataset, dtype=dataset.dtype, chunks = True)
-                            f[f'{roi}/{key}'].attrs['headnames'] = value.pop()
-                        else:
-                            auto_row = int(chunk_Mbsize/(dataset.itemsize * val_size[1])) 
-                            auto_row = val_size[0] if auto_row > val_size[0] else auto_row  
-                            f.create_dataset(f'{roi}/{key}', data=dataset, dtype=dataset.dtype, chunks = (auto_row, val_size[1]))
-                            f[f'{roi}/{key}'].attrs['headnames'] = value.pop()
+                        f[f'metadata/{roi}'].attrs[key] = value
+                
+                f.create_group('coords')
+                for coord_key, data in coords.items():
+                    val_size = data.shape
+                    if len(val_size) == 1:
+                        f.create_dataset(f"coords/{coord_key}", data=data, dtype=data.dtype, chunks = True)
+                    else:
+                        auto_row = int(chunk_Mbsize/(data.itemsize * val_size[1])) 
+                        auto_row = val_size[0] if auto_row > val_size[0] else auto_row
+                        f.create_dataset(f'coords/{coord_key}', data=data, dtype=data.dtype, chunks = (auto_row, val_size[1]))
 
     def get_mz_range(self, idxs): 
         """
@@ -1576,13 +2081,16 @@ class loader_imzml(BaseLoader): # TODO написать класс для заг
                 current_roi = roi_num
                 start_idx = idx
                 roi_list.append(roi_num)
-            poslog_specdata[idx]=(roi_num, x, y, z)
+            # poslog_specdata[idx]=(roi_num, x, y, z)
+            poslog_specdata[idx]=(x, y, z)
             idx += 1
         
         # Final ROI update
         if current_roi:
             roi_idx[current_roi] = Indexator((start_idx, idx))
-        return roi_list, roi_idx, poslog_specdata
+        # return roi_list, roi_idx, poslog_specdata # 160626 перепись легаси функции, теперь координаты выгружаются как общие метаданные в виде единого массива. Суть, выгружать конкретные - позже, 
+        # так как есть целая таблица с индексацией
+        return roi_list, roi_idx, np.vstack(poslog_specdata)
     
     def get_mz_stream(self, idxs = None):
         if idxs is None:
@@ -1615,7 +2123,7 @@ class loader_imzml(BaseLoader): # TODO написать класс для заг
     def get_metadata(self, draw = True): 
         metadata = {}
         roi_metadata = {}
-        roi_data ={}
+        specdata = {}
         file_path = self.file_path
         sample_name = os.path.splitext(os.path.basename(file_path))[0] # Имя файла без расширения
         folder_path = os.path.dirname(file_path)
@@ -1631,33 +2139,27 @@ class loader_imzml(BaseLoader): # TODO написать класс для заг
             specnum = len(dpoints)
         if os.path.exists(poslog_path):
             roi_list, roi_idx, poslog_specdata = self._poslog_parser(poslog_path, specnum)
-            for roi in roi_list:
-                roi_data[roi]={}
-                roi_size = roi_idx[roi][0][1] - roi_idx[roi][0][0]
-                roi_data[roi]["xy"] = np.empty((roi_size,2))
-                roi_data[roi]["z"] = np.empty((roi_size,1))
-            for idx, (roi,x,y,z) in enumerate(poslog_specdata):            
-                roi_data[roi]["xy"][idx-roi_idx[roi][0],:] = [x, y]
-                roi_data[roi]["z"][idx-roi_idx[roi][0]]  = z
+            specdata["x"] = poslog_specdata[:,0]
+            specdata['y'] = poslog_specdata[:,1]
+            specdata["z"] = poslog_specdata[:,2]
         else: # If there is no poslog file in the folder, take coordinates from imzml
             #Get base info and coordinates
             roi = "00" # Only one roi
             roi_list = [roi]
             roi_idx = {}
             roi_idx[roi] = Indexator((0,specnum))
-            roi_data[roi]={}
+            specdata = {}
             try:
-                roi_data[roi]['xy'] = np.fromiter(self._get_physical_coordinates(range(specnum))) # TODO Проверить работоспособность np.fromiter, так как на схожем коде он не сработал и в итоге пришёл к vstack
+                coords = np.vstack(list(self._get_physical_coordinates(range(specnum)))) 
+                
             except:
-                roi_data[roi]['xy'] = np.array(self.source.coordinates)[:,[0,1]]
-            roi_data[roi]["z"] = np.array([0]*specnum) # Заглушка z- координаты нигде не узнать
-        
+                coords =  np.array(self.source.coordinates)[:,[0,1]]
+            specdata["x"] = coords[:,0]
+            specdata['y'] = coords[:,1]
+            specdata["z"] = np.array([0]*specnum)
         for roi in roi_list:
             roi_metadata[roi] = {}
             roi_metadata[roi]["idxroi"] = roi_idx[roi]
-            roi_data[roi]["xy"] = [['x','y'], roi_data[roi]["xy"]]
-            roi_data[roi]["z"] = [['z'], roi_data[roi]["z"]]
-
         metadata["continuous"] = self.dcont
         metadata["dtype_raw"] = self.get_spectrum(0)[1].dtype.name
 
@@ -1669,7 +2171,8 @@ class loader_imzml(BaseLoader): # TODO написать класс для заг
                 plt.title(f'm/z discretization in sample {os.path.basename(file_path)} and roi {roi}')
                 plt.show()
                 
-        return metadata, roi_metadata, roi_data
+        # return metadata, roi_metadata, roi_data
+        return metadata, roi_metadata, specdata
 
     def get_spectrum_sizes(self, idxs = None):
         if idxs is None:
