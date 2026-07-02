@@ -1,10 +1,9 @@
 baseline_algo : null #DataProc
 resample_to_dots : False #DataProc 
-lam : 50000 #baseline_correction
 align_peaks : null #msalign 
 align_pweights : null #msalign
 shift_range : 0.95 ## in mz value #msalign
-only_shift : True #msalign
+only_shift : False #msalign
 iterations : 3 #msalign
 width : 0.1 #msalign
 smooth_algo : null #smoothing

@@ -25,6 +25,7 @@ dependencies = [
   "scikit_learn",
   "scipy",
   "tqdm",
+  "pydantic",
   "PyYAML"
 ]
 

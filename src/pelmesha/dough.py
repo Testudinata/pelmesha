@@ -166,3 +166,39 @@ class LinkedList(np.ndarray):
             split_linked = np.array_split(self.linked_array, indices_or_sections, axis=axis)
             return [LinkedList(s, l) for s, l in zip(split_self, split_linked)]
         return split_self
+    
+class DatasetHeaders(list):
+    def __init__(self,attrs):
+        self.indexes = {}
+        self.headnames = [0]*len(attrs)
+        for index, name in enumerate(attrs):
+            self.headnames[index]=name
+            self.indexes[name]=index
+        super().__init__(self.headnames)
+    # Getting indices by passing a list of column names or getting a list of column names by passing a list of indices
+    def __call__(self,index_value): 
+
+        if isinstance(index_value,list):
+            list_ind = [0]*len(self.headnames)
+            if isinstance(index_value[0],int):
+                for i,ind in enumerate(index_value):
+                    list_ind[i] = self.headnames[ind]
+            elif isinstance(index_value[0],str):
+                for i,ind in enumerate(index_value):
+                    list_ind[i]=self.indexes[ind]
+            return list_ind
+        
+        else:
+            if isinstance(index_value,int):
+                return self.headnames[index_value]
+            elif isinstance(index_value,str):
+                return self.indexes[index_value]
+    # Code below for using class as list        
+    def __len__(self):
+        return len(self.headnames)
+    def __getitem__(self,index):
+        return self.headnames[index]
+    def __iter__(self):
+        return iter(self.headnames)
+    def __contains__(self, item):
+        return item in self.headnames

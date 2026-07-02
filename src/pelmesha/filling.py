@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import numpy as np
 from h5py import File
 import h5py
@@ -18,7 +19,8 @@ from abc import ABC, abstractmethod
 from itertools import product, pairwise
 from functools import cached_property, partial
 import yaml
-from pelmesha.pspectra import Configs
+from pybaselines import Baseline
+
 # Иерархия структур в наименованиях и в HDF5: 
 # 1.Slide - слайд или пара слайдов, на котором/ых находятся образцы (Sample) (= одному пайплану эксперимента (образцы->стекло->нанесение матрицы->измерение), это может быть корневой папкой, в которой сохраняются все измерения одного такого эксперимента) 
 # 2.Sample - образец измерения, в котором может быть несколько изучаемых областей (roi: region of interest). (= одному измерению области/ей, которые пользователь сам выбрал как отдельные по каким-либо параметрам) 
@@ -868,567 +870,8 @@ def _hdf5_get_metadata(obj, datasets_list = None):
     if local_read:
         obj.close()
 
-class DataSet(dict):
-    # TODO:
-    # 1. Инициализация класса с возможностью опционального добавления словаря по типу: {path: config}, если конфиг None или просто список path, то пытается использовать записанный конфиг файл в папке
-    # 2. Метод add_source(path, config или {path: config}), который вносит в список путей
-    # 3. Метод ({path: config}), также вносит в список путей, как и инит или add_source
-    # 4. Добавить защиту от добавления уже какого-то пути, который есть
-    # 5. Добавить метод add_sources_from_paths(path_list, extensions, config), который ищет определённые расширения в пути и вносит в список. Минус:  При этом нужно исключить сразу те названия, которые уже связаны с обработкой (типа определённых hdf5)  
-    # 6. Создать хранение конфигов в DataSource (путь и сам выгруженный конфиг класс в подпапке) и, собственно, выгрузку при инициализации пути к файлу. Если файл конфигов yaml отсутствует - создать и внести поверх базовой основы новый 
-    # 7. Добавить проверку об изменениях параметров обработки или их соответствию старым, если они есть. Отметка, что старых не было тоже
-    # 8. Добавить возможность автоматической сверки наличия обработанных данных и их конфигов обработки с поставляемыми, если совпадают - повторная обработка не производится.
-    # 9. Написать метод, который бы запустил обработку данных записанных в списке путей и на основе индивидиуальных конфигов (с вариантами: чисто пик-пикинг (по сути последний метод с изменёнными конфигами), 
-    # чисто обработка спектров, пик-пикинг с обработкой и сохранение в hdf5 спектров). При этом, проводится проверка наличия атрибута рефернсного файла. Обработка "индивидуальная"
-    # 10. Написать атрибут, который хранил бы путь выбранного "референсного файла" для создания референсного пиклиста, также хранил бы и свой особый конфиг для обработки 
-    # (отличный от того, когда файл используется для обработки и анализа, а не референсный).
-    # 11. Написать атрибут, со списком референсных пиков от референсного файла
-    # 12. Если менять конфиг рефернсного атрибута, то список рефернсных пиков удаляется/None-ится.
-    # 13. Мерджинг координат, метадаты и датасетов с сохранением принадлежности к определённому файлу и roi (Мультииндекс в датафрейме?). 
-    # Подумать насчёт сохранения в атрибут результата. Либо каждый раз доставать заново
-    # 14. Создать метод финальной коррекции m/z методом Pgrouping_KD для объединённых датасетов. Подумать над тем, как результирующие данные сохранять. По сути ведь лишь появляется новая колонка, 
-    # но стоит как-то зафиксировать как она была получена (какие датасеты смерджены и какие были параметры их обработки?)
-    # 15. Метод мерджинга основного датасета с координатами? По сути пользователи и сами смогут сделать, но тут фишка в упрощении действа, так как большинство моментов спратаны в классе.
 
-    # New TODO (TODO выше написана нейросеткой и на ревизии, ниже результаты ревизии)
-    # 1. Придумать способ и реализовать исключения совпадений названий образцов (с одинаковыми sample названиями).
-    """
-    Central class for managing multiple mass spectrometry data sources.
-
-    Combines datasets from multiple files into unified tables with metadata,
-    coordinates, and processing pipeline support. Handles config management,
-    duplicate detection, reference peaks, and batch processing.
-
-    Основные возможности:
-    1. Объединяет датасеты для группировки фич в одну таблицу, с сохранением всех метаданных и ссылок на них.
-    2. При этом освобождает RAM от индивидуальных подгрузок.
-    3. Ищет источники по списку путей, если найденный файл не имеет обработанного рядом результата - просит конфиг для обработки. Если есть обработанный, то сравнивает конфиги, если он передан в аргумент.
-       И если они не совпадают производит новую обработку по новому конфигу.
-    4. Должен исключать конфликты в названиях sample.
-    5. По "призыву" функции по мердженгу: создаёт и мерджит в единый DF все датасеты внутри.
-    6. На выходе функции по смёрдживанию датасетов (пункт 5) не только основная датасет таблица, но и метадаты с координатами.
-
-    :param sources: Optional initial sources. Can be:
-        - A list of file paths (configs loaded from disk if available)
-        - A dict ``{path: config_or_None}`` where config is a  or path to a YAML file
-        - ``None`` (empty DataSet, add sources later)
-    :param RamGb_limit_usage: RAM limit in GB for batch processing. Default ``2``.
-
-    :type sources: list or dict or None
-    :type RamGb_limit_usage: int or float
-    """
-    _EXCLUDED_EXTENSIONS = {'ingredients.hdf5', '_specdata.hdf5', '_features.hdf5'}
-
-    def __init__(self, sources = None, RamGb_limit_usage = 2):
-        self.sources = {}
-        self.RamGb_limit_usage = RamGb_limit_usage
-        self._reference_file_path = None
-        self._reference_config = None
-        self._reference_peaks = None
-        self._merged_result = None
-
-        if sources is not None:
-            self.add_source(sources)
-        print(f"DataSet class is initialized. Current data samples:", *self.sources.keys())
-
-    def add_source(self, source, config = None):
-        """
-        Add one or more data sources to the DataSet.
-
-        :param source: A single file path, a list of paths, or a dict ``{path: config_or_None}``.
-        :param config: Config dict or path to a YAML file. Ignored if ``source`` is a dict.
-            If ``None``, attempts to load a saved config from the source directory.
-
-        :type source: str or list or dict
-        :type config: dict or str or None
-
-        :raises FileNotFoundError: If a source path does not exist.
-        :raises ValueError: If a source path has already been added.
-        """
-        if isinstance(source, dict):
-            for path, cfg in source.items():
-                self._add_single_source(path, cfg)
-        elif isinstance(source, [list, tuple]):
-            for path in source:
-                self._add_single_source(path, config)
-        elif isinstance(source, str):
-            self._add_single_source(source, config)
-        else:
-            raise TypeError(f"Unsupported source type: {type(source)}")
-
-    def __call__(self, source, config = None):
-        """
-        Callable interface — same as :meth:`add_source`.
-
-        Usage: ``dataset(path, config)`` or ``dataset({path: config})``.
-        """
-        self.add_source(source, config)
-        return self
-
-    def _add_single_source(self, path, config = None):
-        """Internal: add a single source with duplicate protection."""
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Source path does not exist: {path}")
-
-        sample_name = os.path.splitext(os.path.basename(path))[0]
-        folder_name = os.path.basename(os.path.dirname(path))
-        if folder_name != sample_name:
-            sample_name = folder_name + "_" + sample_name
-
-        if sample_name in self.sources:
-            raise ValueError(
-                f"Sample '{sample_name}' (from {path}) already exists in DataSet. "
-                f"Existing path: {self.sources[sample_name].file_path}"
-                f"Please, rename file name '{sample_name}' or folder '{folder_name}'"
-            )
-        if any(ds.file_path == path for ds in self.sources.values()):
-            raise ValueError(f"Path '{path}' has already been added to DataSet")
-
-        resolved_config = self._resolve_config(path, config)
-
-        source = DataSource(path, RamGb_limit_usage = self.RamGb_limit_usage)
-        source.config = resolved_config
-        self.sources[sample_name] = source
-
-    @staticmethod
-    def _resolve_config(path, config):
-        """
-        Resolve the processing config for a given source path.
-
-        1. If ``config`` is a dict — use it directly.
-        2. If ``config`` is a str path to a YAML — load it.
-        3. If ``config`` is ``None`` — look for a saved config in the source directory
-           (``raw_pelmesha/config.yaml``). If not found, load the default from
-           ``Base_configs.yaml``.
-
-        :param path: Path to the data source file.
-        :param config: User-provided config (dict, str, or None).
-
-        :type path: str
-        :type config: dict or str or None
-
-        :return: Resolved config dictionary.
-        :rtype: dict
-        """
-        if isinstance(config, dict):
-            return config
-        if isinstance(config, str):
-            if os.path.exists(config):
-                with open(config, 'r') as f:
-                    return yaml.safe_load(f)
-            else:
-                raise FileNotFoundError(f"Config file not found: {config}")
-
-        saved_config_path = os.path.join(os.path.dirname(path), 'raw_pelmesha', 'config.yaml')
-        if os.path.exists(saved_config_path):
-            with open(saved_config_path, 'r') as f:
-                return yaml.safe_load(f)
-
-        base_config_path = os.path.join(os.path.dirname(__file__), 'Base_configs.yaml')
-        if os.path.exists(base_config_path):
-            with open(base_config_path, 'r') as f:
-                return yaml.safe_load(f)
-        return {}
-
-    def add_sources_from_paths(self, path_list, extensions = None, config = None):
-        """
-        Search directories for data files with given extensions and add them as sources.
-
-        Automatically excludes files with processed-data extensions (``.hdf5``, etc.).
-
-        :param path_list: List of directories or file paths to search.
-        :param extensions: List of file extensions to look for (e.g. ``['.imzML', '.mzXML']``).
-            If ``None``, uses ``['.imzML', '.mzXML', '.cdf']``.
-        :param config: Config to apply to all discovered sources. If ``None``, each source
-            will try to load its own saved config.
-
-        :type path_list: list
-        :type extensions: list or None
-        :type config: dict or str or None
-        """
-        if extensions is None:
-            extensions = ['.imzML', '.mzXML', '.cdf']
-
-        found_paths = []
-        for entry in path_list:
-            if os.path.isfile(entry):
-                ext = os.path.splitext(entry)[1].lower()
-                if ext in extensions:
-                    found_paths.append(entry)
-            elif os.path.isdir(entry):
-                for root, _, files in os.walk(entry):
-                    for f in files:
-                        ext = os.path.splitext(f)[1].lower()
-                        if ext in extensions:
-                            full_path = os.path.join(root, f)
-                            if not any(excl in full_path.lower() for excl in self._EXCLUDED_EXTENSIONS):
-                                found_paths.append(full_path)
-
-        for path in found_paths:
-            try:
-                self._add_single_source(path, config)
-            except (ValueError, FileNotFoundError) as e:
-                warnings.warn(f"Skipping {path}: {e}")
-
-    def save_configs(self):
-        """
-        Save the current config for each source to its ``raw_pelmesha/config.yaml`` file.
-
-        Creates the ``raw_pelmesha`` directory if it does not exist.
-        """
-        for sample_name, ds in self.sources.items():
-            if hasattr(ds, 'config') and ds.config:
-                config_dir = os.path.join(os.path.dirname(ds.file_path), 'raw_pelmesha')
-                os.makedirs(config_dir, exist_ok = True)
-                config_path = os.path.join(config_dir, 'config.yaml')
-                with open(config_path, 'w') as f:
-                    yaml.dump(ds.config, f, default_flow_style = False)
-
-    def check_config_changes(self):
-        """
-        Compare current configs with saved configs for each source.
-
-        :return: Dict mapping sample names to change info:
-            ``{"sample_name": {"status": "unchanged"|"changed"|"new", "old": dict|None, "new": dict}}``
-        :rtype: dict
-        """
-        changes = {}
-        for sample_name, ds in self.sources.items():
-            saved_config_path = os.path.join(os.path.dirname(ds.file_path), 'raw_pelmesha', 'config.yaml')
-            current_config = getattr(ds, 'config', {})
-
-            if os.path.exists(saved_config_path):
-                with open(saved_config_path, 'r') as f:
-                    saved_config = yaml.safe_load(f) or {}
-                if saved_config == current_config:
-                    changes[sample_name] = {"status": "unchanged", "old": saved_config, "new": current_config}
-                else:
-                    changes[sample_name] = {"status": "changed", "old": saved_config, "new": current_config}
-            else:
-                changes[sample_name] = {"status": "new", "old": None, "new": current_config}
-        return changes
-
-    def has_processed_data(self, dataset_name = "peaklists"):
-        """
-        Check which sources already have processed data matching their configs.
-
-        :param dataset_name: Dataset name to check for (e.g. ``"peaklists"``, ``"features"``).
-
-        :type dataset_name: str
-
-        :return: Dict mapping sample names to ``True``/``False``.
-        :rtype: dict
-        """
-        result = {}
-        for sample_name, ds in self.sources.items():
-            try:
-                hdf5_path = create_file_path(
-                    os.path.dirname(ds.file_path),
-                    slide_name = ds.sample_name,
-                    hdf5_end = f'_{"specdata" if dataset_name == "peaklists" else dataset_name}'
-                )
-                if os.path.exists(hdf5_path):
-                    with File(hdf5_path, 'r') as f:
-                        found = False
-                        for sample in f.keys():
-                            for roi in f[sample].keys():
-                                if dataset_name in f[sample][roi]:
-                                    found = True
-                                    break
-                            if found:
-                                break
-                    result[sample_name] = found
-                else:
-                    result[sample_name] = False
-            except Exception:
-                result[sample_name] = False
-        return result
-
-    def process(self, mode = "Raw2peaklist", **kwargs):
-        """
-        Run the processing pipeline on all sources.
-
-        :param mode: Processing mode. One of:
-            - ``"Raw2peaklist"`` — full processing: smoothing -> baseline -> alignment -> peak-picking
-            - ``"Raw2proc"`` — spectra processing only (no peak-picking)
-            - ``"proc2peaklist"`` — peak-picking only on already processed spectra
-        :param kwargs: Additional keyword arguments passed to the processing function.
-
-        :type mode: str
-
-        :raises ValueError: If ``mode`` is not recognised.
-        """
-        from pelmesha.pspectra import add_procc_data, int2proc2peaklist_parbatched, DataProc_array, peaks_prop_array, smoothing, msalign
-
-        mode_map = {
-            "Raw2peaklist": [msalign, smoothing, DataProc_array, peaks_prop_array],
-            "Raw2proc":     [msalign, smoothing, DataProc_array],
-            "proc2peaklist": [peaks_prop_array],
-        }
-
-        if mode not in mode_map:
-            raise ValueError(f"Unknown processing mode '{mode}'. Choose from: {list(mode_map.keys())}")
-
-        functions = mode_map[mode]
-        dataset_name = "peaklists" if "peaklist" in mode else "int"
-
-        config_changes = self.check_config_changes()
-        needs_processing = {
-            s: info for s, info in config_changes.items()
-            if info["status"] in ("changed", "new")
-        }
-
-        if not needs_processing:
-            has_data = self.has_processed_data(dataset_name)
-            needs_processing = {s: config_changes[s] for s in has_data if not has_data[s]}
-
-        if not needs_processing:
-            logger.log("All sources already have processed data matching current configs. Skipping.")
-            return
-
-        hdf5_object = {}
-        for sample_name in needs_processing:
-            ds = self.sources[sample_name]
-            hdf5_path = create_file_path(
-                os.path.dirname(ds.file_path),
-                slide_name = ds.sample_name,
-                hdf5_end = '_specdata'
-            )
-            hdf5_object[hdf5_path] = [[sample_name, None]]
-
-        add_procc_data(
-            hdf5_object,
-            func = functions,
-            configs_source = {s: self.sources[s].config for s in needs_processing},
-            dataset_name = dataset_name,
-            **kwargs
-        )
-
-        self.save_configs()
-
-    @property
-    def reference_file_path(self):
-        """Path to the reference data file used for reference peak list generation."""
-        return self._reference_file_path
-
-    @reference_file_path.setter
-    def reference_file_path(self, path):
-        """Set reference file path. Resets reference peaks if config changes."""
-        if path != self._reference_file_path:
-            self._reference_file_path = path
-            self._reference_peaks = None
-
-    @property
-    def reference_config(self):
-        """Config dict for reference file processing (may differ from analysis config)."""
-        return self._reference_config
-
-    @reference_config.setter
-    def reference_config(self, config):
-        """Set reference config. Resets cached reference peaks."""
-        self._reference_config = config
-        self._reference_peaks = None
-
-    @property
-    def reference_peaks(self):
-        """
-        List of reference peaks (m/z values) from the reference file.
-
-        Lazily computed on first access. Returns ``None`` if no reference file is set.
-        """
-        if self._reference_peaks is None and self._reference_file_path is not None:
-            self._compute_reference_peaks()
-        return self._reference_peaks
-
-    def _compute_reference_peaks(self):
-        """
-        Compute reference peaks from the reference file using its config.
-
-        Processes the reference file through the peak-picking pipeline and stores
-        the resulting peak m/z values.
-        """
-        if self._reference_file_path is None:
-            return
-
-        from pelmesha.pspectra import add_procc_data, peaks_prop_array
-
-        ref_config = self._reference_config or {}
-        ref_name = os.path.splitext(os.path.basename(self._reference_file_path))[0]
-
-        ref_ds = DataSource(self._reference_file_path, RamGb_limit_usage = self.RamGb_limit_usage)
-        ref_ds.config = ref_config
-
-        hdf5_path = create_file_path(
-            os.path.dirname(self._reference_file_path),
-            slide_name = ref_name,
-            hdf5_end = '_specdata'
-        )
-
-        add_procc_data(
-            {hdf5_path: [[ref_name, None]]},
-            func = [peaks_prop_array],
-            configs_source = {ref_name: ref_config},
-            dataset_name = "peaklists"
-        )
-
-        with File(hdf5_path, 'r') as f:
-            peaks = []
-            for sample in f.keys():
-                for roi in f[sample].keys():
-                    if 'peaklists' in f[sample][roi]:
-                        headers = list(f[sample][roi]['peaklists'].attrs['Column headers'])
-                        if 'Peak' in headers:
-                            peak_idx = headers.index('Peak')
-                            peaks.extend(f[sample][roi]['peaklists'][:, peak_idx])
-
-        self._reference_peaks = np.unique(peaks) if peaks else np.array([])
-
-    def merge(self, extr_columns = None, extract_coords = True, pivoting4val = None,
-              processed_feat = False, force = False):
-        """
-        Merge all sources into a single DataFrame with multi-index ``(slide, sample, roi)``.
-
-        Results are cached. Use ``force=True`` to recompute.
-
-        :param extr_columns: Columns to extract. See :func:`IMGfeats_concat`.
-        :param extract_coords: If ``True``, also return coordinates DataFrame.
-        :param pivoting4val: If set, pivot the result table.
-        :param processed_feat: If ``True``, use feature data instead of peaklists.
-        :param force: If ``True``, recompute even if cached.
-
-        :type extr_columns: list or None
-        :type extract_coords: bool
-        :type pivoting4val: list or None
-        :type processed_feat: bool
-        :type force: bool
-
-        :return: Merged DataFrame (and optionally coordinates DataFrame).
-        :rtype: pd.DataFrame or tuple
-        """
-        if self._merged_result is not None and not force:
-            return self._merged_result
-
-        paths = {}
-        for sample_name, ds in self.sources.items():
-            hdf5_dir = os.path.dirname(ds.file_path)
-            paths[hdf5_dir] = [[sample_name, None]]
-
-        result = IMGfeats_concat(
-            paths,
-            extr_columns = extr_columns,
-            extracts_coords = extract_coords,
-            processed_feat = processed_feat
-        )
-
-        self._merged_result = result
-        return result
-
-    def correct_mz(self, ftable = None, **kwargs):
-        """
-        Apply Pgrouping_KD m/z correction to the merged dataset.
-
-        Groups closely-spaced m/z values across spectra using kernel density estimation.
-
-        :param ftable: Input feature table. If ``None``, uses the merged result from :meth:`merge`.
-        :param kwargs: Additional parameters passed to :func:`Pgrouping_KD`.
-
-        :type ftable: pd.DataFrame or None
-
-        :return: Corrected feature table with a new ``Peak`` column.
-        :rtype: pd.DataFrame
-        """
-        from pelmesha.pfeats import Pgrouping_KD
-
-        if ftable is None:
-            merged = self.merge(extract_coords = False)
-            if isinstance(merged, tuple):
-                ftable = merged[0]
-            else:
-                ftable = merged
-
-        result = Pgrouping_KD(ftable, **kwargs)
-        return result
-
-    def merge_with_coords(self, extr_columns = None, pivoting4val = None,
-                          processed_feat = False, force = False):
-        """
-        Merge all sources and return a combined DataFrame with coordinates joined.
-
-        The result has a multi-index ``(slide, sample, roi, spectra_ind)`` and includes
-        ``x``, ``y`` (and optionally ``z``) columns alongside the feature data.
-
-        :param extr_columns: Columns to extract from feature data.
-        :param pivoting4val: If set, pivot the feature table.
-        :param processed_feat: If ``True``, use feature data instead of peaklists.
-        :param force: If ``True``, recompute even if cached.
-
-        :type extr_columns: list or None
-        :type pivoting4val: list or None
-        :type processed_feat: bool
-        :type force: bool
-
-        :return: DataFrame with feature columns and ``x``, ``y`` coordinates.
-        :rtype: pd.DataFrame
-        """
-        features, coords = self.merge(
-            extr_columns = extr_columns,
-            extract_coords = True,
-            pivoting4val = pivoting4val,
-            processed_feat = processed_feat,
-            force = force
-        )
-
-        combined = features.join(coords, how = 'left')
-        return combined
-
-    def __getitem__(self, sample):
-        return self.sources[sample]
-
-    def __getattr__(self, sample):
-        if sample.startswith('_'):
-            raise AttributeError(sample)
-        if sample in self.sources:
-            return self.sources[sample]
-        raise AttributeError(f"DataSet has no source '{sample}'")
-
-    def __iter__(self):
-        return iter(self.sources.values())
-
-    def __len__(self):
-        return len(self.sources)
-
-    def __contains__(self, item):
-        return item in self.sources
-
-    def keys(self):
-        return self.sources.keys()
-
-    def values(self):
-        return self.sources.values()
-
-    def items(self):
-        return self.sources.items()
-
-    def close(self, samples = None):
-        """
-        Close one or all data sources.
-
-        :param samples: Sample name or list of sample names to close.
-            If ``None``, closes all sources.
-        :type samples: str or list or None
-        """
-        if samples is not None:
-            if isinstance(samples, list):
-                for s in samples:
-                    if s in self.sources:
-                        self.sources[s].close()
-            else:
-                if samples in self.sources:
-                    self.sources[samples].close()
-        else:
-            for s in self.sources.values():
-                s.close()
-class DataSource(dict): 
+class DataSource: 
     """
     WIP
     Класс основного управления обработкой данных от ОДНОГО файла. Использует класс DataManager для получения источника данных с унифицированным интерфейсом подгрузки.
@@ -1438,10 +881,19 @@ class DataSource(dict):
     WIP Отработать подгрузку континуальных и неконтинуальных данных.
     """
 
-    def __init__(self, path, respec = False, RamGb_limit_usage = 2): 
-        """                                          
+    def __init__(self, path, respec = False, RamGb_limit_usage = 2, config = None):
+        """
         Инициализация источника данных.
+
         :param path: путь к файлу данных
+        :param respec: If ``True``, force re-creation of metadata. Default ``False``.
+        :param RamGb_limit_usage: RAM limit in GB for batch processing. Default ``2``.
+        :param config: Processing config dict for this source. If ``None``,
+            defaults to ``{}`` (will be resolved later by DataSet).
+        :type path: str
+        :type respec: bool
+        :type RamGb_limit_usage: int or float
+        :type config: dict or None
         """
 
         self.Ramcap = RamGb_limit_usage * (1024**3)
@@ -1451,12 +903,9 @@ class DataSource(dict):
         if folder_name != sample_name:
             sample_name = folder_name + "_" + sample_name
         self.sample_name = sample_name
-
-        self.manager = DataManager()
-        self.loader = self.manager.get_loader(path)(path, respec = respec)
-        
-        del self.manager # удаляем за ненадобностью более
-
+        self.loader = DataManager().get_loader(path)(path, respec = respec)
+        self.config = config or {}
+    
         # Выгрузка метаданных
         self.meta_file_path = os.path.join(os.path.dirname(self.file_path),'raw_pelmesha','ingredients.hdf5')
         if not os.path.exists(self.meta_file_path):
@@ -1469,7 +918,12 @@ class DataSource(dict):
                 columns_list.update(hdf5[f'metadata/{roi}'].attrs.keys())
                 metadata_dict[roi] = dict(hdf5[f'metadata/{roi}'].attrs.items())
             self.roi_metadata = pd.DataFrame.from_dict(metadata_dict, orient='index', columns=list(columns_list))
-    
+
+    @property
+    def config_path(self):
+        path = os.path.join(os.path.dirname(self.file_path), 'processed_pelmesha', 'processing_recipe.yaml')
+        return path if os.path.exists(path) else None
+
     def _normalize_indices(self, idxs):
         if idxs is None:
             idxs = np.concatenate(self.roi_metadata['idxroi'].to_numpy())
@@ -1792,6 +1246,7 @@ class Indexator(np.ndarray):
             
         # Если это строка, столбец или скаляр (число), возвращаем как обычный NumPy-объект
         return res.view(np.ndarray) if isinstance(res, np.ndarray) else res
+    @property
     def count(self):
         """
         Return the total number of individual indices across all segments.
@@ -1802,7 +1257,7 @@ class Indexator(np.ndarray):
         full_size = 0
         for segment in self.view(np.ndarray):
             full_size += np.diff(segment)
-        return full_size
+        return full_size[0]
     def __iter__(self):
         for start, end in self.view(np.ndarray):
             yield from range(start, end)
@@ -2316,3 +1771,13 @@ def _batch_mz_discret_props_legacy(source, idxs):
         min_discret_batch = min(min_discret_batch, np.diff(mz).min())
     mz_batch = np.unique(np.hstack(mzs))
     return mz_batch, min_discret_batch
+
+
+# TODO рефакторизация ужасно написанного класса Configs, особенно с костылём initialized:
+# 1) Инициализация:
+#   а) Создание датакласса с полями согласно тех параметров, которые есть у используемой функции
+# 2) Превращает плоский суп параметров и распределяет их по функциям:
+#   а) Необходимо продумать чёткое разделение имён параметров, чтобы не пересекались
+#   б) Разобраться в том, делать ли параметры динамическими, в зависимости от функций в пайплайне и/или фиксированными. А если возможно сделать так, чтобы выдавались подсказки от функции заранее, то будет вообще огонь
+# 3) Дополняет незаданные параметры "базовыми" откуда-то (файл или заранее прописанные)
+# Duplicate classes removed — use from pelmesha.configs import Configs, AdaptiveParameter, DatasetHeaders
