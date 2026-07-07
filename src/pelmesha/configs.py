@@ -12,14 +12,14 @@ Provides a Pydantic-based configuration system that supports:
 Main class: Configs
 Supporting classes: AdaptiveParameter, DatasetHeaders
 """
-
 from __future__ import annotations
+import ast
 from pybaselines import Baseline
 import inspect
 import os
 import warnings
 from typing import Any, Callable
-
+from pelmesha.pspectra import msalign,smoothing,DataProc_array,peaks_prop_array
 import numpy as np
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr, create_model
@@ -28,7 +28,8 @@ from pydantic import BaseModel, Field, PrivateAttr, create_model
 #  Utility functions for adaptive parameter conversion                        #
 # --------------------------------------------------------------------------- #
 
-
+BASE_FUNCTIONS_FOR_PROCCESING = [msalign,smoothing,DataProc_array]
+BASE_PEAKPICKING_FUNCTION = peaks_prop_array
 def _shift_range_to_dots(window_shift_mz: tuple | list | None,
                          dots_distance: float) -> tuple | None:
     """Convert m/z shift range to dot-based shift range."""
@@ -58,7 +59,82 @@ def _default_config_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "Base_configs.yaml")
 
+def _inspect_defaults(functions: Callable | list | tuple) -> dict[str, inspect.Parameter]:
+    """Return a dictionary of parameter names to inspect.Parameter objects.
 
+    Each element in *functions* can be:
+    - A plain callable (function or bound method)
+    - A ``(callable, class)`` tuple — used when an unbound method is
+      resolved together with its owning class (e.g. from AST extraction).
+    """
+    defaults = {}
+    defaults['methods'] = {}
+    methods_defaults = defaults['methods']
+    defaults['functions'] = {}
+    functions_defaults = defaults['functions']
+    
+    if not isinstance(functions, (list, tuple)):
+        if callable(functions):
+            functions = [functions]
+        else:
+            raise TypeError("func must be a callable or a list of callables")
+    for item in functions:
+        # Unpack (func, cls) tuple if present
+        if isinstance(item, tuple) and len(item) == 2:
+            func, cls = item
+        else:
+            func = item
+            cls = None
+
+        func_name = func.__name__
+        
+        # Skip callables that don't have an inspectable signature
+        # (C extensions, builtins like np.where, etc.)
+        try:
+            func_sig = inspect.signature(func)
+        except (ValueError, TypeError):
+            continue
+
+        # Получаем дефолтные параметры методов класса, функции и параметры инициализации класса
+        if hasattr(func, "__self__"): # Bound methods
+            cls = func.__self__.__class__
+            cls_name = cls.__name__
+
+            if cls_name not in methods_defaults:
+                methods_defaults[cls_name] = {}
+            methods_defaults[cls_name][func_name] = {}
+            method = methods_defaults[cls_name][func_name]
+            method["cls_init_params"] = {}
+
+            for param in inspect.signature(cls).parameters.values(): # Получаем параметры инициализации класса
+                if param.default is not inspect.Parameter.empty:
+                    method["cls_init_params"][param.name] = param.default
+            method['params'] = {}
+            for param in func_sig.parameters.values():
+                if param.default is not inspect.Parameter.empty:
+                    method['params'][param.name] = param.default
+
+        elif cls is not None and isinstance(cls, type): # Unbound method with class info
+            cls_name = cls.__name__
+            if cls_name not in methods_defaults:
+                methods_defaults[cls_name] = {}
+            methods_defaults[cls_name][func_name] = {}
+            method = methods_defaults[cls_name][func_name]
+            method["cls_init_params"] = {}
+            for param in inspect.signature(cls).parameters.values():
+                if param.default is not inspect.Parameter.empty:
+                    method["cls_init_params"][param.name] = param.default
+            method['params'] = {}
+            for param in func_sig.parameters.values():
+                if param.default is not inspect.Parameter.empty:
+                    method['params'][param.name] = param.default
+
+        else: # Plain functions
+            functions_defaults[func_name] = {}
+            for param in func_sig.parameters.values():
+                if param.default is not inspect.Parameter.empty:
+                    functions_defaults[func_name][param.name] = param.default
+    return defaults
 # --------------------------------------------------------------------------- #
 #  Dynamic parameter extraction from pybaselines                               #
 # --------------------------------------------------------------------------- #
@@ -717,47 +793,38 @@ class Configs(BaseModel):
     # ================================================================== #
 
     def __init__(self,
-                 functions_list: list | None = None, # !!!!!!!!!!!ЕЩё раз обдумать про функциональный пайплайн и автоматическую подборку данных
                  config_path: str | None = None,
+                 functions_list: list | None = None,
                  **kwargs):
-        # 1. Load base config from YAML
-        if config_path is None:
+        # 1. Load base config from YAML if functions_list is None (default functions is used)
+        func_params: dict[str, Any] = {}
+        if (config_path is None) and (functions_list is None):
             config_path = _default_config_path()
-        if not config_path.endswith(".yaml"):
-            config_path += ".yaml"
 
-        data: dict[str, Any] = {}
-        if os.path.exists(config_path):
-            with open(config_path, "rb") as f:
-                loaded = yaml.load(f, Loader=yaml.FullLoader)
-                if loaded:
-                    data.update(loaded)
+        if isinstance(config_path, str):
+            if not config_path.endswith(".yaml"):
+                config_path += ".yaml"
+                    
+            if os.path.exists(config_path):
+                with open(config_path, "rb") as f:
+                    loaded = yaml.load(f, Loader=yaml.FullLoader)
+                    if loaded:
+                        func_params.update(loaded)
+        else:
+            func_params = _inspect_defaults(functions_list)
 
         # 2. Override with kwargs
-        data.update(kwargs)
-        
+        for key, value in kwargs.items():
+            func_params[key].update(value)
         
         # 3. Separate sub-model dicts from flat params.
         #    Known static params are passed directly to Pydantic (IDE sees them).
         #    Unknown params (dynamic pybaselines) go to __pydantic_extra__.
-        # self._pipeline_functions = functions_list
-        # if functions_list is not None:
-#     for func in functions_list:
-        sub_model_data: dict[str, dict[str, Any]] = {
-                    "baseline_params": {},
-                    "smoothing_params": {},
-                    "alignment_params": {},
-                    "peakpicking_params": {},
-                }
-        flat_data: dict[str, Any] = {}
-        for key, value in data.items():
-            if key in sub_model_data:
-                sub_model_data[key] = value
-            elif key in _PARAM_TO_MODEL or key == "resample_to_dots":
-                flat_data[key] = value
-            else:
-                # Unknown — dynamic pybaselines param or algo_params
-                flat_data[key] = value
+        
+        # flat_data: dict[str, Any] = {}
+        # for func_name, params in func_params.items():
+        #     for param_name, value in params.items():
+        #         flat_data[func_name + "__" + param_name] = value
 
         # 4. Convert float values to AdaptiveParameter for smooth_window and shift_range
         if "smooth_window" in flat_data and not isinstance(flat_data["smooth_window"], AdaptiveParameter):
@@ -1096,114 +1163,7 @@ class Configs(BaseModel):
         ],
     }
 
-    def _yaml_value(self, v: Any) -> str:
-        """Format a single value for YAML output."""
-        if v is None:
-            return "null"
-        if isinstance(v, bool):
-            return "true" if v else "false"
-        if isinstance(v, float):
-            # Use repr to avoid e.g. 0.1 → 0.1 (not 0.10000000000000001)
-            return repr(v)
-        if isinstance(v, int):
-            return str(v)
-        if isinstance(v, str):
-            # Quote if contains special chars
-            if any(c in v for c in ": #{}[]&*!|>'\"%@`"):
-                return repr(v)
-            return v
-        if isinstance(v, (list, tuple)):
-            items = ", ".join(self._yaml_value(x) for x in v)
-            return f"[{items}]"
-        return str(v)
-
-    def dump(self, path2dir: str = "",
-             file_end: str = "_proccesing_settings") -> None:
-        """
-        Save configuration to a YAML file with section headers.
-
-        Parameters are grouped by processing function (baseline, smoothing,
-        alignment, peak picking) with ``#`` comment headers for readability.
-
-        Parameters
-        ----------
-        path2dir : str
-            Directory path or full file path. If a directory, the filename
-            is auto-generated using ``file_end``.
-        file_end : str
-            Suffix appended to the filename (before ``.yaml``).
-        """
-        if not path2dir.endswith(".yaml"):
-            if path2dir.endswith(file_end):
-                path = path2dir + ".yaml"
-            else:
-                path = path2dir + file_end + ".yaml"
-        else:
-            path = path2dir
-
-        # Collect all param → value (original values for AdaptiveParameter)
-        all_params: dict[str, Any] = {}
-
-        # Static Pydantic fields
-        for field_name in self.model_fields:
-            if field_name in ("baseline_params", "smoothing_params",
-                              "alignment_params", "peakpicking_params"):
-                continue
-            value = getattr(self, field_name)
-            if isinstance(value, AdaptiveParameter):
-                all_params[field_name] = value.original
-            else:
-                all_params[field_name] = value
-
-        # Dynamic baseline algorithm parameters
-        for k, v in self.baseline_params.algo_params.items():
-            all_params[k] = v
-
-        # __pydantic_extra__
-        extras = self.__pydantic_extra__ or {}
-        for k, v in extras.items():
-            if k not in all_params:
-                all_params[k] = v
-
-        # Build ordered param list: section params first, then rest
-        written: set[str] = set()
-
-        with open(path, "w", encoding="utf-8") as f:
-            for header, param_names in self._YAML_SECTIONS.items():
-                # Collect non-None params for this section
-                section_items: list[tuple[str, Any]] = []
-                for name in param_names:
-                    if name in all_params:
-                        section_items.append((name, all_params[name]))
-                        written.add(name)
-
-                # For baseline section, also include algo_params
-                if "baseline_algo" in param_names:
-                    for k, v in self.baseline_params.algo_params.items():
-                        if k not in written:
-                            section_items.append((k, v))
-                            written.add(k)
-
-                if not section_items:
-                    continue
-
-                f.write(f"{header}\n")
-                for name, value in section_items:
-                    f.write(f"{name}: {self._yaml_value(value)}\n")
-                f.write("\n")
-
-            # Remaining params (not in any section)
-            remaining = [(k, v) for k, v in all_params.items()
-                         if k not in written]
-            if remaining:
-                f.write("# Other\n")
-                for name, value in remaining:
-                    f.write(f"{name}: {self._yaml_value(value)}\n")
-
-    def save(self, path2dir: str = "",
-             file_end: str = "_proccesing_settings") -> None:
-        """Alias for :meth:`dump`."""
-        self.dump(path2dir, file_end)
+    
 
     # ------------------------------------------------------------------ #
     #  Serialisation support (pickle, multiprocessing)                    #
@@ -1296,3 +1256,618 @@ class Configs(BaseModel):
 
     def __str__(self) -> str:
         return self.__repr__()
+    
+class CustomConfigs():
+    def __init__(self,
+                configs_source: str | Callable | list | tuple | Pipeline,
+                **kwargs):
+        # 1. Load params from YAML or get default params from functions itself if configs_source is callable or list|tuple of callables
+        self.configs: dict[str, Any] = {}
+        if isinstance(configs_source, str):
+            if not configs_source.endswith(".yaml"):
+                configs_source += ".yaml"
+                    
+            if os.path.exists(configs_source):
+                with open(configs_source, "rb") as f:
+                    loaded = yaml.load(f, Loader=yaml.FullLoader)
+                    if loaded:
+                        self.configs.update(loaded)
+        
+        elif isinstance(configs_source, Pipeline):
+            # Extract functions from Pipeline's process/peakpick methods via AST
+            funcs: list[Callable] = []
+            if configs_source.process_function is not None:
+                funcs.extend(self._extract_called_functions(configs_source.process_function))
+            if configs_source.peakpick_function is not None:
+                funcs.extend(self._extract_called_functions(configs_source.peakpick_function))
+            self.configs = _inspect_defaults(funcs)
+            
+        else:
+            self.configs = _inspect_defaults(configs_source)
+
+        # 2. Override with kwargs
+        self.update(kwargs)
+
+    # ------------------------------------------------------------------ #
+    #  Name-based parameter access                                         #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _extract_params(bucket: dict[str, Any]) -> dict[str, Any]:
+        """Extract the relevant parameter dict from a method bucket.
+
+        For methods the bucket has ``params`` and ``cls_init_params`` keys.
+        This helper returns only the actual parameters:
+        - ``params`` for a method
+        - ``cls_init_params`` for a class
+        """
+        if "params" in bucket and "cls_init_params" in bucket:
+            return dict(bucket["params"])
+        return dict(bucket)
+
+    def __getitem__(self, key: str | tuple[str, ...]) -> dict[str, Any]:
+        """Retrieve parameters by function/method/class name.
+
+        Returns only the **actual parameters** — for methods this is
+        the ``params`` sub-dict, for classes the ``cls_init_params``.
+
+        Supports several lookup forms:
+
+        * ``cfg["msalign"]`` — plain function name
+        * ``cfg["snip"]`` — method name (warns if ambiguous)
+        * ``cfg["Baseline"]`` — class name → ``cls_init_params``
+        * ``cfg["Baseline.snip"]`` — ``ClassName.methodName`` → ``params``
+        * ``cfg[("Baseline", "snip")]`` — ``(ClassName, methodName)``
+        * ``cfg[("Baseline", "snip", "cls_init_params")]`` — explicit bucket
+
+        Parameters
+        ----------
+        key : str or tuple of str
+            Name or names identifying the target.
+
+        Returns
+        -------
+        dict
+            The parameter dictionary for the matched function/method.
+
+        Raises
+        ------
+        KeyError
+            If the name cannot be resolved to any known group.
+        """
+        methods: dict = self.configs.get("methods", {})
+        functions: dict = self.configs.get("functions", {})
+
+        # --- (ClassName, methodName[, bucket]) tuple ---
+        if isinstance(key, tuple):
+            if len(key) == 2:
+                cls_name, func_name = key
+                bucket = None
+            elif len(key) == 3:
+                cls_name, func_name, bucket = key
+            else:
+                raise KeyError(
+                    f"Tuple key must have 2 or 3 elements, got {len(key)}."
+                )
+            if cls_name not in methods:
+                raise KeyError(f"Unknown class '{cls_name}'.")
+            if func_name not in methods[cls_name]:
+                raise KeyError(
+                    f"Unknown method '{cls_name}.{func_name}'."
+                )
+            fb = methods[cls_name][func_name]
+            if bucket is not None:
+                if bucket not in fb:
+                    raise KeyError(
+                        f"'{cls_name}.{func_name}' has no '{bucket}' bucket."
+                    )
+                return dict(fb[bucket])
+            return self._extract_params(fb)
+
+        # --- "ClassName.methodName" string ---
+        if isinstance(key, str) and "." in key:
+            parts = key.split(".", 1)
+            cls_name, func_name = parts
+            if cls_name not in methods:
+                raise KeyError(f"Unknown class '{cls_name}'.")
+            if func_name not in methods[cls_name]:
+                raise KeyError(
+                    f"Unknown method '{cls_name}.{func_name}'."
+                )
+            return self._extract_params(methods[cls_name][func_name])
+
+        # --- Plain name ---
+        if isinstance(key, str):
+            name = key
+
+            # 1. Check plain functions
+            if name in functions:
+                return dict(functions[name])
+
+            # 2. Collect matching methods
+            method_matches: list[str] = []
+            for cls_name, func_dict in methods.items():
+                if name in func_dict:
+                    method_matches.append(f"{cls_name}.{name}")
+
+            # 3. Collect matching classes
+            class_matches: list[str] = []
+            if name in methods:
+                class_matches.append(name)
+
+            total = len(method_matches) + len(class_matches)
+
+            if total == 0:
+                raise KeyError(
+                    f"'{name}' not found in any known function, method, "
+                    f"or class."
+                )
+
+            if total == 1:
+                if method_matches:
+                    cls_name, func_name = method_matches[0].split(".")
+                    return self._extract_params(methods[cls_name][func_name])
+                # class match — return cls_init_params
+                cls_methods = methods[name]
+                if len(cls_methods) == 1:
+                    func_name = next(iter(cls_methods))
+                    fb = cls_methods[func_name]
+                    return dict(fb.get("cls_init_params", {}))
+                else:
+                    # Multiple methods in class — return all cls_init_params
+                    return {
+                        m: dict(d.get("cls_init_params", {}))
+                        for m, d in cls_methods.items()
+                    }
+
+            # Ambiguous — warn and raise
+            all_matches = method_matches + class_matches
+            loc_list = "\n  - ".join(all_matches)
+            raise KeyError(
+                f"'{name}' is ambiguous — found in {total} locations:\n"
+                f"  - {loc_list}\n"
+                f"Use a qualified name to disambiguate:\n"
+                f"    cfg[\"ClassName.methodName\"]\n"
+                f"    cfg[(\"ClassName\", \"methodName\")]"
+            )
+
+        raise KeyError(f"Unsupported key type: {type(key).__name__}.")
+
+    # ------------------------------------------------------------------ #
+    #  YAML serialisation                                                  #
+    # ------------------------------------------------------------------ #
+    def save(self, path2dir: str = "",
+             file_name: str = "Processing_settings") -> None:
+        """Alias for :meth:`dump`."""
+        self.dump(path2dir, file_name)
+
+    def dump(self, path2dir: str = "",
+             file_name: str = "Processing_settings") -> None:
+        """Save the full ``self.configs`` dictionary to a YAML file.
+
+        The output preserves the internal structure::
+
+            methods:
+              ClassName:
+                method_name:
+                  cls_init_params: {param: value, ...}
+                  params: {param: value, ...}
+            functions:
+              func_name: {param: value, ...}
+
+        Parameters
+        ----------
+        path2dir : str
+            Directory path or full file path.  If a directory, the filename
+            is auto-generated using ``file_end``.
+        file_end : str
+            Suffix appended to the filename (before ``.yaml``).
+        """
+        if not path2dir.endswith(".yaml"):
+            if path2dir.endswith(file_name):
+                path = path2dir + ".yaml"
+            else:
+                path = os.path.join(path2dir, file_name+ ".yaml") 
+        else:
+            path = path2dir
+
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(self.configs, f, default_flow_style=False, sort_keys=True)
+
+    @staticmethod
+    def _get_source(func: Callable) -> str | None:
+        """Get source code of *func*, with fallbacks for Jupyter/IPython."""
+        # 1. Standard inspect
+        try:
+            return inspect.getsource(func)
+        except (OSError, TypeError):
+            pass
+
+        # 2. dill fallback (works in many Jupyter environments)
+        try:
+            import dill
+            return dill.source.getsource(func)
+        except Exception:
+            pass
+
+        # 3. IPython fallback
+        try:
+            import IPython
+            ip = IPython.get_ipython()
+            if ip is not None:
+                return ip.object_inspect(func).source
+        except Exception:
+            pass
+
+        return None
+
+    @staticmethod
+    def _extract_called_functions(func: Callable) -> list[Callable | tuple[Callable, type]]:
+        """Parse the source of *func* with ``ast`` and return all callables
+        that are invoked inside it.
+
+        Supports:
+        - Plain name calls: ``msalign(data, ...)``
+        - Attribute calls on local variables: ``baseline.method(data, ...)``
+          (traces variable assignments back to class instantiation)
+
+        Python builtins (``enumerate``, ``len``, …) and names that cannot be
+        resolved are silently skipped.
+
+        Parameters
+        ----------
+        func : callable
+            An orchestrator function (e.g. ``Pipeline.process``).
+
+        Returns
+        -------
+        list of callable or (callable, type) tuple
+            Resolved callable objects for every name found in the AST.
+            When a method is resolved via its owning class, a
+            ``(method, class)`` tuple is returned so that the caller
+            can extract ``cls_init_params``.
+        """
+        import ast
+        import builtins
+
+        source = CustomConfigs._get_source(func)
+        if source is None:
+            warnings.warn(
+                f"Cannot get source of '{func.__name__}'. "
+                f"Pass the list of functions directly instead."
+            )
+            return []
+
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as e:
+            warnings.warn(
+                f"Syntax error while parsing {func.__name__}: {e}."
+            )
+            return []
+
+        # --- Build a variable → class/module map from simple assignments ---
+        # e.g.  baseline = Baseline(mz_scale)  →  {"baseline": "Baseline"}
+        var_to_class: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and isinstance(node.value, ast.Call):
+                        if isinstance(node.value.func, ast.Name):
+                            var_to_class[target.id] = node.value.func.id
+
+        # Pre-compute the set of Python builtins for fast lookup
+        builtin_names: set[str] = set(dir(builtins))
+        func_globals = getattr(func, "__globals__", {})
+
+        resolved: list[Callable | tuple[Callable, type]] = []
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+
+            if isinstance(node.func, ast.Name):
+                # Plain name call: msalign(data, ...)
+                name = node.func.id
+                if name in builtin_names:
+                    continue
+                obj = func_globals.get(name) or globals().get(name)
+                if obj is not None and callable(obj) and not inspect.isclass(obj):
+                    resolved.append(obj)
+
+            elif isinstance(node.func, ast.Attribute):
+                # Attribute call: obj.method(data, ...)
+                method_name = node.func.attr
+
+                # Case A: obj is a simple name — could be a variable, module, or class
+                if isinstance(node.func.value, ast.Name):
+                    obj_name = node.func.value.id
+
+                    # A1: obj is a local variable assigned from a class instantiation
+                    cls_name = var_to_class.get(obj_name)
+                    if cls_name is not None:
+                        cls_obj = func_globals.get(cls_name) or globals().get(cls_name)
+                        if cls_obj is not None and isinstance(cls_obj, type):
+                            method_obj = getattr(cls_obj, method_name, None)
+                            if method_obj is not None and callable(method_obj):
+                                resolved.append((method_obj, cls_obj))
+                                continue
+
+                    # A2: obj is a module (e.g. np.linspace)
+                    mod_obj = func_globals.get(obj_name) or globals().get(obj_name)
+                    if mod_obj is not None:
+                        method_obj = getattr(mod_obj, method_name, None)
+                        if method_obj is not None and callable(method_obj):
+                            resolved.append(method_obj)
+                            continue
+
+                    # A3: obj is a class (e.g. Baseline.asls)
+                    if mod_obj is not None and isinstance(mod_obj, type):
+                        method_obj = getattr(mod_obj, method_name, None)
+                        if method_obj is not None and callable(method_obj):
+                            resolved.append((method_obj, mod_obj))
+                            continue
+
+                # Case B: obj is a chained call — Baseline().asls(...)
+                elif isinstance(node.func.value, ast.Call):
+                    inner_call = node.func.value
+                    if isinstance(inner_call.func, ast.Name):
+                        cls_name = inner_call.func.id
+                        cls_obj = func_globals.get(cls_name) or globals().get(cls_name)
+                        if cls_obj is not None and isinstance(cls_obj, type):
+                            method_obj = getattr(cls_obj, method_name, None)
+                            if method_obj is not None and callable(method_obj):
+                                resolved.append((method_obj, cls_obj))
+                                continue
+
+        return resolved
+
+    def update(self,
+               params_source: str | dict[str, Any] | None = None,
+               **kwargs) -> None:
+        """Update configuration parameters.
+
+        Accepts parameters from a YAML file, a dictionary, or keyword
+        arguments.  When both *params_source* and **kwargs* are given,
+        a warning is issued and **kwargs* take priority.
+
+        Parameters
+        ----------
+        params_source : str or dict or None
+            Path to a ``.yaml`` file, or a dictionary with parameter
+            overrides.  The dictionary supports two modes:
+
+            * **Structured mode** — keys are callables (or their string
+              names), values are dicts of parameters for that specific
+              function::
+
+                  cfg.update({msalign: {"smooth_window": 0.15}})
+
+            * **Flat mode** — keys are plain parameter names, values
+              are new values.  Every known method/function group that
+              contains that parameter name is updated::
+
+                  cfg.update({"smooth_window": 0.15})
+
+        **kwargs
+            Additional parameter overrides applied on top of
+            *params_source*.
+        """
+        # --- Merge all sources into a single dict ---
+        func_params: dict[str, Any] = {}
+
+        if params_source is not None:
+            if isinstance(params_source, str):
+                path = params_source
+                if not path.endswith(".yaml"):
+                    path += ".yaml"
+                if os.path.exists(path):
+                    with open(path, "rb") as f:
+                        loaded = yaml.load(f, Loader=yaml.FullLoader)
+                        if loaded:
+                            func_params.update(loaded)
+                else:
+                    warnings.warn(
+                        f"YAML file '{path}' not found — skipping."
+                    )
+            elif isinstance(params_source, dict):
+                func_params.update(params_source)
+            else:
+                warnings.warn(
+                    f"params_source must be a str (YAML path) or dict, "
+                    f"got {type(params_source).__name__} — skipping."
+                )
+
+        if kwargs:
+            if params_source is not None:
+                warnings.warn(
+                    "Both params_source and **kwargs provided. "
+                    "**kwargs will override params_source on conflict."
+                )
+            func_params.update(kwargs)
+
+        if not func_params:
+            return
+
+        # --- Distribute to the correct function groups ---
+        nested_groups: dict[str, dict[str, Any]] = {}
+        flat_overrides: dict[str, Any] = {}
+
+        for key, value in func_params.items():
+            if key in ("cls_init_params", "params") and isinstance(value, dict):
+                nested_groups[key] = value
+            else:
+                flat_overrides[key] = value
+
+        structured_mode = False
+        for key in flat_overrides:
+            if callable(key):
+                structured_mode = True
+                break
+            if isinstance(key, str):
+                try:
+                    candidate = eval(key)
+                    if callable(candidate):
+                        structured_mode = True
+                        break
+                except (ValueError, NameError):
+                    continue
+
+        if structured_mode:
+            self._update_structured(flat_overrides)
+            return
+
+        self._update_flat(flat_overrides)
+
+        if nested_groups:
+            self._update_structured(nested_groups)
+
+    # ------------------------------------------------------------------ #
+    #  Internal helpers                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _update_structured(self,
+                           func_params: dict[str | Callable, dict[str, Any]]
+                           ) -> None:
+        """Apply overrides where keys are callables (or their string names)."""
+        methods = self.configs.setdefault("methods", {})
+        functions = self.configs.setdefault("functions", {})
+
+        for func_key, params in func_params.items():
+            # Resolve string to callable (SAFE — no eval)
+            if isinstance(func_key, str):
+                try:
+                    func = eval(func_key)
+                    if not callable(func):
+                        raise ValueError
+                except ValueError:
+                    warnings.warn(
+                        f"Skipping unknown function '{func_key}' — "
+                        f"cannot resolve to a callable."
+                    )
+                    continue
+            elif callable(func_key):
+                func = func_key
+            else:
+                warnings.warn(
+                    f"Skipping invalid key '{func_key!r}' — "
+                    f"expected a callable or a string name."
+                )
+                continue
+
+            # Method (bound to a class)
+            if hasattr(func, "__self__"):
+                cls = func.__self__.__class__
+                cls_name = cls.__name__
+                func_name = func.__name__
+
+                cls_bucket = methods.setdefault(cls_name, {})
+                func_bucket = cls_bucket.setdefault(func_name, {})
+
+                cls_init = params.pop("cls_init_params", None)
+                method_params = params.pop("params", params)
+
+                if cls_init is not None and isinstance(cls_init, dict):
+                    init_bucket = func_bucket.setdefault("cls_init_params", {})
+                    self._merge_params(init_bucket, cls_init, func_key)
+
+                param_bucket = func_bucket.setdefault("params", {})
+                self._merge_params(param_bucket, method_params, func_key)
+
+            # Plain function
+            else:
+                func_name = func.__name__
+                func_bucket = functions.setdefault(func_name, {})
+                self._merge_params(func_bucket, params, func_key)
+
+    def _update_flat(self, flat_overrides: dict[str, Any]) -> None:
+        """Search all known method/function groups and update matching keys.
+
+        When a parameter name is found in **multiple** functions, a warning
+        is issued listing all matches.  Use **structured mode** to target a
+        specific function unambiguously::
+
+            cfg.update({msalign: {"smooth_window": 0.15}})
+            cfg.update({"msalign": {"smooth_window": 0.15}})
+        """
+        methods = self.configs.get("methods", {})
+        functions = self.configs.get("functions", {})
+
+        for param_name, value in flat_overrides.items():
+            # Collect all locations where this parameter exists
+            locations: list[str] = []
+
+            for cls_name, func_dict in methods.items():
+                for func_name, func_bucket in func_dict.items():
+                    param_bucket = func_bucket.get("params")
+                    if param_bucket is not None and param_name in param_bucket:
+                        locations.append(f"{cls_name}.{func_name} (params)")
+                    init_bucket = func_bucket.get("cls_init_params")
+                    if init_bucket is not None and param_name in init_bucket:
+                        locations.append(f"{cls_name}.{func_name} (cls_init_params)")
+
+            for func_name, func_bucket in functions.items():
+                if param_name in func_bucket:
+                    locations.append(f"{func_name} (function)")
+
+            if not locations:
+                warnings.warn(
+                    f"Parameter '{param_name}' not found in any known "
+                    f"function group — ignoring."
+                )
+                continue
+
+            # Apply the value to all locations
+            for cls_name, func_dict in methods.items():
+                for func_name, func_bucket in func_dict.items():
+                    param_bucket = func_bucket.get("params")
+                    if param_bucket is not None and param_name in param_bucket:
+                        param_bucket[param_name] = value
+                    init_bucket = func_bucket.get("cls_init_params")
+                    if init_bucket is not None and param_name in init_bucket:
+                        init_bucket[param_name] = value
+
+            for func_name, func_bucket in functions.items():
+                if param_name in func_bucket:
+                    func_bucket[param_name] = value
+
+            # Warn about ambiguity
+            if len(locations) > 1:
+                loc_list = "\n  - ".join(locations)
+                warnings.warn(
+                    f"Parameter '{param_name}' was found in {len(locations)} locations:\n"
+                    f"  - {loc_list}\n"
+                    f"Value '{value}' has been applied to ALL of them.\n"
+                    f"To target a specific function, use structured mode:\n"
+                    f"    cfg.update({{func_object: {{'{param_name}': {value!r}}}}})\n"
+                    f"    cfg.update({{\"func_name\": {{'{param_name}': {value!r}}}}})"
+                )
+
+    @staticmethod
+    def _merge_params(target: dict[str, Any],
+                      source: dict[str, Any],
+                      func_key: str | Callable) -> None:
+        """Update *target* with *source*, warning about unknown keys."""
+        for key, value in source.items():
+            if key in target:
+                target[key] = value
+            else:
+                warnings.warn(
+                    f"Parameter '{key}' is not a known parameter of "
+                    f"'{func_key}' — ignoring."
+                )
+
+class Pipeline:
+    def __init__(self, 
+                 process_function: Callable | None = None, 
+                 peakpick_function: Callable | None = None,
+                 configs: Configs| dict = {}):
+        self.configs = configs
+        self.process_function = process_function
+        self.peakpick_function = peakpick_function
+    def process(self, DataSource):
+        pass
+
+    def peakpick(self, DataSource):
+        pass
+    

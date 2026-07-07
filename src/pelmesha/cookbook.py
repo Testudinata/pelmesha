@@ -23,7 +23,7 @@ from typing import Callable, Union, Tuple
 from pyteomics import mzxml
 import yaml
 from pybaselines import Baseline
-
+from abc import ABC, abstractmethod
 # TODO рефакторизация ужасно написанного класса Configs, особенно с костылём initialized:
 # Основная цель класса Configs: упрощение настроек конфигов простым указанием лишь части параметров, которые хочется поменять по сравнению с базовыми настройками,
 #  либо путём к уже готовому конфигу, автоматизация их валидации и подтягивании остальных параметров, упрощение пользования одновременно как nested словарём с разбитыми 
@@ -67,11 +67,6 @@ from pybaselines import Baseline
 # 6) Помимо обычного получения указанных значений параметров, есть дополнительная возможность вызова группы параметров, принадлежащих только к определённой группе/подгруппе 
 # 7) Запись в YAML по указанному пути
 
-def Configs():
-    """
-    Пидантик класс, со всеми параметрами, базовыми настройками
-    """
-    pass
 class Configs_legacy(dict): 
     initialized = False
 
@@ -548,3 +543,52 @@ def _baseliner_prep(baseliner,mz_scale):
         return getattr(Baseline(mz_scale),baseliner)
     else:
         return None
+
+class Pipeline():
+    '''WIP
+        Нужно сохранить все функции, которые будут использоваться в пайплайне
+        Настроить для каждой функции конфиги: создать автоматизированный конфиг класс, который вытащит базовые значения функции и перепишет часть их значений, 
+        которые пользователь хочет поменять (автоматически находит):
+        1) Создание экземпляра: передача используемых функций. Создаётся класс конфига. Во время инициализации - для метода сет_конфиг и ран_процесс - компанует динамический докстринг из описаний функций и 
+        дефолтных значений, чтобы по итогу при запуске или сете - можно было почитать подсказки по аргументам функций
+        
+        2) Set_конфиг: передача конфигов в виде плоского супа
+        3) Run_процесс: Передача DataSource и обработка данных (возможно создать два метода в зависимости от типа данных - контиунальных или неконтиунальных)
+        В конце сохраняет результат в hdf5, сохраняет конфиги
+        '''
+    def __init__(self, processing_functions_list, peakpicking_function):
+        
+        self.processing_functions_list = processing_functions_list
+        self.peakpicking_function = peakpicking_function
+        if peakpicking_function:
+            total_functions = processing_functions_list.append(peakpicking_function)
+        else:
+            total_functions = processing_functions_list
+        self.configs = Configs( total_functions )
+        self._resolve_docs()
+    
+    def set_configs(self, configs):
+        self.configs(configs)
+        self.configs = configs
+    @abstractmethod
+    def run_process(self, data_source, configs = None, free_cpu = 1):
+        '''
+        WIP На данный момент каждый кастомный пайплайн должен иметь свой run_process - оставляю это как затравку на будущее
+        Разбивает данные на батчи и по кускам в мультипроцессинге обрабатывает
+        Каждый процесс выполняет пайплайн из data_source поэтапно:
+        1) Выполняются функции из processing_functions_list
+        2) Записывает промежуточный результат, если пользователь это просит
+        3) Выполняется функция peakpicking_function, если функция задана
+        4) Записывает результат, если он есть
+        5) Сохраняет конфиги
+        '''
+        if configs:
+            self.configs(configs)
+        # TODO дописать универсальный базовый вариант
+    def _resolve_docs(self):
+        '''
+        WIP
+        Создает докстринг для set_configs и run_process по функциям из processing_functions_list и peakpicking_function
+        '''
+        pass
+        

@@ -1,5 +1,6 @@
 from pelmesha.configs import Configs
 from pelmesha.filling import DataSource
+from pelmesha.cookbook import BasePipeline
 import os
 import yaml
 class DataSet:
@@ -75,7 +76,7 @@ class DataSet:
     """
     _EXCLUDED_EXTENSIONS = {'ingredients.hdf5', 'specdata.hdf5', 'peaklists.hdf5'}
 
-    def __init__(self, sources = None, RamGb_limit_usage = 2):
+    def __init__(self, sources = None, RamGb_limit_usage = 2, CustomPipeline = None):
         self.sources = {}
         self.configs = {}
         self.RamGb_limit_usage = RamGb_limit_usage
@@ -83,7 +84,10 @@ class DataSet:
         self._reference_config = None
         self._reference_peaks = None
         self._merged_result = None
-
+        if CustomPipeline:
+            self.Pipeline = CustomPipeline
+        else: 
+            self.Pipeline = BasePipeline
         if sources is not None:
             self.add_sources(sources)
         print(f"DataSet is initialized. Current data samples:")
