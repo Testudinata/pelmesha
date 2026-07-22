@@ -6,7 +6,7 @@ import warnings
 
 import numpy as np
 
-from .utilities import check_xy, convert_peak_values_to_index, generate_function, shift, time_loop
+from .utensils import check_xy, convert_peak_values_to_index, generate_function, shift, time_loop
 
 METHODS = ["pchip", "zero", "slinear", "quadratic", "cubic", "linear"]
 LOGGER = logging.getLogger(__name__)

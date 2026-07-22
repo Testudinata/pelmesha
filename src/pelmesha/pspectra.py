@@ -58,10 +58,6 @@ from .align import Aligner
 from typing import List
 __all__ = ["msalign", "Aligner"]
 
-# TODO: улучшить msalign для неконтинуальных данных
-# Необходимо продумать:
-# 1) Моменты с использованием rescale, нужно ли переделывать шкалу m/z на uniform или оставлять как есть, или создавать иначе
-#  
 def msalign(
     x: np.ndarray,
     array: np.ndarray,
@@ -1636,7 +1632,7 @@ def int2procc_parbatched(sample_file_path,
             logger.log(f"Intensity dataset created succesfully")
             hdf5.create_dataset(sample + "/" + roi + "/mz", data = data_mz)
             logger.log(f"mz dataset created succesfully")
-            hdf5[sample][roi]["int"][sl,:] = data_int
+            hdf5[sample][roi][f"{dataset_name}"][sl,:] = data_int
     logger.log(f"Batch data is saved")
     logger.ended()
     print_queue.put(True)
@@ -2324,57 +2320,6 @@ def find_imzml_roots(paths):
     for key in path_dict.keys():
         path_dict[key]=list(set(path_dict[key]))
     return path_dict
-
-def smoothing(y, smooth_algo, smooth_window, smooth_cycles):
-    if len(y) == 0:
-        return np.array([])
-    
-    if smooth_window % 2 == 0:
-        smooth_window += 1
-    
-    if smooth_algo == 'MA':
-        return movaver(y, smooth_window, smooth_cycles)
-    elif smooth_algo == 'GA':
-        return gaussian_filter(y, smooth_window, smooth_cycles)
-    elif smooth_algo == 'SG':
-        return savgol(y, smooth_window, smooth_cycles)
-    else:
-        print("Smoothing algorithm not recognized")
-        return y
-
-def movaver(y, window, cycles):
-    if window < 3 or len(y) < window:
-        return y.copy()
-    
-    pad_size = window // 2
-    kernel = np.ones(window) / window
-    
-    for _ in range(cycles):
-        padded = np.pad(y, (pad_size, pad_size), mode='edge')
-        smoothed = np.convolve(padded, kernel, mode='valid')
-        y = smoothed
-    
-    return y
-
-def gaussian_filter(y, window, cycles, sigma=1.0):
-    from scipy.ndimage import gaussian_filter1d
-    
-    if window < 3 or len(y) < window:
-        return y.copy()
-    
-    for _ in range(cycles):
-        y = gaussian_filter1d(y, sigma=sigma, mode='mirror')
-    
-    return y
-
-def savgol(y, window, cycles, order=3):
-    if window <= order or len(y) < window:
-        return y.copy()
-    
-    for _ in range(cycles):
-        y = savgol_filter(y, window_length=window, polyorder=order, mode='mirror')
-    
-    return y
 
 def MAD(y,nan_policy):
     return sqrt(2*math.log(len(y)))*median_abs_deviation(y,nan_policy)/0.6745 # from matlab "mad" algorithm noise description (but this is for y_h to filter out noisy components in the first high-band decomposition of DCWT peak picking)

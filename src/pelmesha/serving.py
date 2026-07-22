@@ -1,8 +1,10 @@
 from pelmesha.configs import Configs
 from pelmesha.filling import DataSource
-from pelmesha.cookbook import BasePipeline
+from pelmesha.dough import Indexator
+import numpy as np
 import os
 import yaml
+from urllib.parse import quote
 class DataSet:
     # TODO:
     # INITIALIZATION, CONFIGS AND PATHS:
@@ -37,6 +39,7 @@ class DataSet:
     # (отличный от того, когда файл используется для обработки и анализа, а не референсный).
     # 11. Написать атрибут, со списком референсных пиков от референсного файла
     # 12. Если менять конфиг рефернсного атрибута, то список рефернсных пиков удаляется/None-ится.
+    # upd. 13. Добавить автоматическое создание базового пайплайна с базовыми настройками при инициализации. Если хочется изменить пайплайн - использовать метод setPipeline (написать)
     #New TODO:
     # 1. Добавить вместе с отображением ds, также какие-то данные о референсном/рефернсных датасетах.
     # 2. Добавить возможность разом удалить все уже обарботанные данные датасетов, добавленных в экземпляр DataSet. Обязательно наличие yes/no подтверждения (лучший вариант, не требующих новых зависимостей) 
@@ -76,18 +79,18 @@ class DataSet:
     """
     _EXCLUDED_EXTENSIONS = {'ingredients.hdf5', 'specdata.hdf5', 'peaklists.hdf5'}
 
-    def __init__(self, sources = None, RamGb_limit_usage = 2, CustomPipeline = None):
+    def __init__(self, 
+                 sources = None, 
+                 RamGb_limit_usage = 2):
         self.sources = {}
-        self.configs = {}
         self.RamGb_limit_usage = RamGb_limit_usage
         self._reference_file_path = None
-        self._reference_config = None
         self._reference_peaks = None
         self._merged_result = None
-        if CustomPipeline:
-            self.Pipeline = CustomPipeline
-        else: 
-            self.Pipeline = BasePipeline
+        # if CustomPipeline: TODO
+        #     self.Pipeline = CustomPipeline
+        # else: 
+        #     self.Pipeline = BasePipeline
         if sources is not None:
             self.add_sources(sources)
         print(f"DataSet is initialized. Current data samples:")
@@ -575,6 +578,28 @@ class DataSet:
     # ------------------------------------------------------------------ #
 
     @staticmethod
+    def _file_url(path):
+        """
+        Convert a local filesystem path to a ``file:///`` URL that opens
+        in the OS file manager (Explorer / Finder / Dolphin).
+
+        Uses ``urllib.parse.quote`` to safely encode spaces, Unicode, and
+        other special characters.
+
+        Parameters
+        ----------
+        path : str
+            Absolute filesystem path (e.g. ``C:\\Data\\my sample\\``).
+
+        Returns
+        -------
+        str
+            Properly encoded ``file:///`` URL.
+        """
+        # Normalise backslashes → forward slashes, then URL-encode
+        return "file:///" + quote(path.replace("\\", "/"), safe="/:")
+
+    @staticmethod
     def _escape_html(text):
         """
         Escape HTML special characters (&, <, >, ', ") in *text*.
@@ -634,14 +659,15 @@ class DataSet:
         rows = []
         for sample, source in self.sources.items():
             dir_path = os.path.dirname(source.file_path)
+            config_file = os.path.join(dir_path, 'processed_pelmesha', 'processing_recipe.yaml')
             row = [
                     sample,                                                                        #Sample name
-                    Indexator(np.vstack(source.roi_metadata['idxroi'].to_numpy())).count,          #Mass spectra number 
+                    Indexator(np.vstack(source.roi_metadata['idxroi'].to_numpy())).count,          #Mass spectra number
                     source.loader.dcont,                                                           #Continuous
                     os.path.exists(os.path.join(dir_path,'processed_pelmesha','peaklists.hdf5')),  #Peaklists
                     os.path.exists(os.path.join(dir_path,'processed_pelmesha','specdata.hdf5')),   #Processed mass spectra
                     dir_path,                                                                      #Directory
-                    os.path.exists(os.path.join(dir_path,'processed_pelmesha','processing_recipe.yaml')),   #Previous configs
+                    config_file if os.path.exists(config_file) else "—",                           #Previous configs
                     ]
             for i, cell in enumerate(row):
                 if isinstance(cell, bool):
@@ -768,14 +794,14 @@ class DataSet:
                     content = "—"
                 elif col_idx == path_idx:
                     content = (
-                        f'<a href="{self._escape_html(cell)}" '
+                        f'<a href="{self._file_url(cell)}" target="_blank" '
                         f'style="color: #1a73e8; text-decoration: none;">'
                         f'{self._escape_html(cell)}</a>'
                     )
                 elif col_idx == cfg_idx:
-                    if cell == "✓":
+                    if cell != "—":
                         content = (
-                            f'<a href="{self._escape_html(cell)}" '
+                            f'<a href="{self._file_url(cell)}" target="_blank" '
                             f'style="color: #1a73e8; text-decoration: none;">'
                             f'{"Open"}</a>'
                         )

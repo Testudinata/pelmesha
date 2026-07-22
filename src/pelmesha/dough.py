@@ -1,3 +1,4 @@
+'''various utility classes used by the library'''
 import numpy as np
 
 class LinkedList(np.ndarray):
@@ -202,3 +203,112 @@ class DatasetHeaders(list):
         return iter(self.headnames)
     def __contains__(self, item):
         return item in self.headnames
+
+class AdaptiveParameter():
+    def __init__(self, parameter, adaptation_rule):
+        self.parameter = parameter
+        self.adaptation_rule = adaptation_rule
+        self.implicit = None
+    def __index__(self):
+        return self.implicit if self.implicit is not None else self.parameter
+    def __repr__(self):
+        return f"{self.implicit}" if self.implicit is not None else f"{self.parameter}"
+
+    def __call__(self, *args, **kwargs):
+        if callable(self.implicit) and kwargs: # TODO: weakspot with kwargs
+            return self.implicit(*args, **kwargs)
+        if callable(self.adaptation_rule):
+            self.implicit = self.adaptation_rule(self.parameter, *args)
+        else:
+            self.implicit = self.parameter
+        return self.implicit
+    def __len__(self):
+        if callable(self.implicit): # TODO: weakspot for None len
+            return True
+        elif self.implicit is None:
+            return False
+        return len(self.implicit)
+    def __array__(self):
+        return np.array(self.implicit)
+    # Методы для работы с арифметическими операциями
+    def __add__(self, other):
+        return self.implicit + other
+    def __sub__(self, other):
+        return self.implicit  - other
+    def __mul__(self, other):
+        return self.implicit * other
+    def __truediv__(self, other):
+        return self.implicit / other
+    def __floordiv__(self, other):
+        return self.implicit // other
+    def __mod__(self, other):
+        return self.implicit % other
+    def __pow__(self, other):
+        return self.implicit ** other
+    # Методы для сравнения
+    def __eq__(self, other):
+        return self.implicit == other
+    def __ne__(self, other):
+        return self.implicit != other
+    def __lt__(self, other):
+        return self.implicit < other
+    def __le__(self, other):
+        return self.implicit <= other
+    def __gt__(self, other):
+        return self.implicit > other
+    def __ge__(self, other):
+        return self.implicit >= other
+    
+# Индексаторы
+class Indexator(np.ndarray):
+    """
+    A numpy ndarray subclass that represents a collection of index segments ``(start, end)``
+    and provides iteration over individual indices.
+
+    :param idxs: Index segments as a 2-D array of shape ``(n, 2)`` or a 1-D array of length 2.
+    :type idxs: np.ndarray or list
+
+    :raises ValueError: If a 1-D array does not have exactly 2 elements.
+    """
+    def __new__(cls, idxs):
+        if not isinstance(idxs, np.ndarray):
+            idxs = np.array(idxs, dtype=np.int64)
+        if len(idxs.shape) == 1:
+            if idxs.shape[0] != 2:
+                raise ValueError('Indexes must be a 2D array with shape (n, 2)')
+            idxs = idxs[np.newaxis, :]
+        return np.asarray(idxs, dtype=np.int64).view(cls)
+    def __getitem__(self, index):
+        res = super().__getitem__(index)
+        
+        # Если результат — двумерная матрица, то возвращаем её как Indexator
+        if isinstance(res, np.ndarray) and len(res.shape) == 2:
+            return res.view(Indexator)
+            
+        # Если это строка, столбец или скаляр (число), возвращаем как обычный NumPy-объект
+        return res.view(np.ndarray) if isinstance(res, np.ndarray) else res
+    @property
+    def count(self):
+        """
+        Return the total number of individual indices across all segments.
+
+        :return: Total count of indices.
+        :rtype: int
+        """
+        full_size = 0
+        for segment in self.view(np.ndarray):
+            full_size += np.diff(segment)
+        return full_size[0]
+    def __iter__(self):
+        for start, end in self.view(np.ndarray):
+            yield from range(start, end)
+class SliceIndexator(Indexator):
+    """
+    An :class:`Indexator` subclass that yields Python ``slice`` objects instead of individual indices.
+
+    :param idxs: Index segments as a 2-D array of shape ``(n, 2)`` or a 1-D array of length 2.
+    :type idxs: np.ndarray or list
+    """
+    def __iter__(self):
+        for start, end in self.view(np.ndarray):
+            yield slice(start, end)

@@ -20,6 +20,7 @@ from itertools import product, pairwise
 from functools import cached_property, partial
 import yaml
 from pybaselines import Baseline
+from pelmesha.dough import Indexator, SliceIndexator
 
 # Иерархия структур в наименованиях и в HDF5: 
 # 1.Slide - слайд или пара слайдов, на котором/ых находятся образцы (Sample) (= одному пайплану эксперимента (образцы->стекло->нанесение матрицы->измерение), это может быть корневой папкой, в которой сохраняются все измерения одного такого эксперимента) 
@@ -881,7 +882,7 @@ class DataSource:
     WIP Отработать подгрузку континуальных и неконтинуальных данных.
     """
 
-    def __init__(self, path, respec = False, RamGb_limit_usage = 2, config = None):
+    def __init__(self, path, respec = False, RamGb_limit_usage = 2):
         """
         Инициализация источника данных.
 
@@ -904,10 +905,29 @@ class DataSource:
             sample_name = folder_name + "_" + sample_name
         self.sample_name = sample_name
         self.loader = DataManager().get_loader(path)(path, respec = respec)
-        self.config = config or {}
+        
+        dirpath = os.path.split(path)[0]
+        processed_dirname = 'processed_pelmesha'
+        configs_name = f'{sample_name}_processing_recipe'
+        if os.path.exists(os.path.join(dirpath, processed_dirname, configs_name + '.yaml')):
+            self.configs_path = os.path.join(dirpath, processed_dirname, configs_name + '.yaml')
+        else:
+            self.configs_path = None
+
+        spectra_hdf5_name = sample_name + '_processed_spectra.hdf5'
+        if os.path.exists(os.path.join(dirpath, processed_dirname, spectra_hdf5_name)):
+            self.processed_spectra_path = os.path.join(dirpath, processed_dirname, spectra_hdf5_name)
+        else:
+            self.processed_spectra_path = None
+
+        peaklist_hdf5_name = sample_name + '_peaklists.hdf5'
+        if os.path.exists(os.path.join(dirpath, processed_dirname, peaklist_hdf5_name)):
+            self.peaklist_path = os.path.join(dirpath, processed_dirname, peaklist_hdf5_name)
+        else:
+            self.peaklist_path = None
     
         # Выгрузка метаданных
-        self.meta_file_path = os.path.join(os.path.dirname(self.file_path),'raw_pelmesha','ingredients.hdf5')
+        self.meta_file_path = os.path.join(os.path.dirname(self.file_path),'raw_pelmesha',sample_name + '_ingredients.hdf5')
         if not os.path.exists(self.meta_file_path):
             raise FileNotFoundError("Metadata file not found")
         with File(self.meta_file_path,"r") as hdf5:
@@ -924,6 +944,194 @@ class DataSource:
         path = os.path.join(os.path.dirname(self.file_path), 'processed_pelmesha', 'processing_recipe.yaml')
         return path if os.path.exists(path) else None
 
+    # ------------------------------------------------------------------ #
+    #  Representations (__repr__ / _repr_html_)                          #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _file_url(path):
+        """Convert a local path to a ``file:///`` URL (opens in OS file manager)."""
+        from urllib.parse import quote
+        return "file:///" + quote(path.replace("\\", "/"), safe="/:")
+
+    def _repr_html_(self):
+        """
+        HTML summary of the DataSource for Jupyter Notebook.
+
+        Shows file info, data type, and a table of ROIs with index ranges
+        and m/z ranges.  The file path is a clickable link to the parent
+        folder in the OS file manager.
+
+        Returns
+        -------
+        str
+            A valid HTML block.
+        """
+        dir_url = self._file_url(os.path.dirname(self.file_path))
+        dcont_str = "Yes" if self.loader.dcont else "No"
+        dtype_str = self.metadata.get("dtype_raw", ["—"]).iloc[0]
+
+        html = [
+            '<div style="font-family: sans-serif; font-size: 13px;">',
+            # --- header line: file name + folder link ----------------- #
+            f'  <b>DataSource:</b> {self._escape_html(self.sample_name)}',
+            f'  &nbsp;—&nbsp;'
+            f'<a href="{dir_url}" target="_blank" '
+            f'style="color: #1a73e8; text-decoration: none; font-size: 12px;">'
+            f'📁 {self._escape_html(os.path.dirname(self.file_path))}</a>',
+            # --- info table ------------------------------------------- #
+            '  <table style="border-collapse: collapse; margin-top: 6px; '
+            'font-size: 13px;">',
+            '    <thead>',
+            '      <tr>',
+            '        <th style="border: 1px solid #999; padding: 4px 8px; '
+            'background-color: #4a4a4a; color: #fff; text-align: left;">Property</th>',
+            '        <th style="border: 1px solid #999; padding: 4px 8px; '
+            'background-color: #4a4a4a; color: #fff; text-align: left;">Value</th>',
+            '      </tr>',
+            '    </thead>',
+            '    <tbody>',
+            f'      <tr style="background-color: #f9f9f9;">'
+            f'<td style="border: 1px solid #ccc; padding: 3px 8px;">Continuous</td>'
+            f'<td style="border: 1px solid #ccc; padding: 3px 8px;">{dcont_str}</td></tr>',
+            f'      <tr style="background-color: #ffffff;">'
+            f'<td style="border: 1px solid #ccc; padding: 3px 8px;">Raw dtype</td>'
+            f'<td style="border: 1px solid #ccc; padding: 3px 8px; font-family: monospace;">'
+            f'{self._escape_html(dtype_str)}</td></tr>',
+            '    </tbody>',
+            '  </table>',
+        ]
+
+        # --- ROI table ------------------------------------------------ #
+        if len(self.roi_metadata) > 0:
+            html.append(
+                '  <table style="border-collapse: collapse; margin-top: 8px; '
+                'font-size: 13px;">'
+            )
+            html.append('    <thead>')
+            html.append('      <tr>')
+            for col in ["ROI", "Index range", "m/z range"]:
+                html.append(
+                    f'        <th style="border: 1px solid #999; padding: 4px 8px; '
+                    f'background-color: #4a4a4a; color: #fff; text-align: left;">'
+                    f'{col}</th>'
+                )
+            html.append('      </tr>')
+            html.append('    </thead>')
+            html.append('    <tbody>')
+
+            for roi_idx, (roi_name, roi_row) in enumerate(self.roi_metadata.iterrows()):
+                bg = "#f9f9f9" if roi_idx % 2 == 0 else "#ffffff"
+                idxroi = roi_row.get("idxroi")
+                if isinstance(idxroi, np.ndarray):
+                    if idxroi.ndim == 2 and idxroi.shape[1] == 2:
+                        ranges = ", ".join(f"[{s}, {e})" for s, e in idxroi)
+                    else:
+                        ranges = str(idxroi)
+                else:
+                    ranges = str(idxroi)
+
+                mz_range = roi_row.get("mz_range")
+                if isinstance(mz_range, (tuple, list, np.ndarray)) and len(mz_range) == 2:
+                    mz_str = f"{mz_range[0]:.4f} – {mz_range[1]:.4f}"
+                else:
+                    mz_str = str(mz_range)
+
+                html.append(
+                    f'      <tr style="background-color: {bg};">'
+                    f'<td style="border: 1px solid #ccc; padding: 3px 8px; '
+                    f'font-family: monospace;">{self._escape_html(str(roi_name))}</td>'
+                    f'<td style="border: 1px solid #ccc; padding: 3px 8px; '
+                    f'font-family: monospace;">{self._escape_html(ranges)}</td>'
+                    f'<td style="border: 1px solid #ccc; padding: 3px 8px; '
+                    f'font-family: monospace;">{self._escape_html(mz_str)}</td>'
+                    f'</tr>'
+                )
+
+            html.append('    </tbody>')
+            html.append('  </table>')
+
+        html.append('</div>')
+        return "\n".join(html)
+
+    def __repr__(self):
+        """
+        Text summary of the DataSource for the console.
+
+        Shows file name, data type, raw dtype, and a table of ROIs with
+        index ranges and m/z ranges.
+
+        Returns
+        -------
+        str
+        """
+        dcont_str = "Yes" if self.loader.dcont else "No"
+        dtype_str = self.metadata.get("dtype_raw", ["—"]).iloc[0]
+
+        lines = [
+            f"DataSource: {self.sample_name}",
+            f"  File:      {self.file_path}",
+            f"  Continuous: {dcont_str}",
+            f"  Raw dtype: {dtype_str}",
+        ]
+
+        if len(self.roi_metadata) > 0:
+            # Build a mini text table for ROIs
+            roi_rows = []
+            for roi_name, roi_row in self.roi_metadata.iterrows():
+                idxroi = roi_row.get("idxroi")
+                if isinstance(idxroi, np.ndarray):
+                    if idxroi.ndim == 2 and idxroi.shape[1] == 2:
+                        ranges = ", ".join(f"[{s}, {e})" for s, e in idxroi)
+                    else:
+                        ranges = str(idxroi)
+                else:
+                    ranges = str(idxroi)
+
+                mz_range = roi_row.get("mz_range")
+                if isinstance(mz_range, (tuple, list, np.ndarray)) and len(mz_range) == 2:
+                    mz_str = f"{mz_range[0]:.4f} – {mz_range[1]:.4f}"
+                else:
+                    mz_str = str(mz_range)
+
+                roi_rows.append((str(roi_name), ranges, mz_str))
+
+            # Dynamic column widths
+            col_widths = [max(len(r[i]) for r in roi_rows) for i in range(3)]
+            col_widths[0] = max(col_widths[0], len("ROI"))
+            col_widths[1] = max(col_widths[1], len("Index range"))
+            col_widths[2] = max(col_widths[2], len("m/z range"))
+
+            hdr = (
+                f"  {'ROI'.ljust(col_widths[0])} | "
+                f"{'Index range'.ljust(col_widths[1])} | "
+                f"{'m/z range'.ljust(col_widths[2])}"
+            )
+            sep = "  " + "-" * (sum(col_widths) + 2 * len(col_widths) - 1)
+            lines.append("")
+            lines.append(hdr)
+            lines.append(sep)
+            for r in roi_rows:
+                lines.append(
+                    f"  {r[0].ljust(col_widths[0])} | "
+                    f"{r[1].ljust(col_widths[1])} | "
+                    f"{r[2].ljust(col_widths[2])}"
+                )
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _escape_html(text):
+        """Escape HTML special characters."""
+        table = {
+            "&": "&",
+            '"': '"',
+            "'": "'",
+            ">": ">",
+            "<": "<",
+        }
+        return "".join(table.get(c, c) for c in str(text))
+
     def _normalize_indices(self, idxs):
         if idxs is None:
             idxs = np.concatenate(self.roi_metadata['idxroi'].to_numpy())
@@ -938,9 +1146,87 @@ class DataSource:
         elif isinstance(idxs,(list, tuple)):
             idxs = np.array(idxs)
 
-        if len(idxs.shape) == 1:
+        if idxs.ndim == 1:
             idxs = idxs[np.newaxis, :]
         return idxs
+
+    def _get_local_roi_idx(self, idxs, roi_name = None):
+        """
+        Convert global spectrum indices to local indices within a ROI,
+        accounting for gaps (discontinuous segments) in the ROI.
+
+        For a ROI with segments ``[[0, 21158], [30000, 30100]]``,
+        global index ``30000`` maps to local index ``21158``
+        (the cumulative offset of the first segment).
+
+        Parameters
+        ----------
+        idxs : int or np.ndarray
+            Global index or array of index segments (shape ``(n, 2)``).
+            Accepts :class:`Indexator`, :class:`SliceIndexator`, ``int``,
+            ``list``, ``tuple``, or a raw :class:`np.ndarray`.
+        roi_name : str, optional
+            ROI name. If ``None``, the ROI is auto-detected from the
+            index range of *idxs*.
+
+        Returns
+        -------
+        int or np.ndarray
+            Local index (if *idxs* was an ``int``) or array of local index
+            segments with the same shape as the input.
+
+        Raises
+        ------
+        ValueError
+            If *roi_name* is ``None`` and the index does not belong to any ROI.
+        KeyError
+            If *roi_name* is not found in ``roi_metadata``.
+        """
+        # --- Resolve ROI segments -------------------------------------- #
+        if roi_name is None:
+            roi_name = self._get_roi(idxs)
+        roi_segments = self.roi_metadata.loc[roi_name, 'idxroi']
+        # roi_segments is an Indexator (ndarray subclass) with shape (M, 2)
+        roi_segments = np.asarray(roi_segments, dtype=np.int64)
+        if roi_segments.ndim == 1:
+            roi_segments = roi_segments[np.newaxis, :]
+
+        # --- Handle single int ----------------------------------------- #
+        if isinstance(idxs, (int, np.integer)):
+            # Find which ROI segment this index belongs to
+            for seg_i, (start, end) in enumerate(roi_segments):
+                if start <= idxs < end:
+                    # Cumulative local start of this segment
+                    local_start = np.sum(
+                        np.diff(roi_segments[:seg_i], axis=1)
+                    )
+                    return int(idxs - (start - local_start))
+            raise ValueError(
+                f"Global index {idxs} does not belong to ROI '{roi_name}' "
+                f"with segments {roi_segments.tolist()}"
+            )
+
+        # --- Normalise array input ------------------------------------- #
+        idxs = self._normalize_indices(idxs)  # -> (N, 2)
+
+        # --- Compute cumulative sizes and offsets per ROI segment ----- #
+        sizes = np.diff(roi_segments, axis=1).ravel()                # (M,)
+        cum_sizes = np.zeros(len(roi_segments), dtype=np.int64)
+        cum_sizes[1:] = np.cumsum(sizes[:-1])                        # (M,) — local start of each segment
+        # offset = global_start - local_start
+        offsets = roi_segments[:, 0] - cum_sizes                     # (M,)
+
+        # --- Map each batch segment to its ROI segment ---------------- #
+        starts = idxs[:, 0, None]                                    # (N, 1)
+        mask = (starts >= roi_segments[:, 0]) & \
+               (starts <  roi_segments[:, 1])                        # (N, M)
+        seg_idx = np.argmax(mask, axis=1)                            # (N,)
+
+        # --- Subtract the corresponding offset ------------------------ #
+        local_segments = idxs - offsets[seg_idx, None]
+
+        return local_segments
+
     def get_coords(self, idxs = None, extract = None):
         idxs = self._normalize_indices(idxs)
 
@@ -955,9 +1241,7 @@ class DataSource:
         coords['spectra_ind'] = coords['spectra_ind'].astype(np.int64)
         
         return coords.set_index('spectra_ind')
-    # WIP функция назначения датафрейму наименований roi (добавляется либо индекс к мультииндексу, либо отдельная колонка)
-    def _df_set_roi_by_index(self, ):
-        pass
+
     def _get_roi(self, idx): 
         """
         WIP
@@ -988,7 +1272,7 @@ class DataSource:
                 #     in_bool[roi_num] = True
                 #     continue
             if isinstance(idx, int):
-                if len(indexes.shape) ==1:
+                if indexes.ndim ==1:
                     indexes = indexes[np.newaxis, :]
                 if any(start <= idx < end for start, end in indexes):
                     return self.roi_metadata.index[roi_num]
@@ -1124,12 +1408,14 @@ class DataSource:
                     stats = stats.add(pd.DataFrame(np.vstack([np.concatenate(batch_mz, axis=0), np.concatenate(batch_intens, axis=0)]).T, columns=['mz','intensities']).groupby('mz')['intensities'].agg(['sum', 'count']), fill_value=0)
                 return stats.index, stats['sum']/stats['count']
             
-    def split_idxs(self, idxs = None, d = 2, cpu_count = 1):
+    def split_idxs(self, idxs = None, d = None, cpu_count = 1, Ramcap_GB = None):
         """
         Split spectrum indices into batches based on RAM cap configs.
 
         :param idxs: Index segments to split. If ``None``, uses all available spectra.
-        :param d: Data dimensionality factor (1 for continuous, 2 for discontinuous). Default ``2``.
+        :param d: Data dimensionality factor (1 for continuous, 2 for discontinuous), обозначает количество используемых в батчах векторов. 
+        Для континуальных данных d = 1, так как достаточно обрабатывать один вектор 'y' (интенсивность), а mz у всех общее и под него выделить память - единожды, 
+        но для неконтинуальных данных необходимо выделить память для mz и y, так как для каждого спектра свой mz. Default ``None`` - функция выберет автоматически.
         :param cpu_count: Number of CPU cores to account for in RAM budgeting. Default ``1``.
 
         :type idxs: np.ndarray or None
@@ -1139,17 +1425,25 @@ class DataSource:
         :return: List of index segment arrays, each fitting within the RAM budget.
         :rtype: list
         """
-        loader = self.loader
-        spectrum_sizes = loader.get_spectrum_sizes(idxs)
+        source = self.loader
+        spectrum_sizes = source.get_spectrum_sizes(idxs)
         idxs_batches = []
         remainder = []
-        Ram_usage_per_batch = self.Ramcap / (cpu_count * d)
+        if d is None:
+            if source.dcont:
+                d = 1
+            else:
+                d = 2
+        if Ramcap_GB is None:
+            Ramcap = self.Ramcap 
+        else:
+            Ramcap = Ramcap_GB * (1024 ** 3)
+        Ram_usage_per_batch = Ramcap/ (cpu_count * d)
+        
+        idxs = self._normalize_indices(idxs)
 
-        if idxs is None:
-            idxs = np.array((0,len(spectrum_sizes)))
-            idxs = idxs[np.newaxis,:]
         length_per_batch = Ram_usage_per_batch // np.dtype(self.metadata['dtype_raw'].iloc[0]).itemsize
-        if loader.dcont:
+        if source.dcont:
             chunk_size = length_per_batch // spectrum_sizes[0]
             remainder_count = 0
             
@@ -1218,69 +1512,15 @@ class DataSource:
         """
         self.loader.close()
 
-# Индексаторы
-class Indexator(np.ndarray):
-    """
-    A numpy ndarray subclass that represents a collection of index segments ``(start, end)``
-    and provides iteration over individual indices.
 
-    :param idxs: Index segments as a 2-D array of shape ``(n, 2)`` or a 1-D array of length 2.
-    :type idxs: np.ndarray or list
-
-    :raises ValueError: If a 1-D array does not have exactly 2 elements.
-    """
-    def __new__(cls, idxs):
-        if not isinstance(idxs, np.ndarray):
-            idxs = np.array(idxs, dtype=np.int64)
-        if len(idxs.shape) == 1:
-            if idxs.shape[0] != 2:
-                raise ValueError('Indexes must be a 2D array with shape (n, 2)')
-            idxs = idxs[np.newaxis, :]
-        return np.asarray(idxs, dtype=np.int64).view(cls)
-    def __getitem__(self, index):
-        res = super().__getitem__(index)
-        
-        # Если результат — двумерная матрица, то возвращаем её как Indexator
-        if isinstance(res, np.ndarray) and len(res.shape) == 2:
-            return res.view(Indexator)
-            
-        # Если это строка, столбец или скаляр (число), возвращаем как обычный NumPy-объект
-        return res.view(np.ndarray) if isinstance(res, np.ndarray) else res
-    @property
-    def count(self):
-        """
-        Return the total number of individual indices across all segments.
-
-        :return: Total count of indices.
-        :rtype: int
-        """
-        full_size = 0
-        for segment in self.view(np.ndarray):
-            full_size += np.diff(segment)
-        return full_size[0]
-    def __iter__(self):
-        for start, end in self.view(np.ndarray):
-            yield from range(start, end)
-class SliceIndexator(Indexator):
-    """
-    An :class:`Indexator` subclass that yields Python ``slice`` objects instead of individual indices.
-
-    :param idxs: Index segments as a 2-D array of shape ``(n, 2)`` or a 1-D array of length 2.
-    :type idxs: np.ndarray or list
-    """
-    def __iter__(self):
-        for start, end in self.view(np.ndarray):
-            yield slice(start, end)
-
-class BaseLoader(ABC):  #TODO необходимо провести везде переиндексацию idxroi. Теперь она будет np.ndarray в формате двух колонок, где первая - начало слайса, а вторая - конец.
-# Если индексация по одному числу, то первое само число, а второе само число+1 
+class BaseLoader(ABC): #TODO @задачка: Базовый абстрактный класс
     """
     Базовый класс для всех подгрузчиков данных с абстрактными и общими методами.
     Ни один конкретный подгрузчик не запустится, если в нем не будут определены ряд абстрактных методов, индивидуальные для них.
     """
     def create_metafile(self, draw = True, respec = False, chunk_Mbsize = 10):
         """
-        Create or update the metadata HDF5 file (``ingredients.hdf5``) for the data source.
+        Create or update the metadata HDF5 file (``<sample_name>_ingredients.hdf5``) for the data source.
 
         Stores metadata attributes, ROI metadata, and coordinate data (xy, z or another) in a structured
         HDF5 file under the ``raw_pelmesha`` subdirectory.
@@ -1292,17 +1532,24 @@ class BaseLoader(ABC):  #TODO необходимо провести везде �
         :type draw: bool
         :type respec: bool
         :type chunk_Mbsize: int
-        """ # 04062026 Было решено, что хранение метаданных с координатами в hdf5 более удобное по архитектуре, возможностям и скорости, 
-        file_path = self.file_path                                             # пусть и будет занимать больше места на жёстком диске.
+        """ 
+        file_path = self.file_path                                             
         base_folder_path = os.path.dirname(file_path)
         meta_file_folder = os.path.join(base_folder_path,'raw_pelmesha')
-        meta_file_path = os.path.join(base_folder_path,'raw_pelmesha','ingredients.hdf5')
+        sample_name = os.path.splitext(os.path.basename(file_path))[0]
+        folder_name = os.path.basename(os.path.dirname(file_path))
+        if folder_name != sample_name:
+            sample_name = folder_name + "_" + sample_name
+
+        meta_file_name = sample_name +'_ingredients.hdf5'
+        meta_file_path = os.path.join(base_folder_path,'raw_pelmesha', meta_file_name)
         meta_file_exist = os.path.exists(meta_file_path)
         if not os.path.exists(meta_file_folder):
             os.makedirs(meta_file_folder)
         if (not meta_file_exist) or respec:
             chunk_Mbsize = chunk_Mbsize * (1024**2)
-            metadata, roi_metadata, coords = self.get_metadata(draw)
+            metadata, roi_metadata, coords = self.get_metadata(draw) # TODO @задачка: Создать в новом классе выгрузки данных из cdf метод get_metadata, чтобы сработал этот метод. 
+                                                                        #             Отмечу: coords в cdf - это RT, а roi - это по планам каналы 0-3 (где разные масс анализаторы и моды) 
 
             del_hdf5(meta_file_path) # del hdf5 if it exists
             
@@ -1339,14 +1586,10 @@ class BaseLoader(ABC):  #TODO необходимо провести везде �
         if self.dcont:
             mz = self.mz_scale_cont
             return (mz[0], mz[-1])
-        # if len(idxs.shape) == 1:
-        #     idxs = [idxs]
+        
         min_mz = np.inf
         max_mz = -np.inf
-        # for idxs_portion in idxs:
-        #     for mz in self.get_mz_stream(range(*idxs_portion)):
-                # min_mz = min(min_mz, mz[0])
-                # max_mz = max(max_mz, mz[-1])
+
         for mz in self.get_mz_stream(idxs):
             min_mz = min(min_mz, mz[0])
             max_mz = max(max_mz, mz[-1])
@@ -1444,7 +1687,7 @@ class BaseLoader(ABC):  #TODO необходимо провести везде �
         pass
 
 ###################### IMZML
-class loader_imzml(BaseLoader): # TODO написать класс для загрузки данных из imzML и также их метадату
+class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузки как пример
     """
     Loader for imzML mass spectrometry imaging data.
 
@@ -1532,11 +1775,10 @@ class loader_imzml(BaseLoader): # TODO написать класс для заг
                 continue 
             if roi_num != current_roi:
                 if current_roi is not None:
-                    roi_idx[current_roi] = Indexator([start_idx, idx])
-                current_roi = roi_num
-                start_idx = idx
+                    roi_idx[current_roi] = Indexator([start_idx, idx]) #TODO @задачка: Indexator - особый класс, упрощающий индексацию и хранение индексов. Просто пишу краткое пояснение к нему
+                current_roi = roi_num                                   #  Теперь нужно только знать начальный и конечный индекс. Класс может считать кол-во индексов в сложных случаях (когда много разрывов). 
+                start_idx = idx                                         #  Класс используется часто для удобного итерирования. У него есть "родственник" SliceIndexator: Тоже самое, но итерирует слайсами  
                 roi_list.append(roi_num)
-            # poslog_specdata[idx]=(roi_num, x, y, z)
             poslog_specdata[idx]=(x, y, z)
             idx += 1
         
@@ -1563,7 +1805,7 @@ class loader_imzml(BaseLoader): # TODO написать класс для заг
     def get_spectrum(self, idx):
         return self.source.getspectrum(idx)
     
-    def get_mz(self, idx):
+    def get_mz(self, idx = None):
         if self.dcont:
             return self.mz_scale_cont
         else:
@@ -1659,13 +1901,9 @@ class loader_hdf5(BaseLoader): #TODO: Написать
             self.sample_metadata = {}
 
 class loader_mzxml(BaseLoader): # TODO дописать.
-    def __init__(self, path, dtypeconv):
-        self.source = source
-        self.dtypeconv = dtypeconv
-class loader_cdf(BaseLoader): # TODO дописать.
-    def __init__(self, source, dtypeconv):
-        self.source = source
-        self.dtypeconv = dtypeconv
+    pass
+class loader_cdf(BaseLoader): # TODO дописать. #TODO @задачка: Собственно сам класс, который надо написать
+    pass
 
 class DataManager():
     """
@@ -1781,3 +2019,4 @@ def _batch_mz_discret_props_legacy(source, idxs):
 #   б) Разобраться в том, делать ли параметры динамическими, в зависимости от функций в пайплайне и/или фиксированными. А если возможно сделать так, чтобы выдавались подсказки от функции заранее, то будет вообще огонь
 # 3) Дополняет незаданные параметры "базовыми" откуда-то (файл или заранее прописанные)
 # Duplicate classes removed — use from pelmesha.configs import Configs, AdaptiveParameter, DatasetHeaders
+

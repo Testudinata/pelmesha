@@ -1,12 +1,14 @@
-"""Various utilities used by the library"""
+"""Various utilities functions and constants used by the library"""
 import time
 import warnings
-from typing import List, Union
+from typing import List, Union, Callable
 import pandas as pd
 from itertools import pairwise
 import numpy as np
 import scipy.interpolate as interpolate
-
+from tqdm.auto import tqdm
+from pelmesha.dough import Indexator, SliceIndexator
+from pelmesha.filling import DataSource
 FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2)) 
 
 def format_time(value: float) -> str:
@@ -339,3 +341,36 @@ def split_pdtable_by_peaks_gap(pd_table, split_peaks_min = 25, split_mz_min = 10
             slc = slice(*border_idx)
             batched_pd_table[n_batch] = (mz[slc], KD_bandwidth[slc])
     return batched_pd_table
+
+
+#NEW 08072026
+
+### Utility functions for multiprocessing
+class Sentinel: 
+    """Утилитный класс-заглушка для прекращения цикла while в функции printer и настройки атрибутов"""
+    pass
+def printer(print_queue):
+    '''
+    Вспомогательная функция используется для отображения сообщений в дочерних процессах, включая отображение прогресса с помощью tqdm.
+    Еcли с помощью put на входе str, то печатает сообщение, если на входе число первый раз, то создаёт tqdm объект и отображает прогресс, если повторно число - то удаляет tqdm объект, если True, то отображает продвижение процесса.
+    :param print_queue: is a multiproccesing.Manager.Queue() proxy object
+    :type print_queue: multiproccesing.Manager.Queue() proxy object
+    '''
+    while True:
+        msg = print_queue.get()
+        if isinstance(msg, Sentinel):
+            try:
+                pbar.close()
+            except:
+                pass
+            break
+        elif isinstance(msg,str):
+            print(msg, flush=True)
+        elif msg is True:
+            pbar.update(1)
+        else:
+            try:
+                pbar.close()
+                del pbar
+            except:
+                pbar = tqdm(total = msg,desc="Batches progress",smoothing = 0.005)

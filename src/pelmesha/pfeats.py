@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from itertools import product
 from pelmesha.filling import specdata_Load, IMGfeats_concat, feat2DF, peakl2DF, logger, hdf5_metadata, del_hdf5
-from pelmesha.utilities import split_pdtable_by_peaks_gap
+from pelmesha.utensils import split_pdtable_by_peaks_gap
 import matplotlib.pyplot as plt
 from h5py import File
 from KDEpy import FFTKDE, TreeKDE

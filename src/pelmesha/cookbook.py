@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
-from pelmesha.filling import hdf5_Load, specdata_Load, hdf5_close, create_file_path, del_datasets_hdf5, del_hdf5, repack_hdf5, hdf5_metadata, _hdf5_get_metadata, find_paths, logger, source_search, get_mean_spectrum
+from pelmesha.dough import AdaptiveParameter, DatasetHeaders
+from pelmesha.filling import hdf5_Load, specdata_Load, hdf5_close, create_file_path, del_datasets_hdf5, del_hdf5, repack_hdf5, hdf5_metadata, _hdf5_get_metadata, find_paths, logger, source_search
 from itertools import product, zip_longest, batched
 from threading import Thread
 from scipy.stats import median_abs_deviation
@@ -435,96 +436,7 @@ def _set_local_proc_configs(DataProc_configs, data_mz): #TODO: сделать а
     local_configs['baseliner'](data_mz)
     return local_configs
 
-class AdaptiveParameter():
-    def __init__(self, parameter, adaptation_rule):
-        self.parameter = parameter
-        self.adaptation_rule = adaptation_rule
-        self.implicit = None
-    def __index__(self):
-        return self.implicit if self.implicit is not None else self.parameter
-    def __repr__(self):
-        return f"{self.implicit}" if self.implicit is not None else f"{self.parameter}"
 
-    def __call__(self, *args, **kwargs):
-        if callable(self.implicit) and kwargs: # TODO: weakspot with kwargs
-            return self.implicit(*args, **kwargs)
-        if callable(self.adaptation_rule):
-            self.implicit = self.adaptation_rule(self.parameter, *args)
-        else:
-            self.implicit = self.parameter
-        return self.implicit
-    def __len__(self):
-        if callable(self.implicit): # TODO: weakspot for None len
-            return True
-        elif self.implicit is None:
-            return False
-        return len(self.implicit)
-    def __array__(self):
-        return np.array(self.implicit)
-    # Методы для работы с арифметическими операциями
-    def __add__(self, other):
-        return self.implicit + other
-    def __sub__(self, other):
-        return self.implicit  - other
-    def __mul__(self, other):
-        return self.implicit * other
-    def __truediv__(self, other):
-        return self.implicit / other
-    def __floordiv__(self, other):
-        return self.implicit // other
-    def __mod__(self, other):
-        return self.implicit % other
-    def __pow__(self, other):
-        return self.implicit ** other
-    # Методы для сравнения
-    def __eq__(self, other):
-        return self.implicit == other
-    def __ne__(self, other):
-        return self.implicit != other
-    def __lt__(self, other):
-        return self.implicit < other
-    def __le__(self, other):
-        return self.implicit <= other
-    def __gt__(self, other):
-        return self.implicit > other
-    def __ge__(self, other):
-        return self.implicit >= other
-    
-class DatasetHeaders(list):
-    def __init__(self,attrs):
-        self.indexes = {}
-        self.headnames = [0]*len(attrs)
-        for index, name in enumerate(attrs):
-            self.headnames[index]=name
-            self.indexes[name]=index
-        super().__init__(self.headnames)
-    # Getting indices by passing a list of column names or getting a list of column names by passing a list of indices
-    def __call__(self,index_value): 
-
-        if isinstance(index_value,list):
-            list_ind = [0]*len(self.headnames)
-            if isinstance(index_value[0],int):
-                for i,ind in enumerate(index_value):
-                    list_ind[i] = self.headnames[ind]
-            elif isinstance(index_value[0],str):
-                for i,ind in enumerate(index_value):
-                    list_ind[i]=self.indexes[ind]
-            return list_ind
-        
-        else:
-            if isinstance(index_value,int):
-                return self.headnames[index_value]
-            elif isinstance(index_value,str):
-                return self.indexes[index_value]
-    # Code below for using class as list        
-    def __len__(self):
-        return len(self.headnames)
-    def __getitem__(self,index):
-        return self.headnames[index]
-    def __iter__(self):
-        return iter(self.headnames)
-    def __contains__(self, item):
-        return item in self.headnames
     
 def _shift_range_to_dots(window_shift_mz, dots_distance):
     if window_shift_mz:
