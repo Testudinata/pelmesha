@@ -904,8 +904,14 @@ class DataSource:
         if folder_name != sample_name:
             sample_name = folder_name + "_" + sample_name
         self.sample_name = sample_name
-        self.loader = DataManager().get_loader(path)(path, respec = respec)
-        
+        self.loader = DataManager().get_loader(path)(path, respec = respec) # Composition pattern
+        for attr_name in dir(self.loader):
+            if not attr_name.startswith('_'): # Игнорируем приватные методы
+                attr = getattr(self.loader, attr_name)
+                if callable(attr):
+                    setattr(self, attr_name, attr)
+
+
         dirpath = os.path.split(path)[0]
         processed_dirname = 'processed_pelmesha'
         configs_name = f'{sample_name}_processing_recipe'
@@ -938,12 +944,9 @@ class DataSource:
                 columns_list.update(hdf5[f'metadata/{roi}'].attrs.keys())
                 metadata_dict[roi] = dict(hdf5[f'metadata/{roi}'].attrs.items())
             self.roi_metadata = pd.DataFrame.from_dict(metadata_dict, orient='index', columns=list(columns_list))
-
-    @property
-    def config_path(self):
-        path = os.path.join(os.path.dirname(self.file_path), 'processed_pelmesha', 'processing_recipe.yaml')
-        return path if os.path.exists(path) else None
-
+    
+    def __getattr__(self, name):
+        return getattr(self.loader, name)
     # ------------------------------------------------------------------ #
     #  Representations (__repr__ / _repr_html_)                          #
     # ------------------------------------------------------------------ #
@@ -968,7 +971,7 @@ class DataSource:
             A valid HTML block.
         """
         dir_url = self._file_url(os.path.dirname(self.file_path))
-        dcont_str = "Yes" if self.loader.dcont else "No"
+        dcont_str = "Yes" if self.dcont else "No"
         dtype_str = self.metadata.get("dtype_raw", ["—"]).iloc[0]
 
         html = [
@@ -1294,7 +1297,6 @@ class DataSource:
         :return: Tuple ``(mz_scale, mean_intensity)`` where both are 1-D numpy arrays.
         :rtype: tuple
         """
-        source = self.loader
         if isinstance(idxs, str):
             idxs = self.roi_metadata.loc[idxs, 'idxroi'] # TODO: Проверить работоспособность
         elif idxs is None:
@@ -1307,13 +1309,13 @@ class DataSource:
                 )
         if mz_range is not None:
             mz_min, mz_max = mz_range
-        if source.dcont:
+        if self.dcont:
             d = 1
         else:
             d = 2
 
-        if source.dcont:
-            mz = source.mz_scale_cont
+        if self.dcont:
+            mz = self.mz_scale_cont
 
             if mz_range is not None:
                 start_idx = np.searchsorted(mz, mz_min, side='left')
@@ -1326,7 +1328,7 @@ class DataSource:
             stats_count = np.zeros(len(mz))
             indexes = Indexator(idxs)
 
-            for intens in source.get_intensities_stream(indexes):
+            for intens in self.get_intensities_stream(indexes):
                 stats_sum += intens[mz_range_slice]
             stats_count = indexes.count()
             # plt.plot(mz, stats_sum/stats_count)
@@ -1341,7 +1343,7 @@ class DataSource:
 
             batch_mz = []
             batch_intens = []
-            for mz, intens in source.get_batch(Indexator(pilot_batch)):
+            for mz, intens in self.get_batch(Indexator(pilot_batch)):
                 if mz_range is not None:
                     start_idx = np.searchsorted(mz, mz_min, side='left')
                     stop_idx = np.searchsorted(mz, mz_max, side='right')
@@ -1375,7 +1377,7 @@ class DataSource:
                 del batch_mz, batch_intens
 
                 for idxs_batch in idxs_batches:
-                    for mz_loc, intens_loc in source.get_batch(Indexator(idxs_batch)):
+                    for mz_loc, intens_loc in self.get_batch(Indexator(idxs_batch)):
                         if mz_range is not None:
                             start_idx = np.searchsorted(mz_loc, mz_min, side='left')
                             stop_idx = np.searchsorted(mz_loc, mz_max, side='right')
@@ -1396,7 +1398,7 @@ class DataSource:
                 batch_mz = []
                 batch_intens = []
                 for idxs_batch in idxs_batches:
-                    for mz, intens in source.get_batch(Indexator(idxs_batch)):
+                    for mz, intens in self.get_batch(Indexator(idxs_batch)):
                         if mz_range is not None:
                             start_idx = np.searchsorted(mz, mz_min, side='left')
                             stop_idx = np.searchsorted(mz, mz_max, side='right')
@@ -1425,12 +1427,11 @@ class DataSource:
         :return: List of index segment arrays, each fitting within the RAM budget.
         :rtype: list
         """
-        source = self.loader
-        spectrum_sizes = source.get_spectrum_sizes(idxs)
+        spectrum_sizes = self.get_spectrum_sizes(idxs)
         idxs_batches = []
         remainder = []
         if d is None:
-            if source.dcont:
+            if self.dcont:
                 d = 1
             else:
                 d = 2
@@ -1443,7 +1444,7 @@ class DataSource:
         idxs = self._normalize_indices(idxs)
 
         length_per_batch = Ram_usage_per_batch // np.dtype(self.metadata['dtype_raw'].iloc[0]).itemsize
-        if source.dcont:
+        if self.dcont:
             chunk_size = length_per_batch // spectrum_sizes[0]
             remainder_count = 0
             
@@ -1505,7 +1506,15 @@ class DataSource:
                     idxs_batches.append(np.array([idx_start, idx + 1]))
 
         return idxs_batches
-
+    @property
+    def config_path(self):
+        path = os.path.join(os.path.dirname(self.file_path), 'processed_pelmesha', 'processing_recipe.yaml')
+        return path if os.path.exists(path) else None
+    @property
+    def dcont(self):
+        """get dcont from loader"""
+        return self.loader.dcont
+    @property
     def close(self):
         """
         Close the data source.
@@ -2009,14 +2018,4 @@ def _batch_mz_discret_props_legacy(source, idxs):
         min_discret_batch = min(min_discret_batch, np.diff(mz).min())
     mz_batch = np.unique(np.hstack(mzs))
     return mz_batch, min_discret_batch
-
-
-# TODO рефакторизация ужасно написанного класса Configs, особенно с костылём initialized:
-# 1) Инициализация:
-#   а) Создание датакласса с полями согласно тех параметров, которые есть у используемой функции
-# 2) Превращает плоский суп параметров и распределяет их по функциям:
-#   а) Необходимо продумать чёткое разделение имён параметров, чтобы не пересекались
-#   б) Разобраться в том, делать ли параметры динамическими, в зависимости от функций в пайплайне и/или фиксированными. А если возможно сделать так, чтобы выдавались подсказки от функции заранее, то будет вообще огонь
-# 3) Дополняет незаданные параметры "базовыми" откуда-то (файл или заранее прописанные)
-# Duplicate classes removed — use from pelmesha.configs import Configs, AdaptiveParameter, DatasetHeaders
 

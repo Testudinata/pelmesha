@@ -11,19 +11,18 @@ if TYPE_CHECKING:
 ###########################################
 #   Base pipeline functions               #
 ###########################################
-# TODO вписать логер
 def preprocess_configuration_base(
     datasource: "DataSource",
     roi,
     rmeta,
     configs: "Configs | PipelineConfigurator"):
     
-    
+    preprocess_configs = configs.get_step_configs("preprocess")
     mz_range = datasource.roi_metadata.loc[roi,'mz_range']
     
     internal_configs = {}
     internal_configs['process'] = {}
-    resampled_mz = resample_mz_scale(*mz_range, **configs['resample_mz_scale'])
+    resampled_mz = resample_mz_scale(*mz_range, **preprocess_configs['resample_mz_scale'])
     internal_configs['process']['resampled_mz'] = resampled_mz
     
     
@@ -43,28 +42,28 @@ def preprocess_configuration_base(
     internal_configs['peakpick'] = {}
 
     # Configure headers conditionally based on processing flags 
-    if configs["SNR_threshold"] and configs["Calc_peak_area"]:
-        configs["headers"] = DatasetHeaders([  
+    if configs['peakpicker']["SNR_threshold"] and configs['peakpicker']["Calc_peak_area"]:
+        configs.update({"headers": DatasetHeaders([  
                                         "spectra_ind", "mz", "Intensity", "Area", "SNR",  
                                         "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"  
-                                    ])
-    elif configs["SNR_threshold"]:
-        configs["headers"] = DatasetHeaders([  
+                                    ])})
+    elif configs['peakpicker']["SNR_threshold"]:
+        configs.update({"headers": DatasetHeaders([  
                                         "spectra_ind", "mz", "Intensity", "SNR",  
                                         "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"  
-                                    ])
-    elif configs["Calc_peak_area"]:
-        configs["headers"] = DatasetHeaders([  
+                                    ])})
+    elif configs['peakpicker']["Calc_peak_area"]:
+        configs.update({"headers": DatasetHeaders([  
                                         "spectra_ind", "mz", "Intensity", "Area",  
                                         "PextL", "PextR", "FWHML", "FWHMR"
-                                    ])
+                                    ])})
     else: 
-        configs["headers"] = DatasetHeaders([  
+        configs.update({"headers": DatasetHeaders([  
                                         "spectra_ind", "mz", "Intensity",  
                                         "PextL", "PextR", "FWHML", "FWHMR"
-                                    ])
+                                    ])})
 
-    return internal_configs
+    return resampled_mz, internal_configs
 
 
 def process_spectra_base(
@@ -77,7 +76,7 @@ def process_spectra_base(
     mz - всегда вектор
     intensity - Если данные континуальны - матрица, если нет - вектор
     """
-    
+    # TODO внести add_zero_points
     resampled_mz = internal_configs.get('resampled_mz', None)
     baseline_algo = internal_configs.get('baseline_algo', None)
 

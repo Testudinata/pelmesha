@@ -1,9 +1,10 @@
-from pelmesha.configs import Configs
+from pelmesha.configs import Configs, Pipeline, PreparedDataSource
 from pelmesha.filling import DataSource
 from pelmesha.dough import Indexator
 import numpy as np
 import os
 import yaml
+import warnings
 from urllib.parse import quote
 class DataSet:
     # TODO:
@@ -87,10 +88,7 @@ class DataSet:
         self._reference_file_path = None
         self._reference_peaks = None
         self._merged_result = None
-        # if CustomPipeline: TODO
-        #     self.Pipeline = CustomPipeline
-        # else: 
-        #     self.Pipeline = BasePipeline
+
         if sources is not None:
             self.add_sources(sources)
         print(f"DataSet is initialized. Current data samples:")
@@ -149,18 +147,17 @@ class DataSet:
         if folder_name != sample_name:
             sample_name = folder_name + "_" + sample_name
 
-        if sample_name in self.sources:
+        source = DataSource(path, RamGb_limit_usage = self.RamGb_limit_usage)
+        if any(ds.file_path == source.file_path for ds in self.sources.values()):
+            warnings.warn(f"File '{source.file_path}' has already been added to DataSet. Source re-adding with configs")
+        elif sample_name in self.sources:
             raise ValueError(
                 f"Sample '{sample_name}' (from {path}) already exists in DataSet. "
-                f"Existing path: {self.sources[sample_name].file_path}"
+                f"Existing path: {self.sources[sample_name].file_path}. "
                 f"Please, rename file name '{sample_name}' or folder '{folder_name}'"
             )
-        if any(ds.file_path == path for ds in self.sources.values()):
-            raise ValueError(f"Path '{path}' has already been added to DataSet")
-
         resolved_config = self._resolve_config(path, config)
-
-        source = DataSource(path, RamGb_limit_usage = self.RamGb_limit_usage, config = resolved_config)
+        source = PreparedDataSource(source, resolved_config)
         self.sources[sample_name] = source
 
     @staticmethod
@@ -219,7 +216,7 @@ class DataSet:
         :type config: dict or str or None
         """
         if extensions is None:
-            extensions = ['.imzml', '.mzxml', '.cdf','.hdf5'] # TODO вынести во внешнее - рабочие форматы
+            extensions = ['.imzml', '.mzxml', '.cdf'] # TODO вынести во внешнее - рабочие форматы
 
         found_paths = []
         for entry in path_list:
@@ -242,19 +239,12 @@ class DataSet:
             except (ValueError, FileNotFoundError) as e:
                 warnings.warn(f"Skipping {path}: {e}")
 
-    def save_configs(self): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!! Удалить скореее всего
+    def save_configs(self): 
         """
         Save the current config for each source to its ``raw_pelmesha/config.yaml`` file.
-
-        Creates the ``raw_pelmesha`` directory if it does not exist.
         """
-        for sample_name, ds in self.sources.items():
-            if hasattr(ds, 'config') and ds.config:
-                config_dir = os.path.join(os.path.dirname(ds.file_path), 'raw_pelmesha')
-                os.makedirs(config_dir, exist_ok = True)
-                config_path = os.path.join(config_dir, 'config.yaml')
-                with open(config_path, 'w') as f:
-                    yaml.dump(ds.config, f, default_flow_style = False)
+        for ds in self.sources.values():
+            ds.save()
 
     def check_config_changes(self): 
         """
@@ -280,103 +270,119 @@ class DataSet:
                 changes[sample_name] = {"status": "new", "old": None, "new": current_config}
         return changes
 
-    def has_processed_data(self, dataset_name = "peaklists"): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!! - скорее всего просто удалить - уже есть решение
+    def process(self,
+                sample_name: list | str | None = None,
+                free_cpus: int = 1, 
+                draw: bool = True, 
+                draw_mz_range: tuple[float, float] | None = None,
+                draw_spctrum_idx: int | None = None,
+                Ram_GB_limit: float = 2,
+                h5chunk_size_MB: int = 10,
+                dtypeconv: np.dtype | str | None = None,
+                **kwargs) -> None:
         """
-        Check which sources already have processed data matching their configs.
-
-        :param dataset_name: Dataset name to check for (e.g. ``"peaklists"``, ``"features"``).
-
-        :type dataset_name: str
-
-        :return: Dict mapping sample names to ``True``/``False``.
-        :rtype: dict
+        Process all sources in the dataset through the Pipeline.
+        
+        For each source in the dataset, creates a Pipeline instance and
+        runs processing. See Pipeline.process for detailed parameter docs.
+        
+        Parameters
+        ----------
+        free_cpus : int, optional
+            Number of CPUs to leave free (default 1).
+        draw : bool, optional
+            Whether to draw processing results (default False).
+        draw_mz_range : tuple[float, float] | None, optional
+            m/z range for drawing (default None).
+        draw_spctrum_idx : int | None, optional
+            Spectrum index for drawing (default None).
+        Ram_GB_limit : float, optional
+            RAM limit in GB (default 2).
+        h5chunk_size_MB : int, optional
+            HDF5 chunk size in MB (default 10).
+        dtypeconv : np.dtype | str | None, optional
+            Data type conversion (default None).
+        **kwargs
+            Additional arguments forwarded to Pipeline.process.
+        
+        See Also
+        --------
+        Pipeline.process : The underlying processing method.
         """
-        result = {}
-        for sample_name, ds in self.sources.items():
-            try:
-                hdf5_path = create_file_path(
-                    os.path.dirname(ds.file_path),
-                    slide_name = ds.sample_name,
-                    hdf5_end = f'_{"specdata" if dataset_name == "peaklists" else dataset_name}'
-                )
-                if os.path.exists(hdf5_path):
-                    with File(hdf5_path, 'r') as f:
-                        found = False
-                        for sample in f.keys():
-                            for roi in f[sample].keys():
-                                if dataset_name in f[sample][roi]:
-                                    found = True
-                                    break
-                            if found:
-                                break
-                    result[sample_name] = found
-                else:
-                    result[sample_name] = False
-            except Exception:
-                result[sample_name] = False
-        return result
+        if sample_name is None:
+            sample_name = list(self.sources.keys())
+        elif isinstance(sample_name, str):
+            sample_name = [sample_name]
 
-    def process(self, mode = "Raw2peaklist", **kwargs): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-        """
-        Run the processing pipeline on all sources.
-
-        :param mode: Processing mode. One of:
-            - ``"Raw2peaklist"`` — full processing: smoothing -> baseline -> alignment -> peak-picking
-            - ``"Raw2proc"`` — spectra processing only (no peak-picking)
-            - ``"proc2peaklist"`` — peak-picking only on already processed spectra
-        :param kwargs: Additional keyword arguments passed to the processing function.
-
-        :type mode: str
-
-        :raises ValueError: If ``mode`` is not recognised.
-        """
-        from pelmesha.pspectra import add_procc_data, int2proc2peaklist_parbatched, DataProc_array, peaks_prop_array, smoothing, msalign
-
-        mode_map = {
-            "Raw2peaklist": [msalign, smoothing, DataProc_array, peaks_prop_array],
-            "Raw2proc":     [msalign, smoothing, DataProc_array],
-            "proc2peaklist": [peaks_prop_array],
-        }
-
-        if mode not in mode_map:
-            raise ValueError(f"Unknown processing mode '{mode}'. Choose from: {list(mode_map.keys())}")
-
-        functions = mode_map[mode]
-        dataset_name = "peaklists" if "peaklist" in mode else "int"
-
-        config_changes = self.check_config_changes()
-        needs_processing = {
-            s: info for s, info in config_changes.items()
-            if info["status"] in ("changed", "new")
-        }
-
-        if not needs_processing:
-            has_data = self.has_processed_data(dataset_name)
-            needs_processing = {s: config_changes[s] for s in has_data if not has_data[s]}
-
-        if not needs_processing:
-            logger.log("All sources already have processed data matching current configs. Skipping.")
-            return
-
-        hdf5_object = {}
-        for sample_name in needs_processing:
-            ds = self.sources[sample_name]
-            hdf5_path = create_file_path(
-                os.path.dirname(ds.file_path),
-                slide_name = ds.sample_name,
-                hdf5_end = '_specdata'
+        for sample in sample_name:
+            print(f"Processing SAMPLE {sample}...")
+            Pipeline(self.sources[sample]).process(
+                free_cpus=free_cpus,
+                draw=draw,
+                draw_mz_range=draw_mz_range,
+                draw_spctrum_idx=draw_spctrum_idx,
+                Ram_GB_limit=Ram_GB_limit,
+                h5chunk_size_MB=h5chunk_size_MB,
+                dtypeconv=dtypeconv,
+                **kwargs,
             )
-            hdf5_object[hdf5_path] = [[sample_name, None]]
+    def peakpick(self,
+                sample_name: list | str | None = None,
+                free_cpus: int = 1, 
+                draw: bool = True, 
+                draw_mz_range: tuple[float, float] | None = None,
+                draw_spctrum_idx: int | None = None,
+                Ram_GB_limit: float = 2,
+                h5chunk_size_MB: int = 10,
+                dtypeconv: np.dtype | str | None = None,
+                **kwargs) -> None:
+        """
+        Process all sources in the dataset through the Pipeline.
+        
+        For each source in the dataset, creates a Pipeline instance and
+        runs processing. See Pipeline.process for detailed parameter docs.
+        
+        Parameters
+        ----------
+        free_cpus : int, optional
+            Number of CPUs to leave free (default 1).
+        draw : bool, optional
+            Whether to draw processing results (default False).
+        draw_mz_range : tuple[float, float] | None, optional
+            m/z range for drawing (default None).
+        draw_spctrum_idx : int | None, optional
+            Spectrum index for drawing (default None).
+        Ram_GB_limit : float, optional
+            RAM limit in GB (default 2).
+        h5chunk_size_MB : int, optional
+            HDF5 chunk size in MB (default 10).
+        dtypeconv : np.dtype | str | None, optional
+            Data type conversion (default None).
+        **kwargs
+            Additional arguments forwarded to Pipeline.process.
+        
+        See Also
+        --------
+        Pipeline.process : The underlying processing method.
+        """
+        if sample_name is None:
+            sample_name = list(self.sources.keys())
+        elif isinstance(sample_name, str):
+            sample_name = [sample_name]
 
-        add_procc_data(
-            hdf5_object,
-            func = functions,
-            configs_source = {s: self.sources[s].config for s in needs_processing},
-            dataset_name = dataset_name,
-            **kwargs
-        )
+        for sample in sample_name:
+            print(f"Processing SAMPLE {sample}...")
+            Pipeline(self.sources[sample]).peakpick(
+                free_cpus=free_cpus,
+                draw=draw,
+                draw_mz_range=draw_mz_range,
+                draw_spctrum_idx=draw_spctrum_idx,
+                Ram_GB_limit=Ram_GB_limit,
+                h5chunk_size_MB=h5chunk_size_MB,
+                dtypeconv=dtypeconv,
+                **kwargs,
+            )
 
-        self.save_configs()
 
     @property
     def reference_file_path(self): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
@@ -659,15 +665,15 @@ class DataSet:
         rows = []
         for sample, source in self.sources.items():
             dir_path = os.path.dirname(source.file_path)
-            config_file = os.path.join(dir_path, 'processed_pelmesha', 'processing_recipe.yaml')
+            config_file = os.path.join(dir_path, 'processed_pelmesha', f'{sample}_processing_recipe.yaml')
             row = [
-                    sample,                                                                        #Sample name
-                    Indexator(np.vstack(source.roi_metadata['idxroi'].to_numpy())).count,          #Mass spectra number
-                    source.loader.dcont,                                                           #Continuous
-                    os.path.exists(os.path.join(dir_path,'processed_pelmesha','peaklists.hdf5')),  #Peaklists
-                    os.path.exists(os.path.join(dir_path,'processed_pelmesha','specdata.hdf5')),   #Processed mass spectra
-                    dir_path,                                                                      #Directory
-                    config_file if os.path.exists(config_file) else "—",                           #Previous configs
+                    sample,                                                                                             #Sample name
+                    Indexator(np.vstack(source.roi_metadata['idxroi'].to_numpy())).count,                               #Mass spectra number
+                    source._datasource.dcont,                                                                           #Continuous
+                    os.path.exists(os.path.join(dir_path,'processed_pelmesha', f'{sample}_peaklists.hdf5')),            #Peaklists
+                    os.path.exists(os.path.join(dir_path,'processed_pelmesha', f'{sample}_processed_spectra.hdf5')),    #Processed mass spectra
+                    dir_path,                                                                                           #Directory
+                    config_file if os.path.exists(config_file) else "—",                                                #Previous configs
                     ]
             for i, cell in enumerate(row):
                 if isinstance(cell, bool):
