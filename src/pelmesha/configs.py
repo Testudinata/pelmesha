@@ -10,12 +10,11 @@ Provides a Pydantic-based configuration system that supports:
 - Parameter distribution to function groups
 
 Main class: Configs
+Special classes: PreparedDataSource and PipelineConfigurator
 Supporting classes: AdaptiveParameter, DatasetHeaders
 """
 from __future__ import annotations
 import ast
-from pelmesha.utensils import printer
-from pybaselines import Baseline
 import inspect
 import textwrap
 import os
@@ -25,9 +24,8 @@ import numpy as np
 import yaml
 import importlib
 from h5py import File
-from pydantic import BaseModel, Field, PrivateAttr, create_model
-from threading import Thread
-from multiprocessing import Pool, Manager, cpu_count
+from pybaselines import Baseline #Необходимо для set_method PipelineConfigurator
+from multiprocessing import Pool, cpu_count
 from pelmesha.filling import DataSource
 from pelmesha.dough import Indexator, SliceIndexator
 from pelmesha.kneading import preprocess_configuration_base, process_spectra_base, peakpicking_base
@@ -128,7 +126,8 @@ def _inspect_defaults(
             method["cls_init_params"] = {}
 
             for param in inspect.signature(cls).parameters.values(): # Получаем параметры инициализации класса
-                if param.default is not inspect.Parameter.empty:
+                if (param.default is not inspect.Parameter.empty
+                        and param.name not in explicit_params):
                     method["cls_init_params"][param.name] = param.default
             method['params'] = {}
             for param in func_sig.parameters.values():
@@ -144,7 +143,8 @@ def _inspect_defaults(
             method = methods_defaults[cls_name][storage_key]
             method["cls_init_params"] = {}
             for param in inspect.signature(cls).parameters.values():
-                if param.default is not inspect.Parameter.empty:
+                if (param.default is not inspect.Parameter.empty
+                        and param.name not in explicit_params):
                     method["cls_init_params"][param.name] = param.default
             method['params'] = {}
             for param in func_sig.parameters.values():
@@ -311,7 +311,7 @@ class Drawer():
             self.peaklist_path = self.datasource.peaklist_path
     def _draw(self,
               mz: np.ndarray,
-              data_int: np.ndarray,
+              intens: np.ndarray,
               peaklist: np.ndarray | None = None,
               headers: list[str] | None = None,
               roi: str | None = None,
@@ -332,23 +332,23 @@ class Drawer():
         # Draw processed
         Label.append("Processed mass spectrum")
         diap = diapcalc(mz, mz_range)
-        plt.plot(mz[diap], data_int[diap],alpha=0.75)
+        plt.plot(mz[diap], intens[diap],alpha=0.75)
         
         # Draw peaklist
         if peaklist is not None:
             if isinstance(peaklist, np.ndarray):
-                peaklist = pd.DataFrame(peaklist.T, headers).T
+                peaklist = pd.DataFrame(peaklist, columns = headers)
             peaklist = peaklist.astype({"spectra_ind": int})
-            peaklist.query("mz>@plot_mz_range[0] and mz<@plot_mz_range[1] and spectra_ind == @sample_spectra_idx").plot(x="mz",y="Intensity",ax = plt.gca(),style = "x", color = "k")
+            peaklist.query("mz>@mz_range[0] and mz<@mz_range[1] and spectra_ind == @spectrum_idx").plot(x="mz",y="Intensity",ax = plt.gca(),style = "x", color = "k")
             left_intens=[]
-            for left_base in peaklist.query("PextL>@plot_mz_range[0] and PextL<@plot_mz_range[1] and spectra_ind == @sample_spectra_idx")['PextL']:
-                left_intens.append(data_int[mz>=left_base][0])
+            for left_base in peaklist.query("PextL>@mz_range[0] and PextL<@mz_range[1] and spectra_ind == @spectrum_idx")['PextL']:
+                left_intens.append(intens[mz>=left_base][0])
             right_intens = []
-            for right_base in peaklist.query("PextR>@plot_mz_range[0] and PextR<@plot_mz_range[1] and spectra_ind == @sample_spectra_idx")['PextR']:
-                right_intens.append(data_int[mz<=right_base][-1])
-            plt.plot(peaklist.query("PextL>@plot_mz_range[0] and PextL<@plot_mz_range[1] and spectra_ind == @sample_spectra_idx")['PextL'],
+            for right_base in peaklist.query("PextR>@mz_range[0] and PextR<@mz_range[1] and spectra_ind == @spectrum_idx")['PextR']:
+                right_intens.append(intens[mz<=right_base][-1])
+            plt.plot(peaklist.query("PextL>@mz_range[0] and PextL<@mz_range[1] and spectra_ind == @spectrum_idx")['PextL'],
             left_intens,'v')
-            plt.plot(peaklist.query("PextR>@plot_mz_range[0] and PextR<@plot_mz_range[1] and spectra_ind == @sample_spectra_idx")['PextR'],
+            plt.plot(peaklist.query("PextR>@mz_range[0] and PextR<@mz_range[1] and spectra_ind == @spectrum_idx")['PextR'],
             right_intens,'^')
             Label=Label+[f'Peaks', 'Left peak base','Right peak base']
         plt.grid(visible=True,which="both")
@@ -366,7 +366,7 @@ class Drawer():
                          draw_spectrum_idx: int | None = None,
                          dtypeconv: np.dtype | None = None):
         if roi is None:
-            roi = list(self.prepdata.roi_metadata.index)
+            roi = list(self.datasource.roi_metadata.index)
         elif isinstance(roi, str):
             roi = [roi]
         elif isinstance(roi, list):
@@ -377,34 +377,35 @@ class Drawer():
         pipeline = Pipeline(self.prepdata)
         datasource = self.datasource
         roi_metadata = datasource.roi_metadata
-        for roi in roi_metadata.index:
+        for r in roi:
             if draw_spectrum_idx is None:
-                rmeta = roi_metadata.loc[roi]
-                idxs = Indexator(rmeta["idxroi"])
+                rmeta = roi_metadata.loc[r]
+                idxs = Indexator(rmeta["idxroi"].to_numpy(int))
                 spectrum_idx = list(idxs)[np.random.randint(0,idxs.count)]
             else:
                 spectrum_idx = draw_spectrum_idx
 
-            processing_stream = pipeline._multistream_pipeline(Pipeline._procfunc_wrapper,roi, idxs = spectrum_idx, dtypeconv=dtypeconv)
-            mz = next(processing_stream)
-            loc_idx, data_int = next(processing_stream)
-            roi_configs = self.prepdata.roi_configs[roi]
-            peaklist_function = roi_configs._peaklist_function
-            if peaklist_function:
-                peaklist_configs = roi_configs.get_step_configs('peaklist')
-                peaklist = peaklist_function(mz,
-                                             data_int,
+            processing_stream = pipeline._multistream_pipeline(Pipeline._procfunc_wrapper, r, idxs = spectrum_idx, dtypeconv=dtypeconv)
+            mz, headers = next(processing_stream)
+            loc_idx, proc_intensity = next(processing_stream)
+            roi_configs = self.prepdata.roi_configs[r]
+            peakpick_function = roi_configs._peakpick_function
+            if peakpick_function:
+                peaklist_configs = roi_configs.get_step_configs('peakpick')
+                peaklist = peakpick_function(mz,
+                                             proc_intensity.squeeze(),
                                              [spectrum_idx],
                                              peaklist_configs,
                                              )
-                headers = peaklist_configs['headers']
+                # headers = peaklist_configs['headers']
             else:
                 peaklist = None
             if draw_mz_range is None:
                 mz_range = (mz[0], mz[-1])
             else:
                 mz_range = draw_mz_range
-            self._draw(mz, data_int, peaklist, headers, mz_range, spectrum_idx)
+            self._draw(mz, proc_intensity.squeeze(), peaklist, headers, r, mz_range, spectrum_idx)
+
     def draw_processed_data(self,
                             roi: str | list | None = None,
                             draw_mz_range: tuple[float, float] | None = None,
@@ -420,8 +421,9 @@ class Drawer():
         datasource = self.datasource
 
         for r in roi:
+            headers = None
             if draw_spectrum_idx is None:
-                rmeta = datasource.roi_metadata.loc[roi]
+                rmeta = datasource.roi_metadata.loc[r]
                 idxs = Indexator(rmeta["idxroi"])
                 spectrum_idx = list(idxs)[np.random.randint(0,idxs.count)]
             else:
@@ -432,21 +434,25 @@ class Drawer():
                     raise ValueError("No processed spectra path or configs to get processed spectrum")
                 else:
                     pipeline = Pipeline(self.prepdata)
-                    mz, data_int = pipeline._spectra_processing(r,idxs = spectrum_idx)
+                    stream = pipeline._multistream_pipeline(Pipeline._procfunc_wrapper,r, cpu_num=1, idxs = spectrum_idx)
+                    mz = next(stream)
+                    _, data_int = next(stream)
+                    data_int = data_int[0]
             else:
                 with File(self.processed_spectra_path, "r") as hdf5:
-                    mz, data_int = hdf5[r]["int"][datasource._get_local_roi_idx(spectrum_idx), :]
-
+                    data_int = hdf5[r]["int"][datasource._get_local_roi_idx(spectrum_idx), :]
+                    mz = hdf5[r]["mz"][:]
             if self.peaklist_path is not None:
                 with File(self.peaklist_path, "r") as hdf5:
-                    peaklist = pd.DataFrame(hdf5[r]["peaklist"][:].T, hdf5[r]['peaklist'].attrs["Column headers"]).query('spectra_ind == @spectrum_idx')
+                    headers = hdf5[r]['peaklists'].attrs["Column headers"]
+                    peaklist = pd.DataFrame(hdf5[r]["peaklists"][:], columns = headers).astype({"spectra_ind": int}).query('spectra_ind == @spectrum_idx')
             else:
                 peaklist = None
             if draw_mz_range is None:
                 mz_range = (mz[0], mz[-1])
             else:
                 mz_range = draw_mz_range
-            self._draw(mz, data_int, peaklist, None, mz_range, spectrum_idx)
+            self._draw(mz, data_int, peaklist, headers, r, mz_range, spectrum_idx)
 class Pipeline:
     def __init__(self,
                  prepdata: PreparedDataSource):
@@ -470,68 +476,12 @@ class Pipeline:
             raise ValueError(
                 "Provide a PreparedDataSource."
             )
-    def _multistream_pipeline(self,
-                              process_wrapper: Callable,
-                              roi: str = None,
-                              cpu_num: int = 1, 
-                              Ram_GB_limit: int = 2,
-                              dtypeconv:  np.dtype | str | None = None,
-                              idxs: Indexator | SliceIndexator | int | None = None):
-        """Основная функция генератор результатов мультипроцессинга"""
-
-        datasource = self._datasource
-        if dtypeconv is None:
-            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
-        dtypeconv = np.dtype(dtypeconv)
-        roi_metadata = datasource.roi_metadata
-        rmeta = roi_metadata.loc[roi]
-        if idxs is None:
-            idxs = rmeta["idxroi"]
-        # Get per-ROI PipelineConfigurator pipeline functions and its configs from PreparedDataSource
-        roi_configs = self.roi_configs[roi]
-        preprocess_function = roi_configs._preprocess_function
-
-        internal_configs = {}
-        if process_wrapper.__name__ == "_procfunc_wrapper":
-            internal_configs['process_pipeline']= roi_configs._process_function
-            wrapper_configs = roi_configs.get_step_configs("process")
-        elif process_wrapper.__name__ == "_peakpick_wrapper":
-            internal_configs['process_pipeline']  = roi_configs._process_function
-            internal_configs['peakpick_function']  = roi_configs._peakpick_function
-            wrapper_configs = {"peakpick":roi_configs.get_step_configs("peakpick"), 
-                               "process":roi_configs.get_step_configs("process")}
-        else:
-            raise ValueError("Unknown process_wrapper function")
-        
-        mz = None
-        if preprocess_function:
-            mz, internal_configs = preprocess_function(datasource, roi, rmeta, roi_configs)
-            if mz is None and datasource.loader.dcont:
-                mz = datasource.loader.mz_scale_cont
-        else:
-            if datasource.loader.dcont:
-                mz = datasource.loader.mz_scale_cont
-
-        yield mz # return common mz to spectra. if mz is not common, return None
-
-        idxs_batches = datasource.split_idxs(idxs = idxs,cpu_count=cpu_num, Ramcap_GB = Ram_GB_limit)
-        partial_worker = partial(process_wrapper,
-                    datasource = datasource,
-                    configs = wrapper_configs,
-                    dtypeconv = dtypeconv,
-                    **internal_configs
-                    )
-
-        with Pool(cpu_num) as p:
-            for dat_idxs, data in tqdm(p.imap_unordered(partial_worker, idxs_batches), total=len(idxs_batches), unit = 'batch'):
-                yield dat_idxs, data
-
 
     def process(self,
                 free_cpus: int = 1, 
                 draw: bool = False, 
                 draw_mz_range: tuple[float, float] | None = None,
-                draw_spctrum_idx: int | None = None,
+                draw_spectrum_idx: int | None = None,
                 Ram_GB_limit: float = 2,
                 h5chunk_size_MB: int = 10,
                 dtypeconv: np.dtype | str | None = None):
@@ -544,7 +494,7 @@ class Pipeline:
             Whether to draw processing results (default False).
         draw_mz_range : tuple[float, float] | None, optional
             m/z range for drawing (default None).
-        draw_spctrum_idx : int | None, optional
+        draw_spectrum_idx : int | None, optional
             Spectrum index for drawing (default None).
         Ram_GB_limit : float, optional
             RAM limit in GB (default 2).
@@ -576,7 +526,7 @@ class Pipeline:
                                                            cpu_num = cpu_num,
                                                            Ram_GB_limit = Ram_GB_limit,
                                                            dtypeconv = dtypeconv)
-            gen_mz = next(processing_stream)
+            gen_mz, headers_list = next(processing_stream)
             if gen_mz is None:
                 processing_stream.close()
                 warnings.warn(f"Discontinuous data detected for sample '{datasource.sample_name}' (ROI: {roi}). "  
@@ -589,11 +539,13 @@ class Pipeline:
                 hdf5.create_dataset(roi+"/int", (Indexator(roi_metadata.loc[roi,"idxroi"]).count, dots_num), chunks=(int(chunk_size_by_elements/dots_num), dots_num), dtype = dtypeconv)
                 hdf5.create_dataset(roi+"/mz", data = gen_mz, dtype = dtypeconv)
                 
-                for loc_idxs, data_int in processing_stream:
-                    hdf5[roi]["int"][loc_idxs,:] = data_int
+                for loc_idxs, proc_intensity in processing_stream:
+                
+                    hdf5[roi]["int"][next(loc_idxs.__iter__()),:] = proc_intensity
+                    # hdf5[roi]["int"][loc_idxs,:] = proc_intensity
 
             if draw:
-                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spctrum_idx)
+                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
 
         self.prepdata.save()
         
@@ -602,22 +554,25 @@ class Pipeline:
                  free_cpus: int = 1, 
                  draw: bool = False, 
                  draw_mz_range: tuple[float, float] | None = None,
-                 draw_spctrum_idx: int | None = None,
+                 draw_spectrum_idx: int | None = None,
                  Ram_GB_limit: float = 2,
                  h5chunk_size_MB: int = 10,
-                 dtypeconv: np.dtype | str | None = None):         
+                 dtypeconv: np.dtype | str | None = None):    
+             
         datasource = self._datasource
-        
         hdf5_save_path = os.path.join(os.path.split(datasource.file_path)[0],'processed_pelmesha',datasource.sample_name + '_peaklists.hdf5')
-        
         if os.path.exists(hdf5_save_path):
             os.remove(hdf5_save_path)
         if not os.path.exists(os.path.split(hdf5_save_path)[0]):
             os.makedirs(os.path.split(hdf5_save_path)[0])
 
+        if dtypeconv is None:
+            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
+        dtypeconv = np.dtype(dtypeconv)
         cpu_num = cpu_count()-free_cpus
         bytes_flsize = dtypeconv.itemsize
         chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
+        
         roi_metadata = datasource.roi_metadata
         for roi in roi_metadata.index:
             print(f'Processing ROI {roi}')
@@ -626,25 +581,84 @@ class Pipeline:
                                                            cpu_num = cpu_num,
                                                            Ram_GB_limit = Ram_GB_limit,
                                                            dtypeconv = dtypeconv)
-            gen_mz = next(peakpicking_stream)
+            gen_mz, headers_list = next(peakpicking_stream)
             
-            roi_configs = self.roi_configs[roi]
-            peakpick_function = roi_configs._peakpick_function
-            headers = roi_configs[peakpick_function.__name__]['headers']
             with File(hdf5_save_path,"a") as hdf5:
-                n_heads = len(headers)
+                n_heads = len(headers_list)
                 hdf5.create_dataset(roi + "/peaklists",(0, n_heads), maxshape = (None, n_heads), chunks=(chunk_size_by_elements/n_heads, n_heads), dtype=dtypeconv)
-                hdf5[roi][peaklists].attrs["Column headers"] = headers
+                hdf5[roi]["peaklists"].attrs["Column headers"] = headers_list
                 for peaklists in peakpicking_stream:
                     list_size = len(peaklists)
                     hdf5[roi]["peaklists"].resize((hdf5[roi]["peaklists"].shape[0] + list_size, n_heads))
                     hdf5[roi]["peaklists"][-list_size:,:] = peaklists
 
             if draw:
-                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spctrum_idx)
+                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
 
         self.prepdata.save()
+        
+    def _multistream_pipeline(self,
+                              process_wrapper: Callable,
+                              roi: str = None,
+                              cpu_num: int = 1, 
+                              Ram_GB_limit: int = 2,
+                              dtypeconv:  np.dtype | str | None = None,
+                              idxs: Indexator | SliceIndexator | int | None = None):
+        """Основная функция генератор результатов мультипроцессинга"""
+        datasource = self._datasource
+        if dtypeconv is None:
+            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
+        dtypeconv = np.dtype(dtypeconv)
+        roi_metadata = datasource.roi_metadata
+        rmeta = roi_metadata.loc[roi]
+        if idxs is None:
+            idxs = rmeta["idxroi"]
+        # Get per-ROI PipelineConfigurator pipeline functions and its configs from PreparedDataSource
+        roi_configs = self.roi_configs[roi]
+        preprocess_function = roi_configs._preprocess_function
+        
+        mz = None
+        headers_list = None
+        size_per_spec = None
+        if preprocess_function:
+            mz, headers_list, internal_configs = preprocess_function(datasource, roi, rmeta, roi_configs)
+            if mz is None and datasource.loader.dcont:
+                mz = datasource.loader.mz_scale_cont
+        else:
+            if datasource.loader.dcont:
+                mz = datasource.loader.mz_scale_cont
 
+        if process_wrapper.__name__ == "_procfunc_wrapper":
+            internal_configs['process_pipeline']= roi_configs._process_function
+            wrapper_configs = roi_configs.get_step_configs("process")
+        elif process_wrapper.__name__ == "_peakpick_wrapper":
+            internal_configs['process_pipeline']  = roi_configs._process_function
+            internal_configs['peakpick_function']  = roi_configs._peakpick_function
+            wrapper_configs = {"peakpick":roi_configs.get_step_configs("peakpick"), 
+                               "process":roi_configs.get_step_configs("process")}
+        else:
+            raise ValueError("Unknown process_wrapper function")
+
+        yield mz, headers_list # mz common mz to spectra, if mz is not common, None is returned. Headers list for peaklists.
+
+        partial_worker = partial(process_wrapper,
+            datasource = datasource,
+            configs = wrapper_configs,
+            dtypeconv = dtypeconv,
+            **internal_configs
+            )
+        
+        if isinstance(idxs, int):
+            row_idxs, data = partial_worker(np.asarray((idxs,idxs+1), dtype=np.int64))
+            yield row_idxs, data
+        else:
+            if mz is not None:
+                size_per_spec = len(mz)
+            idxs_batches = datasource.split_idxs(idxs = idxs,cpu_count=cpu_num, Ramcap_GB = Ram_GB_limit, size_per_spec = size_per_spec)
+
+            with Pool(cpu_num) as p:
+                for data in tqdm(p.imap_unordered(partial_worker, idxs_batches), total=len(idxs_batches), unit = 'batch'):
+                    yield data
         
 
     @staticmethod
@@ -655,23 +669,14 @@ class Pipeline:
                           **internal_configs
                           ):
         process_function = internal_configs.pop("process_pipeline")
-        loc_idxs = datasource._get_local_roi_idx(idxs)
-        
-        if datasource.metadata['continuous']:
-            mz = datasource.source.get_mz(idxs[0])
-            data_int = np.asarray(np.vstack(tuple(datasource.source.get_intensities_stream(idxs))), dtype=dtypeconv)
-            
-            ## proccessing array
-            mz, data_int = process_function(mz, data_int, configs, **internal_configs)
-            return SliceIndexator(loc_idxs), data_int
-        else: # Считаем, что итоговые данные на выходе всегда с одинаковым кол-вом точек
-            
-            result = {}
-            ## proccessing array
-            for n, (mz, data_int) in enumerate(datasource.source.get_batch(Indexator(idxs))):
-                mz, data_int = process_function(mz, np.asarray(data_int, dtype=dtypeconv), configs, **internal_configs)
-                result[n] = data_int
-            return SliceIndexator(loc_idxs), np.vstack(tuple(result.values()))
+        internal_process_configs = internal_configs['process']
+        row_idxs = SliceIndexator(datasource._get_local_roi_idx(idxs))
+        processed_spectra: list[np.ndarray] = [None] * row_idxs.count
+        batch_iter = datasource.get_spectra_stream(Indexator(idxs))
+        for n, (_mz, raw_intensity) in enumerate(batch_iter):
+            _, proc_intensity = process_function(_mz, np.asarray(raw_intensity, dtype=dtypeconv), configs, **internal_process_configs)
+            processed_spectra[n] = proc_intensity
+        return row_idxs, np.vstack(processed_spectra)
     
     @staticmethod
     def _peakpick_wrapper(idxs: Indexator | SliceIndexator | tuple| np.ndarray,
@@ -688,24 +693,25 @@ class Pipeline:
         peakpick_configs = configs['peakpick']
         internal_peakpick_configs = internal_configs['peakpick']
 
-        if datasource.metadata['continuous']:
-            mz = datasource.source.get_mz(idxs[0])
-            data_int = np.asarray(np.vstack(tuple(datasource.source.get_intensities_stream(idxs))), dtype=dtypeconv)
-            ## proccessing array
-            mz, data_int = process_function(mz, data_int, proc_configs, **internal_proc_configs)
-            ## getting peaklist
-            return peakpick_function(mz, data_int, peakpick_configs, **internal_peakpick_configs)
-        else:
-            peaklists = {}
-            for n, (mz, data_int) in enumerate(datasource.source.get_batch(Indexator(idxs))):
-                mz, data_int = process_function(mz, data_int, proc_configs, **internal_proc_configs)
-                peaklists[n] = peakpick_function(mz, np.asarray(data_int, dtype=dtypeconv), peakpick_configs, **internal_peakpick_configs)
-                return np.vstack(tuple(peaklists.values()))
+        peaklists = {}
+        idxs_list = list(Indexator(idxs))
+        batch_iter = datasource.get_spectra_stream(Indexator(idxs))
+        for n, (_mz, raw_intensity) in enumerate(batch_iter):
+            _mz, proc_intensity = process_function(_mz, raw_intensity, proc_configs, **internal_proc_configs)
+            peaklists[n] = peakpick_function(_mz, np.asarray(proc_intensity, dtype=dtypeconv).squeeze(), idxs_list[n], peakpick_configs, **internal_peakpick_configs)
+        return np.vstack(tuple(peaklists.values()))
+
+
 class Configs():
     def __init__(self,
                  configs_source: str | dict = {},
                  **kwargs):
         self.configs: dict[str, Any] = {}
+        # Maps (cls_name, storage_key) -> set[str] of parameter names that
+        # are explicitly provided at the call site and should be excluded
+        # from default extraction. Populated by PipelineConfigurator during
+        # AST-based extraction; used by set_method to preserve exclusions.
+        self._explicit_params_map: dict[tuple[str, str], set[str]] = {}
         self.set(configs_source, **kwargs)
 
     @staticmethod
@@ -822,7 +828,8 @@ class Configs():
             )
         cls_name, func_name = matches[0].split(".")
         return cls_name, func_name
-
+    def __setitem__(self, key: str, value: Any):
+        self._update_flat({key: value})
     def __getitem__(self, key: str | tuple[str, ...]) -> dict[str, Any]:
         """Retrieve parameters by function/method/class name.
 
@@ -1734,9 +1741,20 @@ class Configs():
         methods = self.configs.setdefault("methods", {})
         if delete_old and cls_name in methods:
             del methods[cls_name]
-
+    
         # --- Extract default parameters via _inspect_defaults ---
-        defaults = _inspect_defaults([(method_func, cls_obj)])
+        # Look up stored explicit params to preserve exclusions from
+        # AST-based extraction (e.g. params provided at the call site).
+        # Collect explicit params from ALL methods of this class because
+        # cls_init_params (__init__ params) are shared across all methods.
+        stored_explicit: set[str] = set()
+        for (_cls_name, _method_name), exp in self._explicit_params_map.items():
+            if _cls_name == cls_name:
+                stored_explicit.update(exp)
+        if stored_explicit:
+            defaults = _inspect_defaults([((method_func, cls_obj), method_name, stored_explicit)])
+        else:
+            defaults = _inspect_defaults([(method_func, cls_obj)])
         method_defaults = (
             defaults.get("methods", {})
             .get(cls_name, {})
@@ -1839,6 +1857,11 @@ class PipelineConfigurator(Configs):
 
         # 1. Get default params from functions itself
         self.configs: dict[str, Any] = {}
+        # Maps (cls_name, storage_key) -> set[str] of parameter names that
+        # are explicitly provided at the call site and should be excluded
+        # from default extraction. Populated during AST-based extraction;
+        # used by set_method to preserve exclusions.
+        self._explicit_params_map: dict[tuple[str, str], set[str]] = {}
 
         # Collect pipeline functions for default extraction,
         # keeping track of which step each function belongs to.
@@ -1869,8 +1892,111 @@ class PipelineConfigurator(Configs):
         # Extract defaults from pipeline functions
         self.configs = _inspect_defaults(pipeline_funcs)
 
+        # Populate _explicit_params_map from extracted items so that
+        # set_method can preserve the exclusion of explicitly-provided params.
+        for item in pipeline_funcs:
+            if isinstance(item, tuple) and len(item) == 3 and isinstance(item[2], (set, frozenset)):
+                callable_or_pair = item[0]
+                config_key: str = item[1]
+                explicit_params: set[str] = item[2]
+                if not explicit_params:
+                    continue
+                if isinstance(callable_or_pair, tuple) and len(callable_or_pair) == 2:
+                    _func, cls = callable_or_pair
+                    if isinstance(cls, type):
+                        key = (cls.__name__, config_key)
+                        self._explicit_params_map[key] = explicit_params
+                else:
+                    # Plain functions — store by (None, config_key)
+                    key = (None, config_key)
+                    self._explicit_params_map[key] = explicit_params
+
         # 2. Load params from YAML or dict and override with kwargs
         self.update(configs_source, **kwargs)
+
+    # ------------------------------------------------------------------ #
+    #  Override set_method / set_function to keep _step_func_names in    #
+    #  sync so that get_step_configs can find replaced methods/functions. #
+    # ------------------------------------------------------------------ #
+
+    def set_method(self,
+                   cls: type | str,
+                   method_name: str,
+                   delete_old: bool = True,
+                   **params) -> None:
+        """Set/replace a method and keep ``_step_func_names`` in sync."""
+        # --- Resolve class name (same logic as parent) ---
+        if isinstance(cls, str):
+            try:
+                cls_obj = eval(cls)
+            except (ValueError, NameError):
+                warnings.warn(
+                    f"Unknown class '{cls}' - cannot resolve. "
+                    f"Skipping set_method."
+                )
+                return
+        else:
+            cls_obj = cls
+        cls_name = cls_obj.__name__
+
+        # Collect old method names for this class BEFORE parent modifies configs
+        old_method_names: set[str] = set()
+        methods = self.configs.setdefault("methods", {})
+        if cls_name in methods:
+            old_method_names = set(methods[cls_name].keys())
+
+        # Determine which pipeline steps contain the old method names
+        affected_steps: set[str] = set()
+        for step_name, func_names in self._step_func_names.items():
+            if old_method_names & func_names:
+                affected_steps.add(step_name)
+
+        # Call parent's set_method
+        super().set_method(cls, method_name, delete_old=delete_old, **params)
+
+        # --- Update _step_func_names ---
+        if delete_old:
+            # Remove old method names from affected steps
+            for step_name in affected_steps:
+                self._step_func_names[step_name].difference_update(old_method_names)
+
+        # Add the new method_name to the same steps
+        if affected_steps:
+            for step_name in affected_steps:
+                self._step_func_names[step_name].add(method_name)
+        else:
+            # Completely new class — add to all steps as a best guess
+            for func_names in self._step_func_names.values():
+                func_names.add(method_name)
+
+    def set_function(self,
+                     func_name: str,
+                     delete_old: bool = True,
+                     **params) -> None:
+        """Set/replace a function and keep ``_step_func_names`` in sync."""
+        # Determine which pipeline steps contain the old function name
+        affected_steps: set[str] = set()
+        for step_name, func_names in self._step_func_names.items():
+            if func_name in func_names:
+                affected_steps.add(step_name)
+
+        # Call parent's set_function
+        super().set_function(func_name, delete_old=delete_old, **params)
+
+        # --- Update _step_func_names ---
+        if delete_old:
+            # Remove old func_name from affected steps
+            for step_name in affected_steps:
+                self._step_func_names[step_name].discard(func_name)
+
+        # Add the (possibly new) func_name to the same steps
+        if affected_steps:
+            for step_name in affected_steps:
+                self._step_func_names[step_name].add(func_name)
+        else:
+            # Completely new function — add to all steps as a best guess
+            for func_names in self._step_func_names.values():
+                func_names.add(func_name)
 
     # ------------------------------------------------------------------ #
     #  Step-specific config access                                       #
@@ -2477,7 +2603,7 @@ class PipelineConfigurator(Configs):
         # --------------------------------------------------------------- #
         def _get_configs_unfold_info(
             call_node: ast.Call,
-        ) -> tuple[str | None, set[str], bool]:
+        ) -> tuple[str | None, set[int], set[str], bool]:
             """Inspect a Call node for ``**configs[key]`` or ``**var`` patterns.
 
             Returns
@@ -2485,16 +2611,21 @@ class PipelineConfigurator(Configs):
             config_key : str or None
                 The config key being unfolded, or None if whole ``**configs``
                 is passed (or no unfold detected).
-            explicit_params : set of str
-                Names of parameters that are explicitly provided (not via
-                ``**configs`` unfold).
+            explicit_pos_indices : set of int
+                Indices of positional arguments that are explicitly provided
+                (simple names, not ``*args``).  These are resolved to actual
+                parameter names in step 4 after the callable is identified.
+            explicit_kwarg_names : set of str
+                Names of keyword arguments that are explicitly provided
+                (not via ``**unfold``).
             has_configs_unfold : bool
                 ``True`` if a ``**configs``-based unfold was detected
                 (either ``**configs['key']``, ``**configs``, or ``**var``
                 where ``var`` traces back to ``configs['key']``).
             """
             config_key: str | None = None
-            explicit_params: set[str] = set()
+            explicit_pos_indices: set[int] = set()
+            explicit_kwarg_names: set[str] = set()
             has_configs_unfold: bool = False
 
             for kw in call_node.keywords:
@@ -2524,11 +2655,10 @@ class PipelineConfigurator(Configs):
                             config_key = None  # whole step configs passed
                             has_configs_unfold = True
 
-            # Collect explicitly provided param names from positional args
-            # (only simple ast.Name args can be traced to parameter names)
-            for arg in call_node.args:
+            # Collect indices of positional args that are simple names
+            for idx, arg in enumerate(call_node.args):
                 if isinstance(arg, ast.Name):
-                    explicit_params.add(arg.id)
+                    explicit_pos_indices.add(idx)
                 elif isinstance(arg, ast.Starred):
                     # *args — skip, these are not explicit param names
                     pass
@@ -2536,15 +2666,59 @@ class PipelineConfigurator(Configs):
             # Collect explicitly provided keyword arg names
             for kw in call_node.keywords:
                 if kw.arg is not None:  # regular kwarg, not **unfold
-                    explicit_params.add(kw.arg)
+                    explicit_kwarg_names.add(kw.arg)
 
-            return config_key, explicit_params, has_configs_unfold
+            return config_key, explicit_pos_indices, explicit_kwarg_names, has_configs_unfold
 
         # --------------------------------------------------------------- #
         #  4. Main resolution loop — only keep calls with configs unfold   #
         # --------------------------------------------------------------- #
         builtin_names: set[str] = set(dir(builtins))
         func_globals = getattr(func, "__globals__", {})
+
+        def _resolve_explicit_params(
+            callable_obj: Callable,
+            pos_indices: set[int],
+            kwarg_names: set[str],
+            cls: type | None = None,
+        ) -> set[str]:
+            """Resolve positional argument indices to parameter names.
+
+            For unbound methods (where *cls* is provided and the callable
+            is not ``__init__``), the first parameter (``self``) is
+            automatically skipped since it is never present in the AST
+            call.  For ``__init__`` or when *callable_obj* is itself a
+            class, the class signature is used directly (no ``self``).
+            """
+            param_names: set[str] = set(kwarg_names)
+            if not pos_indices:
+                return param_names
+            try:
+                # callable_obj is a class → use its own signature
+                if inspect.isclass(callable_obj):
+                    sig = inspect.signature(callable_obj)
+                elif callable_obj.__name__ == '__init__' and cls is not None:
+                    # __init__ → use class signature (no 'self')
+                    sig = inspect.signature(cls)
+                elif cls is not None:
+                    # Unbound method → skip 'self' at index 0
+                    sig = inspect.signature(callable_obj)
+                    param_list = list(sig.parameters.keys())
+                    for idx in sorted(pos_indices):
+                        # +1 to skip 'self'
+                        actual_idx = idx + 1
+                        if actual_idx < len(param_list):
+                            param_names.add(param_list[actual_idx])
+                    return param_names
+                else:
+                    sig = inspect.signature(callable_obj)
+                param_list = list(sig.parameters.keys())
+                for idx in sorted(pos_indices):
+                    if idx < len(param_list):
+                        param_names.add(param_list[idx])
+            except (ValueError, TypeError):
+                pass
+            return param_names
 
         resolved: list[Callable | tuple[Callable, type]] = []
 
@@ -2553,7 +2727,7 @@ class PipelineConfigurator(Configs):
                 continue
 
             # --- Get configs-unfold info for this call ---
-            config_key, explicit_params, has_configs_unfold = _get_configs_unfold_info(node)
+            config_key, pos_indices, kwarg_names, has_configs_unfold = _get_configs_unfold_info(node)
 
             # Skip calls that don't involve a **configs unfold
             if not has_configs_unfold:
@@ -2565,8 +2739,14 @@ class PipelineConfigurator(Configs):
                 if name in builtin_names:
                     continue
                 obj = func_globals.get(name) or globals().get(name)
-                if obj is not None and callable(obj) and not inspect.isclass(obj):
-                    resolved.append((obj, config_key, explicit_params))
+                if obj is not None and callable(obj):
+                    if inspect.isclass(obj):
+                        # Class instantiation — skip, constructor params are
+                        # merged into method entries via chained call handling
+                        continue
+                    else:
+                        explicit_params = _resolve_explicit_params(obj, pos_indices, kwarg_names)
+                        resolved.append((obj, config_key, explicit_params))
 
             elif isinstance(node.func, ast.Attribute):
                 # Attribute call: obj.method(data, ...)
@@ -2583,6 +2763,7 @@ class PipelineConfigurator(Configs):
                         if cls_obj is not None and isinstance(cls_obj, type):
                             method_obj = getattr(cls_obj, method_name, None)
                             if method_obj is not None and callable(method_obj):
+                                explicit_params = _resolve_explicit_params(method_obj, pos_indices, kwarg_names, cls=cls_obj)
                                 resolved.append(((method_obj, cls_obj), config_key, explicit_params))
                                 continue
 
@@ -2591,6 +2772,7 @@ class PipelineConfigurator(Configs):
                     if mod_obj is not None:
                         method_obj = getattr(mod_obj, method_name, None)
                         if method_obj is not None and callable(method_obj):
+                            explicit_params = _resolve_explicit_params(method_obj, pos_indices, kwarg_names)
                             resolved.append((method_obj, config_key, explicit_params))
                             continue
 
@@ -2598,6 +2780,7 @@ class PipelineConfigurator(Configs):
                     if mod_obj is not None and isinstance(mod_obj, type):
                         method_obj = getattr(mod_obj, method_name, None)
                         if method_obj is not None and callable(method_obj):
+                            explicit_params = _resolve_explicit_params(method_obj, pos_indices, kwarg_names, cls=mod_obj)
                             resolved.append(((method_obj, mod_obj), config_key, explicit_params))
                             continue
 
@@ -2610,6 +2793,25 @@ class PipelineConfigurator(Configs):
                         if cls_obj is not None and isinstance(cls_obj, type):
                             method_obj = getattr(cls_obj, method_name, None)
                             if method_obj is not None and callable(method_obj):
+                                # Resolve outer call's positional args against the method
+                                explicit_params = _resolve_explicit_params(
+                                    method_obj, pos_indices, kwarg_names, cls=cls_obj
+                                )
+                                # Resolve inner call's positional args against the class constructor
+                                inner_pos_indices: set[int] = set()
+                                for idx, arg in enumerate(inner_call.args):
+                                    if isinstance(arg, ast.Name):
+                                        inner_pos_indices.add(idx)
+                                # Collect explicit keyword args from the inner call
+                                inner_kwarg_names: set[str] = set()
+                                for kw in inner_call.keywords:
+                                    if kw.arg is not None:  # regular kwarg, not **unfold
+                                        inner_kwarg_names.add(kw.arg)
+                                if inner_pos_indices or inner_kwarg_names:
+                                    inner_explicit = _resolve_explicit_params(
+                                        cls_obj, inner_pos_indices, inner_kwarg_names, cls=cls_obj
+                                    )
+                                    explicit_params |= inner_explicit
                                 resolved.append(((method_obj, cls_obj), config_key, explicit_params))
                                 continue
 
@@ -3149,3 +3351,22 @@ class PreparedDataSource():
         lines.append(")")
         return "\n".join(lines)
     
+    def audit_processing(self,
+                         roi: str | list | None = None,
+                         draw_mz_range: tuple[float, float] | None = None,
+                         draw_spectrum_idx: int | None = None,
+                         dtypeconv: np.dtype | None = None):
+        """Audit the processing of the data source.
+
+        Parameters
+        ----------
+        roi : str or list, optional
+            The ROI to audit. If None, all ROIs are audited.
+        draw_mz_range : tuple of float, optional
+            If not None, draw a spectrum within the given m/z range.
+        draw_spectrum_idx : int, optional
+            If not None, draw the spectrum at the given index.
+        dtypeconv : numpy.dtype, optional
+            If not None, convert the data to the given dtype.
+        """
+        Drawer(self).audit_processing(roi, draw_mz_range, draw_spectrum_idx, dtypeconv)

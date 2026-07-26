@@ -1,4 +1,4 @@
-from pelmesha.configs import Configs, Pipeline, PreparedDataSource
+from pelmesha.configs import Configs, Pipeline, PreparedDataSource, PipelineConfigurator
 from pelmesha.filling import DataSource
 from pelmesha.dough import Indexator
 import numpy as np
@@ -34,7 +34,7 @@ class DataSet:
     # 4. Удаление путей??????
 
     # INDIVIDUAL PROCESSING AND REFERENCE
-    # 9. Написать метод, который бы запустил обработку данных записанных в списке путей и на основе индивидиуальных конфигов (с вариантами: чисто пик-пикинг (по сути последний метод с изменёнными конфигами), 
+    # Done 9. Написать метод, который бы запустил обработку данных записанных в списке путей и на основе индивидиуальных конфигов (с вариантами: чисто пик-пикинг (по сути последний метод с изменёнными конфигами), 
     # чисто обработка спектров, пик-пикинг с обработкой и сохранение в hdf5 спектров). При этом, проводится проверка наличия атрибута рефернсного файла. Обработка "индивидуальная"
     # 10. Написать атрибут, который хранил бы путь выбранного "референсного файла" для создания референсного пиклиста, также хранил бы и свой особый конфиг для обработки 
     # (отличный от того, когда файл используется для обработки и анализа, а не референсный).
@@ -156,12 +156,12 @@ class DataSet:
                 f"Existing path: {self.sources[sample_name].file_path}. "
                 f"Please, rename file name '{sample_name}' or folder '{folder_name}'"
             )
-        resolved_config = self._resolve_config(path, config)
+        resolved_config = self._resolve_config(config)
         source = PreparedDataSource(source, resolved_config)
         self.sources[sample_name] = source
 
     @staticmethod
-    def _resolve_config(path, config): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
+    def _resolve_config(config):
         """
         Resolve the processing config for a given source path.
 
@@ -179,24 +179,14 @@ class DataSet:
         :rtype: dict
         """
         if isinstance(config, dict):
-            return Configs([],**config)
+            return PipelineConfigurator(config)
         if isinstance(config, str):
             if os.path.exists(config):
-                return Configs([],config)
-                # with open(config, 'r') as f:
-                #     return yaml.safe_load(f)
+                return PipelineConfigurator(config)
             else:
                 raise FileNotFoundError(f"Config file not found: {config}")
-        
-        saved_config_path = os.path.join(os.path.dirname(path), 'raw_pelmesha', 'config.yaml')
-        if os.path.exists(saved_config_path):
-            with open(saved_config_path, 'r') as f:
-                return yaml.safe_load(f)
-
-        base_config_path = os.path.join(os.path.dirname(__file__), 'Base_configs.yaml')
-        if os.path.exists(base_config_path):
-            with open(base_config_path, 'r') as f:
-                return yaml.safe_load(f)
+        if isinstance(config, (PipelineConfigurator, Configs)):
+            return config
         return {}
 
     def add_sources_from_paths(self, path_list, extensions = None, config = None):
@@ -216,7 +206,8 @@ class DataSet:
         :type config: dict or str or None
         """
         if extensions is None:
-            extensions = ['.imzml', '.mzxml', '.cdf'] # TODO вынести во внешнее - рабочие форматы
+            from pelmesha.filling import SUPPORTED_FILE_EXTENSIONS
+            extensions = SUPPORTED_FILE_EXTENSIONS
 
         found_paths = []
         for entry in path_list:
@@ -275,7 +266,7 @@ class DataSet:
                 free_cpus: int = 1, 
                 draw: bool = True, 
                 draw_mz_range: tuple[float, float] | None = None,
-                draw_spctrum_idx: int | None = None,
+                draw_spectrum_idx: int | None = None,
                 Ram_GB_limit: float = 2,
                 h5chunk_size_MB: int = 10,
                 dtypeconv: np.dtype | str | None = None,
@@ -294,7 +285,7 @@ class DataSet:
             Whether to draw processing results (default False).
         draw_mz_range : tuple[float, float] | None, optional
             m/z range for drawing (default None).
-        draw_spctrum_idx : int | None, optional
+        draw_spectrum_idx : int | None, optional
             Spectrum index for drawing (default None).
         Ram_GB_limit : float, optional
             RAM limit in GB (default 2).
@@ -320,7 +311,7 @@ class DataSet:
                 free_cpus=free_cpus,
                 draw=draw,
                 draw_mz_range=draw_mz_range,
-                draw_spctrum_idx=draw_spctrum_idx,
+                draw_spectrum_idx=draw_spectrum_idx,
                 Ram_GB_limit=Ram_GB_limit,
                 h5chunk_size_MB=h5chunk_size_MB,
                 dtypeconv=dtypeconv,
@@ -331,7 +322,7 @@ class DataSet:
                 free_cpus: int = 1, 
                 draw: bool = True, 
                 draw_mz_range: tuple[float, float] | None = None,
-                draw_spctrum_idx: int | None = None,
+                draw_spectrum_idx: int | None = None,
                 Ram_GB_limit: float = 2,
                 h5chunk_size_MB: int = 10,
                 dtypeconv: np.dtype | str | None = None,
@@ -350,7 +341,7 @@ class DataSet:
             Whether to draw processing results (default False).
         draw_mz_range : tuple[float, float] | None, optional
             m/z range for drawing (default None).
-        draw_spctrum_idx : int | None, optional
+        draw_spectrum_idx : int | None, optional
             Spectrum index for drawing (default None).
         Ram_GB_limit : float, optional
             RAM limit in GB (default 2).
@@ -376,7 +367,7 @@ class DataSet:
                 free_cpus=free_cpus,
                 draw=draw,
                 draw_mz_range=draw_mz_range,
-                draw_spctrum_idx=draw_spctrum_idx,
+                draw_spectrum_idx=draw_spectrum_idx,
                 Ram_GB_limit=Ram_GB_limit,
                 h5chunk_size_MB=h5chunk_size_MB,
                 dtypeconv=dtypeconv,

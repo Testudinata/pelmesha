@@ -24,46 +24,36 @@ def preprocess_configuration_base(
     internal_configs['process'] = {}
     resampled_mz = resample_mz_scale(*mz_range, **preprocess_configs['resample_mz_scale'])
     internal_configs['process']['resampled_mz'] = resampled_mz
-    
-    
-    baseline_algo = configs.configs.get('method', None)
+    internal_configs['process']['mz_discrete_coeffs'] = datasource.roi_metadata.loc[roi,'discret_coeffs']
+
+    baseline_algo = configs.configs.get('methods', None)
     if baseline_algo:
         baseline_algo = baseline_algo.get('Baseline', None)
         if baseline_algo:
             baseline_algo = next(iter(baseline_algo))
     if baseline_algo:
-        if datasource.dcont or resampled_mz:
-            if resampled_mz:
-                internal_configs['process']['Baseliner'] = getattr(Baseline(resampled_mz, **configs['Baseline']), baseline_algo)
-            else: 
-                internal_configs['process']['Baseliner'] = getattr(Baseline(datasource.get_mz(rmeta['idxroi'].flatten()[0]), **configs['Baseline']), baseline_algo)
+        if datasource.dcont:
+            internal_configs['process']['Baseliner'] = getattr(Baseline(datasource.get_mz(rmeta['idxroi'].ravel()[0]), **configs['Baseline'], assume_sorted = True), baseline_algo)
         else:
             internal_configs['process']['Baseliner'] = baseline_algo
-    internal_configs['peakpick'] = {}
 
+    internal_configs['peakpick'] = {}
     # Configure headers conditionally based on processing flags 
     if configs['peakpicker']["SNR_threshold"] and configs['peakpicker']["Calc_peak_area"]:
-        configs.update({"headers": DatasetHeaders([  
-                                        "spectra_ind", "mz", "Intensity", "Area", "SNR",  
-                                        "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"  
-                                    ])})
+        headers_list = ["spectra_ind", "mz", "Intensity", "Area", "SNR",  
+                        "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"]
+        
     elif configs['peakpicker']["SNR_threshold"]:
-        configs.update({"headers": DatasetHeaders([  
-                                        "spectra_ind", "mz", "Intensity", "SNR",  
-                                        "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"  
-                                    ])})
+        headers_list = ["spectra_ind", "mz", "Intensity", "SNR",  
+                        "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"]
     elif configs['peakpicker']["Calc_peak_area"]:
-        configs.update({"headers": DatasetHeaders([  
-                                        "spectra_ind", "mz", "Intensity", "Area",  
-                                        "PextL", "PextR", "FWHML", "FWHMR"
-                                    ])})
+        headers_list = ["spectra_ind", "mz", "Intensity", "Area",  
+                        "PextL", "PextR", "FWHML", "FWHMR"]
     else: 
-        configs.update({"headers": DatasetHeaders([  
-                                        "spectra_ind", "mz", "Intensity",  
-                                        "PextL", "PextR", "FWHML", "FWHMR"
-                                    ])})
-
-    return resampled_mz, internal_configs
+        headers_list = ["spectra_ind", "mz", "Intensity",  
+                        "PextL", "PextR", "FWHML", "FWHMR"]
+    configs.update({"headers": DatasetHeaders(headers_list)})
+    return resampled_mz, headers_list, internal_configs
 
 
 def process_spectra_base(
@@ -76,36 +66,39 @@ def process_spectra_base(
     mz - всегда вектор
     intensity - Если данные континуальны - матрица, если нет - вектор
     """
-    # TODO внести add_zero_points
     resampled_mz = internal_configs.get('resampled_mz', None)
-    baseline_algo = internal_configs.get('baseline_algo', None)
-
+    baseline_algo = internal_configs.get('Baseliner', None)
+    mz_discrete_coeffs = internal_configs.get('mz_discrete_coeffs', None)
 
     smooth_configs = configs['smoothing']
     msalign_configs = configs['msalign']
-    if len(intensity.shape)==1:
-        intensity = intensity[np.newaxis, :]
-    if smooth_configs['smooth_algo'] is not None: #Smoothing step
-        intensity = tuple(smoothing(spectrum, **smooth_configs) for spectrum in intensity)
-    if baseline_algo is not None: # BaselineCorrection step
-        if isinstance(baseline_algo,str):
-            if baseline_algo == 'asls': #Just for setting default params
-                intensity = Baseline(mz, **configs['Baseline']).asls(intensity, **configs['asls'])
+    modify_raw_spectrum_configs = configs['modify_raw_spectrum']
+
+    #premodifying spectrum
+    if modify_raw_spectrum_configs['add_zero_points_to_peaks'] or modify_raw_spectrum_configs['mz_segments_to_zero']:
+        mz, intensity = modify_raw_spectrum(mz, intensity, mz_discrete_coeffs, **modify_raw_spectrum_configs) 
+
+    #Smoothing step
+    if smooth_configs['smooth_algo'] is not None: 
+        intensity = smoothing(intensity, **smooth_configs)
+    
+    # BaselineCorrection step
+    if baseline_algo is not None: 
+        if isinstance(baseline_algo, str):
+            if baseline_algo == 'asls': #Hack just for setting default params
+                intensity = intensity - Baseline(mz, assume_sorted = True  **configs['Baseline']).asls(intensity, **configs['asls'])[0]
             else:
-                intensity = getattr(Baseline(mz, **configs['Baseline']), baseline_algo)(intensity, **configs[baseline_algo])
-        # if isinstance(Baseliner, AdaptiveParameter):
-        #     intensity = Baseliner(mz, configs['Baseline'])(intensity, **configs[Baseliner.__name__])
+                intensity = intensity - getattr(Baseline(mz, assume_sorted = True,**configs['Baseline']), baseline_algo)(intensity, **configs[baseline_algo])[0]
         else:
-            intensity = tuple(baseline_algo(spectrum, **configs[baseline_algo.__name__]) for spectrum in intensity)
-    if resampled_mz is not None: # Resampling step
-        intensity = tuple(
-        np.interp(resampled_mz, mz, spectrum, left=intensity[0], right=intensity[-1])
-        for spectrum in intensity)
+            intensity = intensity - baseline_algo(intensity, **configs[baseline_algo.__name__])[0]
+    
+    # Resampling step
+    if resampled_mz is not None:
+        intensity = np.interp(resampled_mz, mz, intensity, left=intensity.ravel()[0], right=intensity.ravel()[-1])
         mz = resampled_mz
-        
-    if isinstance(intensity, tuple):
-        intensity = np.vstack(intensity)
-    if msalign_configs['align_peaks'] is not None:
+    
+    # Aligning step
+    if msalign_configs.get('align_peaks', None) is not None:
         intensity = msalign(mz, intensity, **msalign_configs)
     
     return mz, intensity
@@ -113,30 +106,13 @@ def process_spectra_base(
 def peakpicking_base(
         mz: np.ndarray,
         intensity: np.ndarray,
-        idxs: Indexator | list,
+        idx: int,
         configs: "Configs | PipelineConfigurator",
         **internal_configs) -> np.ndarray:
 
     mzsize = mz.size
-    int_shape = intensity.shape
-    if len(int_shape)==1:
-        
-        intensity = intensity[np.newaxis, :] 
-    if int_shape[0] <2:
-        return peakpicker(mz,
-                         intensity,
-                         mzsize,
-                         idxs[0],
-                         **configs)
-    else:
-        peaklists = {}
-        for n, idx in enumerate(idxs):
-            peaklists[n] = peakpicker(mz,
-                                      intensity[n,:],
-                                      mzsize,
-                                      idx,
-                                      **configs)
-        return np.vstack(tuple(peaklists.values()))
+    configs = configs['peakpicker'] #Получаем непосредственно словарь конфигов для функции peakpicker
+    return peakpicker(mz, intensity, mzsize, idx, **configs)
 
 ###########################################
 #   Base processing functions             #
@@ -150,30 +126,87 @@ __all__ = ["msalign", "Aligner"]
 def msalign(
     x: np.ndarray,
     array: np.ndarray,
-    align_peaks: List,
-    method: str = "cubic",
-    width: float = 10,
-    ratio: float = 2.5,
-    resolution: int = 100,
-    iterations: int = 5,
-    grid_steps: int = 20,
-    shift_range: List = None,
+    align_peaks: List | None = None, # if None - return array
+    align_method: str = "cubic",
+    align_width: float = 10,
+    align_ratio: float = 2.5,
+    align_resolution: int = 100,
+    align_iterations: int = 5,
+    align_grid_steps: int = 20,
+    align_shift_range: List = [-0.95,0.95],
     align_pweights: List = None,
     return_shifts: bool = False,
     align_by_index: bool = False,
     only_shift: bool = False,
 ):
+    """Signal calibration and alignment by reference peaks
+
+    A simplified version of the MSALIGN function found in MATLAB (see references for link)
+
+    This version of the msalign function accepts most of the parameters that MATLAB's function accepts with the
+    following exceptions: GroupValue, ShowPlotValue. A number of other parameters is allowed, although they have
+    been renamed to comply with PEP8 conventions. The Python version is 8-60 times slower than the MATLAB
+    implementation, which is mostly caused by a really slow instantiation of the
+    `scipy.interpolate.PchipInterpolator` interpolator. In order to speed things up, I've also included several
+    other interpolation methods which are significantly faster and give similar results.
+
+    References
+    ----------
+    Monchamp, P., Andrade-Cetto, L., Zhang, J.Y., and Henson, R. (2007) Signal Processing Methods for Mass
+    Spectrometry. In Systems Bioinformatics: An Engineering Case-Based Approach, G. Alterovitz and M.F. Ramoni, eds.
+    Artech House Publishers).
+    MSALIGN: https://nl.mathworks.com/help/bioinfo/ref/msalign.html
+
+    Parameters
+    ----------
+    x : np.ndarray
+        1D array of separation units (N). The number of elements of xvals must equal the number of elements of
+        zvals.shape[1]
+    array : np.ndarray
+        2D array of intensities that must have common separation units (M x N) where M is the number of vectors
+        and N is number of points in the vector
+    align_peaks : list / None
+        list of reference peaks that must be found in the xvals vector. Default: None. If None - return array as is
+    align_method : str
+        interpolation method. Default: 'cubic'. MATLAB version uses 'pchip' which is significantly slower in Python
+    align_pweights: list (optional)
+        list of weights associated with the list of peaks. Must be the same length as list of peaks
+    align_width : float (optional)
+        width of the gaussian peak in separation units. Default: 10
+    align_ratio : float (optional)
+        scaling value that determines the size of the window around every alignment peak. The synthetic signal is
+        compared to the input signal within these regions. Default: 2.5
+    align_resolution : int (optional)
+        Default: 100
+    align_iterations : int (optional)
+        number of iterations. Increasing this value will (slightly) slow down the function but will improve
+        performance. Default: 5
+    align_grid_steps : int (optional)
+        number of steps to be used in the grid search. Default: 20
+    align_shift_range : list or numpy.ndarray, optional
+    The maximum allowed shift values in the m/z axis. If `align_by_index` or `only_shift` is set to True, 
+    these shifts are measured in data points (indices) instead. Default: [-0.95, 0.95].
+    only_shift : bool
+        determines if signal should be shifted (True) or rescaled (False). Default: True
+    return_shifts : bool
+        decide whether shift parameter `shift_opt` should also be returned. Default: False
+    align_by_index : bool
+        decide whether alignment should be done based on index rather than `xvals` array. Default: False
+    """
+    if align_peaks is None:
+        return array
+    
     aligner = Aligner(
         x,
         array,
         align_peaks,
-        method=method,
-        width=width,
-        ratio=ratio,
-        resolution=resolution,
-        iterations=iterations,
-        grid_steps=grid_steps,
-        shift_range=shift_range,
+        method=align_method,
+        width=align_width,
+        ratio=align_ratio,
+        resolution=align_resolution,
+        iterations=align_iterations,
+        grid_steps=align_grid_steps,
+        shift_range=align_shift_range,
         weights=align_pweights,
         return_shifts=return_shifts,
         align_by_index=align_by_index,
@@ -200,9 +233,9 @@ def resample_mz_scale(mz_min: float,
     
 ### Smoothing
 def smoothing(y: np.ndarray, 
-              smooth_algo: str = 'GA', 
+              smooth_algo: str = None, 
               smooth_window: int = 7, 
-              smooth_cycles: int = 2) -> np.ndarray:
+              smooth_cycles: int = 1) -> np.ndarray:
     if len(y) == 0:
         return np.array([])
     
@@ -264,7 +297,7 @@ def peakpicker(mz,
               peaklocation = 1,
               noise_func = np.std,
               noise_est_iterations = 3, 
-              SNR_threshold = None, 
+              SNR_threshold = 3, 
               Calc_peak_area = True, 
               headers = ["spectra_ind", "mz", "Intensity", "Area", "SNR", "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"]
               ) -> np.ndarray:
@@ -448,15 +481,59 @@ def peakpicker(mz,
     props["PextR"] = mz[right_min]
     return np.column_stack(([spectra_ind]*signal_num,pkmz, val_max, *(props[key] for key in headers[3:])))
 
-def _baseliner_prep(baseline_algo,mz_scale, baseliner_init_configs):
-    if baseline_algo:
-        return getattr(Baseline(mz_scale, **baseliner_init_configs),baseline_algo)
-    else:
-        return None
-    
-def _shift_range_to_dots(window_shift_mz: tuple | list | None,
-                         dots_distance: float) -> tuple | None:
-    """Convert m/z shift range to dot-based shift range."""
-    if window_shift_mz:
-        return tuple(int(shift_mz / dots_distance) for shift_mz in window_shift_mz)
-    return None
+
+def modify_raw_spectrum(mz, 
+                        ints, 
+                        mz_discret_coeffs,
+                        add_zero_points_to_peaks = False,
+                        mz_segments_to_zero = None):
+    """
+    Modify raw spectrum data. Reduce to zero segemnts and add zero points to peaks if their peaks are cropped (especially if peaks consists from 1-2 points)
+    """
+    if mz_segments_to_zero and mz_discret_coeffs is not None:
+        mz, ints = mz_segments_to_zero(mz, ints, mz_discret_coeffs)
+    if add_zero_points_to_peaks:
+        mz, ints = add_zero_points_to_peaks(mz, ints, mz_discret_coeffs)
+    return mz, ints
+
+def add_zero_points_to_peaks(mz, ints, mz_discret_coeffs):
+    """
+    Add zero points to peaks
+    """
+    mz_discretion_model = np.poly1d(mz_discret_coeffs)
+
+    diff_mz = np.diff(mz)
+    mz_discr = mz_discretion_model(mz[:-1])
+    big_gap_bool = diff_mz > 3.5*mz_discr
+    small_gap_bool = (diff_mz > 1.75*mz_discr) ^ big_gap_bool
+    new_val = {}
+    if np.any(big_gap_bool):
+        new_val['left'] = mz[np.append(big_gap_bool, [False])] + mz_discr[big_gap_bool]
+        new_val['right'] = mz[np.append([False], big_gap_bool)] - mz_discr[big_gap_bool]
+
+    if np.any(small_gap_bool):
+        new_val['small'] = mz[np.append(small_gap_bool, [False])] + mz_discr[small_gap_bool]
+
+    if new_val:
+        new_val['borders'] = [mz[0]-mz_discr[0], mz[-1]+mz_discr[-1]]
+        new_val = np.concatenate(list(new_val.values()), axis=None)
+        idx = np.searchsorted(mz, new_val)
+        mz = np.insert(mz, idx, new_val)
+        ints = np.insert(ints, idx, 0)
+        
+    # sorting by mz
+    idx_sort = np.argsort(mz)
+    new_loc_mz = mz[idx_sort]
+    new_loc_ints = ints[idx_sort]
+
+    return new_loc_mz, new_loc_ints
+
+def reduce_signal_to_zero(mz, ints, mz_segments_to_zero):
+    """
+    Reduce signal to zero
+    """
+    artefacts_bool = np.zeros(len(mz), dtype=bool)
+    for distortion in mz_segments_to_zero:
+        artefacts_bool = artefacts_bool | ((mz > distortion[0]) & (mz < distortion[1]))
+        ints[artefacts_bool] = 0
+    return mz, ints

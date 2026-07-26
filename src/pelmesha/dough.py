@@ -287,6 +287,7 @@ class Indexator(np.ndarray):
             
         # Если это строка, столбец или скаляр (число), возвращаем как обычный NumPy-объект
         return res.view(np.ndarray) if isinstance(res, np.ndarray) else res
+    
     @property
     def count(self):
         """
