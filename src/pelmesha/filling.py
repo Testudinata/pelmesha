@@ -671,7 +671,7 @@ class DataSource:
         """
         self.loader.close()
 
-SUPPORTED_FILE_EXTENSIONS = ['.imzml']
+SUPPORTED_FILE_EXTENSIONS = ['.imzml', '.cdf']
 
 class BaseLoader(ABC): #TODO @задачка: Базовый абстрактный класс
     """
