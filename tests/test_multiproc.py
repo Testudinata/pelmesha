@@ -1,5 +1,5 @@
 from pelmesha.serving import DataSet
-from pelmesha.configs import PipelineConfigurator
+from pelmesha.cookbook import PipelineConfigurator
 if __name__ == '__main__':
     # dataset = DataSet()
     # path = r"D:\Testing\Our_data\Rapiflex"

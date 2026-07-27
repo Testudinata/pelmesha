@@ -1,12 +1,19 @@
 import numpy as np
-
-import math 
+from h5py import File
+import math
+import os
+import warnings
 from pybaselines import Baseline
-from pelmesha.dough import AdaptiveParameter, DatasetHeaders, Indexator
+from pelmesha.dough import DatasetHeaders, Indexator, SliceIndexator
 from scipy.signal import savgol_filter
-from typing import TYPE_CHECKING
+from multiprocessing import Pool, cpu_count
+from tqdm.auto import tqdm
+from functools import partial
+import pandas as pd
+import matplotlib.pyplot as plt
+from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
-    from pelmesha import Configs, PipelineConfigurator, DataSource
+    from pelmesha import Configs, PipelineConfigurator, DataSource, PreparedDataSource
 
 ###########################################
 #   Base pipeline functions               #
@@ -114,6 +121,11 @@ def peakpicking_base(
     configs = configs['peakpicker'] #Получаем непосредственно словарь конфигов для функции peakpicker
     return peakpicker(mz, intensity, mzsize, idx, **configs)
 
+def pgrouping_KDE(peaklist, 
+                  split_mz_min,
+                  split_peaks_min):
+    split_params = {'split_mz_min': split_mz_min, 'split_peaks_min': split_peaks_min}
+    pass
 ###########################################
 #   Base processing functions             #
 ###########################################
@@ -537,3 +549,415 @@ def reduce_signal_to_zero(mz, ints, mz_segments_to_zero):
         artefacts_bool = artefacts_bool | ((mz > distortion[0]) & (mz < distortion[1]))
         ints[artefacts_bool] = 0
     return mz, ints
+
+class Drawer():
+    def __init__(self, datasource: "str | DataSource | PreparedDataSource"):
+        if isinstance(datasource, (DataSource, str)):
+            if isinstance(datasource, str):
+                datasource = DataSource(datasource)
+            self.processed_spectra_path = datasource.processed_spectra_path
+            self.peaklist_path = datasource.peaklist_path
+            self.datasource = datasource
+            if datasource.configs_path is not None:
+                self.prepdata = PreparedDataSource(datasource, datasource.configs_path)
+            else:
+                self.prepdata = None
+                if self.processed_spectra_path is None and self.peaklist_path is None:
+                    raise ValueError("No processed spectra, peaklist or configs found. Only raw datasource")
+        elif isinstance(datasource, PreparedDataSource):
+            self.prepdata = datasource
+            self.datasource = datasource._datasource
+            self.processed_spectra_path = self.datasource.processed_spectra_path
+            self.peaklist_path = self.datasource.peaklist_path
+    def _draw(self,
+              mz: np.ndarray,
+              intens: np.ndarray,
+              peaklist: np.ndarray | None = None,
+              headers: list[str] | None = None,
+              roi: str | None = None,
+              mz_range: tuple[float, float] | None = None,
+              spectrum_idx: int | None = None):
+        
+        plt.figure().set_figwidth(25)
+        plt.gcf().set_figheight(5)
+        datasource = self.datasource
+        diapcalc = lambda mz, plot_mz_range: (np.array(mz>plot_mz_range[0]) & np.array(mz<plot_mz_range[1])) if plot_mz_range is not None else range(len(mz))
+
+        # Draw raw
+        Label = ["Raw mass spectrum"]
+        mz_raw, intens_raw = datasource.get_spectrum(spectrum_idx)
+
+        if mz is None:
+            mz = mz_raw
+        if mz_range is None:
+            mz_range = (mz[0], mz[-1])
+
+        diap_raw = diapcalc(mz_raw, mz_range)
+        plt.plot(mz_raw[diap_raw], intens_raw[diap_raw],alpha=0.75)
+
+        # Draw processed
+
+        Label.append("Processed mass spectrum")
+        diap = diapcalc(mz, mz_range)
+        plt.plot(mz[diap], intens[diap],alpha=0.75)
+        
+        # Draw peaklist
+        if peaklist is not None:
+            if isinstance(peaklist, np.ndarray):
+                peaklist = pd.DataFrame(peaklist, columns = headers)
+            peaklist = peaklist.astype({"spectra_ind": int})
+            peaklist.query("mz>@mz_range[0] and mz<@mz_range[1] and spectra_ind == @spectrum_idx").plot(x="mz",y="Intensity",ax = plt.gca(),style = "x", color = "k")
+            left_intens=[]
+            for left_base in peaklist.query("PextL>@mz_range[0] and PextL<@mz_range[1] and spectra_ind == @spectrum_idx")['PextL']:
+                left_intens.append(intens[mz>=left_base][0])
+            right_intens = []
+            for right_base in peaklist.query("PextR>@mz_range[0] and PextR<@mz_range[1] and spectra_ind == @spectrum_idx")['PextR']:
+                right_intens.append(intens[mz<=right_base][-1])
+            plt.plot(peaklist.query("PextL>@mz_range[0] and PextL<@mz_range[1] and spectra_ind == @spectrum_idx")['PextL'],
+            left_intens,'v')
+            plt.plot(peaklist.query("PextR>@mz_range[0] and PextR<@mz_range[1] and spectra_ind == @spectrum_idx")['PextR'],
+            right_intens,'^')
+            Label=Label+[f'Peaks', 'Left peak base','Right peak base']
+        plt.grid(visible=True,which="both")
+        plt.xlim(mz_range)
+        plt.legend([*Label])
+        plt.minorticks_on()
+        plt.xlabel("m/z")
+        plt.ylabel("Intensity")
+        plt.title(f"Sample: {datasource.sample_name}, roi: {roi}, spectrum idx: {spectrum_idx}")
+        plt.show()
+
+    def audit_processing(self,
+                         roi: str | list | None = None,
+                         draw_mz_range: tuple[float, float] | None = None,
+                         draw_spectrum_idx: int | None = None,
+                         dtypeconv: np.dtype | None = None):
+        if roi is None:
+            roi = list(self.datasource.roi_metadata.index)
+        elif isinstance(roi, str):
+            roi = [roi]
+        elif isinstance(roi, list):
+            pass
+        else:
+            raise ValueError("Invalid roi")
+
+        pipeline = Pipeline(self.prepdata)
+        datasource = self.datasource
+        roi_metadata = datasource.roi_metadata
+        for r in roi:
+            if draw_spectrum_idx is None:
+                rmeta = roi_metadata.loc[r]
+                idxs = Indexator(rmeta["idxroi"].to_numpy(int))
+                spectrum_idx = list(idxs)[np.random.randint(0,idxs.count)]
+            else:
+                spectrum_idx = draw_spectrum_idx
+
+            processing_stream = pipeline._multistream_pipeline(Pipeline._procfunc_wrapper, r, idxs = spectrum_idx, dtypeconv=dtypeconv)
+            mz, headers = next(processing_stream)
+            loc_idx, proc_intensity = next(processing_stream)
+            roi_configs = self.prepdata.roi_configs[r]
+            peakpick_function = roi_configs._peakpick_function
+            if peakpick_function:
+                peaklist_configs = roi_configs.get_step_configs('peakpick')
+                peaklist = peakpick_function(mz,
+                                             proc_intensity.squeeze(),
+                                             [spectrum_idx],
+                                             peaklist_configs,
+                                             )
+                # headers = peaklist_configs['headers']
+            else:
+                peaklist = None
+
+            self._draw(mz, proc_intensity.squeeze(), peaklist, headers, r, draw_mz_range, spectrum_idx)
+
+    def draw_processed_data(self,
+                            roi: str | list | None = None,
+                            draw_mz_range: tuple[float, float] | None = None,
+                            draw_spectrum_idx: int | None = None):
+        if roi is None:
+            roi = list(self.prepdata.roi_metadata.index)
+        elif isinstance(roi, str):
+            roi = [roi]
+        elif isinstance(roi, list):
+            pass
+        else:
+            raise ValueError("Invalid roi")
+        datasource = self.datasource
+
+        for r in roi:
+            headers = None
+            if draw_spectrum_idx is None:
+                rmeta = datasource.roi_metadata.loc[r]
+                idxs = Indexator(rmeta["idxroi"])
+                spectrum_idx = list(idxs)[np.random.randint(0,idxs.count)]
+            else:
+                spectrum_idx = draw_spectrum_idx
+            
+            if self.processed_spectra_path is None:
+                if self.prepdata is None:
+                    raise ValueError("No processed spectra path or configs to get processed spectrum")
+                else:
+                    pipeline = Pipeline(self.prepdata)
+                    stream = pipeline._multistream_pipeline(Pipeline._procfunc_wrapper,r, cpu_num=1, idxs = spectrum_idx)
+                    mz, headers = next(stream)
+                    _, data_int = next(stream)
+                    data_int = data_int[0]
+            else:
+                with File(self.processed_spectra_path, "r") as hdf5:
+                    data_int = hdf5[r]["int"][datasource._get_local_roi_idx(spectrum_idx), :]
+                    mz = hdf5[r]["mz"][:]
+            if self.peaklist_path is not None:
+                with File(self.peaklist_path, "r") as hdf5:
+                    headers = hdf5[r]['peaklists'].attrs["Column headers"]
+                    peaklist = pd.DataFrame(hdf5[r]["peaklists"][:], columns = headers).astype({"spectra_ind": int}).query('spectra_ind == @spectrum_idx')
+            else:
+                peaklist = None
+
+            self._draw(mz, data_int, peaklist, headers, r, draw_mz_range, spectrum_idx)
+class Pipeline:
+    def __init__(self,
+                 prepdata: "PreparedDataSource"):
+        '''WIP
+        Unified interface for running MSI data processing.
+
+        Pipeline is a thin orchestrator that accepts a PreparedDataSource 
+        and runs processing methods using the pipeline functions stored in the configs object.
+
+        Parameters
+        ----------
+        configs : PreparedDataSource
+            Configuration object with datasource and pipeline functions.
+        '''
+        if isinstance(prepdata, PreparedDataSource):
+            self.prepdata = prepdata
+            self.roi_configs = prepdata.roi_configs
+            self._configs_source_path = prepdata._configs_source_path
+            self._datasource = prepdata._datasource
+        else:
+            raise ValueError(
+                "Provide a PreparedDataSource."
+            )
+
+    def process(self,
+                free_cpus: int = 1, 
+                draw: bool = False, 
+                draw_mz_range: tuple[float, float] | None = None,
+                draw_spectrum_idx: int | None = None,
+                Ram_GB_limit: float = 2,
+                h5chunk_size_MB: int = 10,
+                dtypeconv: np.dtype | str | None = None):
+        '''
+        Parameters
+        ----------
+        free_cpus : int, optional
+            Number of CPUs to leave free (default 1).
+        draw : bool, optional
+            Whether to draw processing results (default False).
+        draw_mz_range : tuple[float, float] | None, optional
+            m/z range for drawing (default None).
+        draw_spectrum_idx : int | None, optional
+            Spectrum index for drawing (default None).
+        Ram_GB_limit : float, optional
+            RAM limit in GB (default 2).
+        h5chunk_size_MB : int, optional
+            HDF5 chunk size in MB (default 10).
+        dtypeconv : np.dtype | str | None, optional
+            Data type conversion (default None).
+        '''
+        datasource = self._datasource
+        
+        hdf5_save_path = os.path.join(os.path.split(datasource.file_path)[0],'processed_pelmesha',datasource.sample_name + '_processed_spectra.hdf5')
+        if os.path.exists(hdf5_save_path):
+            os.remove(hdf5_save_path)
+        if not os.path.exists(os.path.split(hdf5_save_path)[0]):
+            os.makedirs(os.path.split(hdf5_save_path)[0])
+
+        cpu_num = cpu_count()-free_cpus
+        roi_metadata = datasource.roi_metadata
+
+        if dtypeconv is None:
+            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
+        dtypeconv = np.dtype(dtypeconv)
+        bytes_flsize = dtypeconv.itemsize
+        chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
+        for roi in roi_metadata.index:
+            print(f'Processing ROI {roi}')
+            processing_stream = self._multistream_pipeline(self._procfunc_wrapper,
+                                                           roi = roi,
+                                                           cpu_num = cpu_num,
+                                                           Ram_GB_limit = Ram_GB_limit,
+                                                           dtypeconv = dtypeconv)
+            gen_mz, headers_list = next(processing_stream)
+            if gen_mz is None:
+                processing_stream.close()
+                warnings.warn(f"Discontinuous data detected for sample '{datasource.sample_name}' (ROI: {roi}). "  
+                              "Resampling is required before writing to HDF5.")
+                
+                continue
+            
+            with File(hdf5_save_path,"a") as hdf5:
+                dots_num = len(gen_mz)
+                hdf5.create_dataset(roi+"/int", (Indexator(roi_metadata.loc[roi,"idxroi"]).count, dots_num), chunks=(int(chunk_size_by_elements/dots_num), dots_num), dtype = dtypeconv)
+                hdf5.create_dataset(roi+"/mz", data = gen_mz, dtype = dtypeconv)
+                
+                for loc_idxs, proc_intensity in processing_stream:
+                
+                    hdf5[roi]["int"][next(loc_idxs.__iter__()),:] = proc_intensity
+                    # hdf5[roi]["int"][loc_idxs,:] = proc_intensity
+
+            if draw:
+                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
+
+        self.prepdata.save()
+        
+
+    def peakpick(self,
+                 free_cpus: int = 1, 
+                 draw: bool = False, 
+                 draw_mz_range: tuple[float, float] | None = None,
+                 draw_spectrum_idx: int | None = None,
+                 Ram_GB_limit: float = 2,
+                 h5chunk_size_MB: int = 10,
+                 dtypeconv: np.dtype | str | None = None):    
+             
+        datasource = self._datasource
+        hdf5_save_path = os.path.join(os.path.split(datasource.file_path)[0],'processed_pelmesha',datasource.sample_name + '_peaklists.hdf5')
+        if os.path.exists(hdf5_save_path):
+            os.remove(hdf5_save_path)
+        if not os.path.exists(os.path.split(hdf5_save_path)[0]):
+            os.makedirs(os.path.split(hdf5_save_path)[0])
+
+        if dtypeconv is None:
+            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
+        dtypeconv = np.dtype(dtypeconv)
+        cpu_num = cpu_count()-free_cpus
+        bytes_flsize = dtypeconv.itemsize
+        chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
+        
+        roi_metadata = datasource.roi_metadata
+        for roi in roi_metadata.index:
+            print(f'Processing ROI {roi}')
+            peakpicking_stream = self._multistream_pipeline(self._peakpick_wrapper,
+                                                           roi = roi,
+                                                           cpu_num = cpu_num,
+                                                           Ram_GB_limit = Ram_GB_limit,
+                                                           dtypeconv = dtypeconv)
+            gen_mz, headers_list = next(peakpicking_stream)
+            
+            with File(hdf5_save_path,"a") as hdf5:
+                n_heads = len(headers_list)
+                hdf5.create_dataset(roi + "/peaklists",(0, n_heads), maxshape = (None, n_heads), chunks=(chunk_size_by_elements/n_heads, n_heads), dtype=dtypeconv)
+                hdf5[roi]["peaklists"].attrs["Column headers"] = headers_list
+                for peaklists in peakpicking_stream:
+                    list_size = len(peaklists)
+                    hdf5[roi]["peaklists"].resize((hdf5[roi]["peaklists"].shape[0] + list_size, n_heads))
+                    hdf5[roi]["peaklists"][-list_size:,:] = peaklists
+
+            if draw:
+                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
+
+        self.prepdata.save()
+        
+    def _multistream_pipeline(self,
+                              process_wrapper: Callable,
+                              roi: str = None,
+                              cpu_num: int = 1, 
+                              Ram_GB_limit: int = 2,
+                              dtypeconv:  np.dtype | str | None = None,
+                              idxs: Indexator | SliceIndexator | int | None = None):
+        """Основная функция генератор результатов мультипроцессинга"""
+        datasource = self._datasource
+        if dtypeconv is None:
+            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
+        dtypeconv = np.dtype(dtypeconv)
+        roi_metadata = datasource.roi_metadata
+        rmeta = roi_metadata.loc[roi]
+        if idxs is None:
+            idxs = rmeta["idxroi"]
+        # Get per-ROI PipelineConfigurator pipeline functions and its configs from PreparedDataSource
+        roi_configs = self.roi_configs[roi]
+        preprocess_function = roi_configs._preprocess_function
+        
+        mz = None
+        headers_list = None
+        size_per_spec = None
+        if preprocess_function:
+            mz, headers_list, internal_configs = preprocess_function(datasource, roi, rmeta, roi_configs)
+            if mz is None and datasource.loader.dcont:
+                mz = datasource.loader.mz_scale_cont
+        else:
+            if datasource.loader.dcont:
+                mz = datasource.loader.mz_scale_cont
+
+        if process_wrapper.__name__ == "_procfunc_wrapper":
+            internal_configs['process_pipeline']= roi_configs._process_function
+            wrapper_configs = roi_configs.get_step_configs("process")
+        elif process_wrapper.__name__ == "_peakpick_wrapper":
+            internal_configs['process_pipeline']  = roi_configs._process_function
+            internal_configs['peakpick_function']  = roi_configs._peakpick_function
+            wrapper_configs = {"peakpick":roi_configs.get_step_configs("peakpick"), 
+                               "process":roi_configs.get_step_configs("process")}
+        else:
+            raise ValueError("Unknown process_wrapper function")
+
+        yield mz, headers_list # mz common mz to spectra, if mz is not common, None is returned. Headers list for peaklists.
+
+        partial_worker = partial(process_wrapper,
+            datasource = datasource,
+            configs = wrapper_configs,
+            dtypeconv = dtypeconv,
+            **internal_configs
+            )
+        
+        if isinstance(idxs, int):
+            row_idxs, data = partial_worker(np.asarray((idxs,idxs+1), dtype=np.int64))
+            yield row_idxs, data
+        else:
+            if mz is not None:
+                size_per_spec = len(mz)
+            idxs_batches = datasource.split_idxs(idxs = idxs,cpu_count=cpu_num, Ramcap_GB = Ram_GB_limit, size_per_spec = size_per_spec)
+
+            with Pool(cpu_num) as p:
+                for data in tqdm(p.imap_unordered(partial_worker, idxs_batches), total=len(idxs_batches), unit = 'batch'):
+                    yield data
+        
+
+    @staticmethod
+    def _procfunc_wrapper(idxs: Indexator | SliceIndexator | tuple| np.ndarray,
+                          datasource: "DataSource",
+                          configs: "dict | Configs | PipelineConfigurator",
+                          dtypeconv: np.dtype | None = None,
+                          **internal_configs
+                          ):
+        process_function = internal_configs.pop("process_pipeline")
+        internal_process_configs = internal_configs['process']
+        row_idxs = SliceIndexator(datasource._get_local_roi_idx(idxs))
+        processed_spectra: list[np.ndarray] = [None] * row_idxs.count
+        batch_iter = datasource.get_spectra_stream(Indexator(idxs))
+        for n, (_mz, raw_intensity) in enumerate(batch_iter):
+            _, proc_intensity = process_function(_mz, np.asarray(raw_intensity, dtype=dtypeconv), configs, **internal_process_configs)
+            processed_spectra[n] = proc_intensity
+        return row_idxs, np.vstack(processed_spectra)
+    
+    @staticmethod
+    def _peakpick_wrapper(idxs: Indexator | SliceIndexator | tuple| np.ndarray,
+                          datasource: "DataSource",
+                          configs: "dict | Configs | PipelineConfigurator",
+                          dtypeconv: np.dtype | None = None,
+                          **internal_configs
+                          ):
+        
+        process_function = internal_configs.pop("process_pipeline")
+        peakpick_function = internal_configs.pop("peakpick_function")
+        proc_configs = configs['process']
+        internal_proc_configs = internal_configs['process']
+        peakpick_configs = configs['peakpick']
+        internal_peakpick_configs = internal_configs['peakpick']
+
+        peaklists = {}
+        idxs_list = list(Indexator(idxs))
+        batch_iter = datasource.get_spectra_stream(Indexator(idxs))
+        for n, (_mz, raw_intensity) in enumerate(batch_iter):
+            _mz, proc_intensity = process_function(_mz, raw_intensity, proc_configs, **internal_proc_configs)
+            peaklists[n] = peakpick_function(_mz, np.asarray(proc_intensity, dtype=dtypeconv).squeeze(), idxs_list[n], peakpick_configs, **internal_peakpick_configs)
+        return np.vstack(tuple(peaklists.values()))

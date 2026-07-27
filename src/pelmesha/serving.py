@@ -1,6 +1,7 @@
-from pelmesha.configs import Configs, Pipeline, PreparedDataSource, PipelineConfigurator
+from pelmesha.cookbook import Configs, PreparedDataSource, PipelineConfigurator
 from pelmesha.filling import DataSource
 from pelmesha.dough import Indexator
+from pelmesha.kneading import Pipeline
 import numpy as np
 import os
 import yaml
@@ -115,12 +116,7 @@ class DataSet:
                 else:
                     self._add_single_source(path, cfg)
         elif isinstance(source, (list, tuple)):
-            self.add_sources_from_paths(source,extensions,config) # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-            # for path in source: 
-            #     if os.path.isdir(path):
-            #         self.add_sources_from_paths([path],extensions,config)
-            #     else:
-            #         self._add_single_source(path, config)
+            self.add_sources_from_paths(source,extensions,config) 
         elif isinstance(source, str):
             if os.path.isdir(source):
                 self.add_sources_from_paths([source],extensions,config)
@@ -408,89 +404,27 @@ class DataSet:
         if self._reference_peaks is None and self._reference_file_path is not None:
             self._compute_reference_peaks()
         return self._reference_peaks
-
-    def _compute_reference_peaks(self): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-        """
-        Compute reference peaks from the reference file using its config.
-
-        Processes the reference file through the peak-picking pipeline and stores
-        the resulting peak m/z values.
-        """
-        if self._reference_file_path is None:
-            return
-
-        from pelmesha.pspectra import add_procc_data, peaks_prop_array
-
-        ref_config = self._reference_config or {}
-        ref_name = os.path.splitext(os.path.basename(self._reference_file_path))[0]
-
-        ref_ds = DataSource(self._reference_file_path, RamGb_limit_usage = self.RamGb_limit_usage)
-        ref_ds.config = ref_config
-
-        hdf5_path = create_file_path(
-            os.path.dirname(self._reference_file_path),
-            slide_name = ref_name,
-            hdf5_end = '_specdata'
-        )
-
-        add_procc_data(
-            {hdf5_path: [[ref_name, None]]},
-            func = [peaks_prop_array],
-            configs_source = {ref_name: ref_config},
-            dataset_name = "peaklists"
-        )
-
-        with File(hdf5_path, 'r') as f:
-            peaks = []
-            for sample in f.keys():
-                for roi in f[sample].keys():
-                    if 'peaklists' in f[sample][roi]:
-                        headers = list(f[sample][roi]['peaklists'].attrs['Column headers'])
-                        if 'Peak' in headers:
-                            peak_idx = headers.index('Peak')
-                            peaks.extend(f[sample][roi]['peaklists'][:, peak_idx])
-
-        self._reference_peaks = np.unique(peaks) if peaks else np.array([])
-
-    def merge(self, extr_columns = None, extract_coords = True, pivoting4val = None,
-              processed_feat = False, force = False): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-        """
-        Merge all sources into a single DataFrame with multi-index ``(slide, sample, roi)``.
-
-        Results are cached. Use ``force=True`` to recompute.
-
-        :param extr_columns: Columns to extract. See :func:`IMGfeats_concat`.
-        :param extract_coords: If ``True``, also return coordinates DataFrame.
-        :param pivoting4val: If set, pivot the result table.
-        :param processed_feat: If ``True``, use feature data instead of peaklists.
-        :param force: If ``True``, recompute even if cached.
-
-        :type extr_columns: list or None
-        :type extract_coords: bool
-        :type pivoting4val: list or None
-        :type processed_feat: bool
-        :type force: bool
-
-        :return: Merged DataFrame (and optionally coordinates DataFrame).
-        :rtype: pd.DataFrame or tuple
-        """
-        if self._merged_result is not None and not force:
-            return self._merged_result
-
-        paths = {}
-        for sample_name, ds in self.sources.items():
-            hdf5_dir = os.path.dirname(ds.file_path)
-            paths[hdf5_dir] = [[sample_name, None]]
-
-        result = IMGfeats_concat(
-            paths,
-            extr_columns = extr_columns,
-            extracts_coords = extract_coords,
-            processed_feat = processed_feat
-        )
-
-        self._merged_result = result
-        return result
+    def compute_KDE(self,  # TODO написать запуск рассчётов KDE
+                    KD_bandwidth = "med_fwhm", 
+                    bwc = 1,
+                    KD_kernel = "gaussian", 
+                    KD_func = None,
+                    CountF = 10,
+                    norm = (None,None), 
+                    draw_borders = 1.5,
+                    dupl_drop = True,
+                    min_res = 10, 
+                    pivoting4val = None,
+                    cpu_free=1, 
+                    path2save=None,
+                    sample="unknwn",roi="00", 
+                    coords4table=None, 
+                    account_mzscale = True, 
+                    draw=True,
+                    split_mz_min = 10, 
+                    split_peaks_min = 25, 
+                    **params2mspeaks_KD):
+        pass
 
     def correct_mz(self, ftable = None, **kwargs): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
         """
