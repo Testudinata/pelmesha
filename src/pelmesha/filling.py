@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from itertools import  pairwise
 from functools import cached_property
 from pelmesha.dough import Indexator, SliceIndexator
+from pelmesha.utensils import del_hdf5
 
 class DataSource: 
     """
@@ -712,7 +713,7 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
 
             del_hdf5(meta_file_path) # del hdf5 if it exists
             
-            with h5py.File(meta_file_path, 'w') as f:
+            with File(meta_file_path, 'w') as f:
                 f.create_group('metadata')
                 for key, value in metadata.items():
                     f['metadata'].attrs[key] = value

@@ -7,8 +7,8 @@ from itertools import pairwise
 import numpy as np
 import scipy.interpolate as interpolate
 from tqdm.auto import tqdm
-from pelmesha.dough import Indexator, SliceIndexator
-from pelmesha.filling import DataSource
+import os
+
 FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2)) 
 
 def format_time(value: float) -> str:
@@ -374,3 +374,14 @@ def printer(print_queue):
                 del pbar
             except:
                 pbar = tqdm(total = msg,desc="Batches progress",smoothing = 0.005)
+
+def del_hdf5(hdf5_path):
+    """
+    Delete an HDF5 file from disk if it exists.
+
+    :param hdf5_path: Path to the HDF5 file to delete.
+    :type hdf5_path: str
+    """
+    if os.path.exists(hdf5_path):
+        os.remove(hdf5_path)
+        print(f"Deleted file {os.path.basename(hdf5_path)} in directory {os.path.dirname(hdf5_path)}")

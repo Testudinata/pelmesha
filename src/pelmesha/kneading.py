@@ -70,16 +70,16 @@ def process_spectra_base(
     baseline_algo = internal_configs.get('Baseliner', None)
     mz_discrete_coeffs = internal_configs.get('mz_discrete_coeffs', None)
 
-    smooth_configs = configs['smoothing']
-    msalign_configs = configs['msalign']
-    modify_raw_spectrum_configs = configs['modify_raw_spectrum']
+    smooth_configs = configs.get('smoothing', {})
+    msalign_configs = configs.get('msalign', {})
+    modify_raw_spectrum_configs = configs.get('modify_raw_spectrum', {})
 
     #premodifying spectrum
-    if modify_raw_spectrum_configs['add_zero_points_to_peaks'] or modify_raw_spectrum_configs['mz_segments_to_zero']:
+    if modify_raw_spectrum_configs.get('add_zero_points_to_peaks') or modify_raw_spectrum_configs.get('mz_segments_to_zero'):
         mz, intensity = modify_raw_spectrum(mz, intensity, mz_discrete_coeffs, **modify_raw_spectrum_configs) 
 
     #Smoothing step
-    if smooth_configs['smooth_algo'] is not None: 
+    if smooth_configs.get('smooth_algo') is not None: 
         intensity = smoothing(intensity, **smooth_configs)
     
     # BaselineCorrection step

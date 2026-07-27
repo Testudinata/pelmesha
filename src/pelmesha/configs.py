@@ -322,14 +322,21 @@ class Drawer():
         plt.gcf().set_figheight(5)
         datasource = self.datasource
         diapcalc = lambda mz, plot_mz_range: (np.array(mz>plot_mz_range[0]) & np.array(mz<plot_mz_range[1])) if plot_mz_range is not None else range(len(mz))
-        
+
         # Draw raw
         Label = ["Raw mass spectrum"]
-        mz_raw, intens_raw = datasource.get_spectrum(spectrum_idx) 
+        mz_raw, intens_raw = datasource.get_spectrum(spectrum_idx)
+
+        if mz is None:
+            mz = mz_raw
+        if mz_range is None:
+            mz_range = (mz[0], mz[-1])
+
         diap_raw = diapcalc(mz_raw, mz_range)
         plt.plot(mz_raw[diap_raw], intens_raw[diap_raw],alpha=0.75)
-        
+
         # Draw processed
+
         Label.append("Processed mass spectrum")
         diap = diapcalc(mz, mz_range)
         plt.plot(mz[diap], intens[diap],alpha=0.75)
@@ -400,11 +407,8 @@ class Drawer():
                 # headers = peaklist_configs['headers']
             else:
                 peaklist = None
-            if draw_mz_range is None:
-                mz_range = (mz[0], mz[-1])
-            else:
-                mz_range = draw_mz_range
-            self._draw(mz, proc_intensity.squeeze(), peaklist, headers, r, mz_range, spectrum_idx)
+
+            self._draw(mz, proc_intensity.squeeze(), peaklist, headers, r, draw_mz_range, spectrum_idx)
 
     def draw_processed_data(self,
                             roi: str | list | None = None,
@@ -435,7 +439,7 @@ class Drawer():
                 else:
                     pipeline = Pipeline(self.prepdata)
                     stream = pipeline._multistream_pipeline(Pipeline._procfunc_wrapper,r, cpu_num=1, idxs = spectrum_idx)
-                    mz = next(stream)
+                    mz, headers = next(stream)
                     _, data_int = next(stream)
                     data_int = data_int[0]
             else:
@@ -448,11 +452,8 @@ class Drawer():
                     peaklist = pd.DataFrame(hdf5[r]["peaklists"][:], columns = headers).astype({"spectra_ind": int}).query('spectra_ind == @spectrum_idx')
             else:
                 peaklist = None
-            if draw_mz_range is None:
-                mz_range = (mz[0], mz[-1])
-            else:
-                mz_range = draw_mz_range
-            self._draw(mz, data_int, peaklist, headers, r, mz_range, spectrum_idx)
+
+            self._draw(mz, data_int, peaklist, headers, r, draw_mz_range, spectrum_idx)
 class Pipeline:
     def __init__(self,
                  prepdata: PreparedDataSource):
@@ -830,6 +831,11 @@ class Configs():
         return cls_name, func_name
     def __setitem__(self, key: str, value: Any):
         self._update_flat({key: value})
+    def get(self, key: str | tuple[str, ...], default: Any = None) -> dict[str, Any]:
+        try:
+            return self.__getitem__(key)
+        except KeyError:
+            return default
     def __getitem__(self, key: str | tuple[str, ...]) -> dict[str, Any]:
         """Retrieve parameters by function/method/class name.
 
@@ -1448,6 +1454,13 @@ class Configs():
               cfg.delete(("msalign", "smooth_window"))
               cfg.delete(("Baseline", "snip", "params", "lam"))
 
+        * **Delete entire class / method / function** — bare name or
+          ``ClassName.method_name``::
+
+              cfg.delete("Baseline")          # remove entire Baseline class
+              cfg.delete("Baseline.snip")     # remove only the snip method
+              cfg.delete("msalign")           # remove entire msalign function
+
         Parameters
         ----------
         param_name : str or tuple of str
@@ -1467,6 +1480,20 @@ class Configs():
 
         # --- Flat mode (plain string) ---
         if isinstance(param_name, str):
+            # Check if it is a bare class name → delete entire class
+            methods = self.configs.get("methods", {})
+            if param_name in methods:
+                del methods[param_name]
+                print(f"Deleted entire class '{param_name}' from methods.")
+                return
+
+            # Check if it is a bare function name → delete entire function
+            functions = self.configs.get("functions", {})
+            if param_name in functions:
+                del functions[param_name]
+                print(f"Deleted entire function '{param_name}' from functions.")
+                return
+
             locations, refs = self._find_param_locations(param_name)
 
             if not locations:
@@ -1506,10 +1533,13 @@ class Configs():
     def _delete_by_path(self, parts: list[str]) -> None:
         """Navigate config hierarchy following *parts* and delete the last key.
 
-        Minimal indexing — resolves class/method/function names automatically::
+        Supports deleting entire classes, methods, or functions::
 
-            cfg.delete("msalign.smooth_window")     # function.param
-            cfg.delete("Baseline.snip.lam")          # class.method.param
+            cfg.delete("Baseline")               # delete entire Baseline class
+            cfg.delete("Baseline.snip")           # delete only the snip method
+            cfg.delete("msalign")                 # delete entire msalign function
+            cfg.delete("msalign.smooth_window")   # function.param
+            cfg.delete("Baseline.snip.lam")       # class.method.param
             cfg.delete(("Baseline", "snip", "lam"))  # tuple form
 
         Parameters
@@ -1528,12 +1558,29 @@ class Configs():
         # --- Class.method.param or Class.method.bucket.param ---
         if first in methods:
             if not rest:
-                warnings.warn(
-                    f"Expected at least a method name after "
-                    f"'{first}' - ignoring."
-                )
+                # Delete entire class
+                del methods[first]
+                print(f"Deleted entire class '{first}' from methods.")
                 return
+
             second, *tail = rest
+
+            if not tail:
+                # Only two parts: "ClassName.method_name" → delete entire method
+                if second not in methods[first]:
+                    warnings.warn(
+                        f"Method '{second}' not found in class "
+                        f"'{first}' - ignoring."
+                    )
+                    return
+                del methods[first][second]
+                print(f"Deleted method '{first}.{second}'.")
+                # Clean up empty class
+                if not methods[first]:
+                    del methods[first]
+                    print(f"Class '{first}' is now empty — removed as well.")
+                return
+
             if second not in methods[first]:
                 warnings.warn(
                     f"Method '{second}' not found in class "
@@ -1591,14 +1638,14 @@ class Configs():
                 )
             return
 
-        # --- Function.param ---
+        # --- Function.param or entire function ---
         if first in functions:
             if not rest:
-                warnings.warn(
-                    f"Expected a parameter name after "
-                    f"'{first}' - ignoring."
-                )
+                # Delete entire function
+                del functions[first]
+                print(f"Deleted entire function '{first}' from functions.")
                 return
+
             *keys_to_navigate, last_key = rest
             current = functions[first]
             for k in keys_to_navigate:
@@ -1997,6 +2044,64 @@ class PipelineConfigurator(Configs):
             # Completely new function — add to all steps as a best guess
             for func_names in self._step_func_names.values():
                 func_names.add(func_name)
+
+    def delete(self,
+               param_name: str | tuple[str, ...]) -> None:
+        """Delete a parameter, method, class, or function and keep
+        ``_step_func_names`` in sync.
+
+        Same indexing as :meth:`Configs.delete`, plus support for
+        deleting entire classes and functions::
+
+            pc.delete("Baseline")          # remove entire Baseline class
+            pc.delete("Baseline.snip")     # remove only the snip method
+            pc.delete("msalign")           # remove entire msalign function
+
+        Parameters
+        ----------
+        param_name : str or tuple of str
+            The parameter to delete.  See :meth:`Configs.delete`.
+        """
+        # --- Resolve what is being deleted BEFORE parent modifies configs ---
+        methods = self.configs.get("methods", {})
+        functions = self.configs.get("functions", {})
+
+        # Collect names to remove from _step_func_names
+        removed_method_names: set[str] = set()
+        removed_func_names: set[str] = set()
+
+        if isinstance(param_name, str) and "." not in param_name:
+            # Bare name — could be a class or function
+            if param_name in methods:
+                removed_method_names = set(methods[param_name].keys())
+            elif param_name in functions:
+                removed_func_names.add(param_name)
+        elif isinstance(param_name, (tuple, str)):
+            # Path — extract the first component
+            first = param_name[0] if isinstance(param_name, tuple) else param_name.split(".")[0]
+            if first in methods:
+                if isinstance(param_name, tuple) and len(param_name) == 2:
+                    # "ClassName.method_name" — delete single method
+                    removed_method_names.add(param_name[1])
+                elif isinstance(param_name, str) and param_name.count(".") == 1:
+                    # "ClassName.method_name" — delete single method
+                    removed_method_names.add(param_name.split(".")[1])
+                else:
+                    # Deeper path or bare class — collect all method names
+                    removed_method_names = set(methods[first].keys())
+            elif first in functions:
+                if isinstance(param_name, tuple) and len(param_name) == 1:
+                    removed_func_names.add(first)
+                elif isinstance(param_name, str) and "." not in param_name:
+                    removed_func_names.add(first)
+
+        # Call parent's delete
+        super().delete(param_name)
+
+        # --- Update _step_func_names ---
+        for step_name, func_names in self._step_func_names.items():
+            func_names.difference_update(removed_method_names)
+            func_names.difference_update(removed_func_names)
 
     # ------------------------------------------------------------------ #
     #  Step-specific config access                                       #
