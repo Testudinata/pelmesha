@@ -492,7 +492,7 @@ def Pgrouping_KD_table(ftable,
     ----
     Вспомогательная функция к основной `Pgrouping_KD`. В ней производятся основные рассчёты функции и работает только с табличными данными `pd.DataFrame`.  
     """
-    ind_norm = len(ftable.index.names)==1 and not ftable.index.names[0] # Определяем тип индексации (Обычная без названия (TRUE) "as is" или информативная по принадлежности к чему-либо)
+    ind_norm = not ftable.index.is_multi and not ftable.index.names[0] # Определяем тип индексации (Обычная без названия (TRUE) "as is" или информативная по принадлежности к чему-либо)
     FWHM2sigma = bwc*(FWHM_TO_SIGMA_FACTOR/5.5)
     ## Заглушка, если не определены sample и roi
     if not sample:
@@ -708,7 +708,11 @@ def Pgrouping_KD_table(ftable,
     num_bf_raredel = len(grftable["Peak"].unique())
     num_raredel = len(excluded["Peak"].unique())
     unique_num =len(ftable["mz"].unique())
-    textw=f"Grouping results of {sample} {roi}:\nUnique peaks before grouping: {unique_num}\nUnique peaks after grouping: {num_bf_raredel}\nExcluded peaks by count filter({CountF}): {num_raredel} ({num_raredel*100/num_bf_raredel:.2f}%)\nResulted feature peaks is {num_res}"
+    textw=(f"Grouping results of {sample} {roi}:\n"
+           f"Unique peaks before grouping: {unique_num}\n"
+           f"Unique peaks after grouping: {num_bf_raredel}\n"
+           f"Excluded peaks by count filter({CountF}): {num_raredel} ({num_raredel*100/num_bf_raredel:.2f}%)\n"
+           f"Resulted feature peaks is {num_res}")
     logger.log(textw)
     print(textw)
 
@@ -787,7 +791,7 @@ def peaks_probability_distribution(KDE_func, KD_kernel, mz_discret_coeffs, KD_da
     ftable_max = mz[-1] + KD_bandwidth[-1]*6
     min_dist = np.poly1d(mz_discret_coeffs)(mz).min()
     X_plot_segment = _set_KDE_X_plot(ftable_min, ftable_max, min_dist = min_dist)
-    if KDE_func == 'FFT':# or (len(mz_discret_coeffs) == 1):
+    if KDE_func.lower() == 'fft':# or (len(mz_discret_coeffs) == 1):
         KD_bandwidth = np.median(KD_bandwidth)
         KDE_func = FFTKDE
     else:

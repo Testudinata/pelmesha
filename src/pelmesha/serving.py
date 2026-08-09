@@ -1,58 +1,47 @@
-from pelmesha.cookbook import Configs, PreparedDataSource, PipelineConfigurator
+from pelmesha.cookbook import Configs, PreparedDataSource, PipelineConfigurator, KDEConfigs
 from pelmesha.filling import DataSource
-from pelmesha.dough import Indexator
-from pelmesha.kneading import Pipeline
+from pelmesha.dough import Indexator, SliceIndexator
+from pelmesha.kneading import _compute_KDE
+from pelmesha.utensils import mspeaks_KD, Peak_assignment, _align_kde_mz_grids, _consesusing_peaks, apply_kde_mzcorrection, _peaks_filtration, _consensus_peaks_summary, show_df, _nunique_summary
+from sklearn.preprocessing import normalize
+from itertools import pairwise
+import pyarrow.parquet as pq
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import os
 import yaml
 import warnings
+from functools import partial
+from typing import Callable
+from multiprocessing import Pool, cpu_count
+from tqdm.auto import tqdm
+from h5py import File
 from urllib.parse import quote
-class DataSet:
-    # TODO:
-    # INITIALIZATION, CONFIGS AND PATHS:
-    # DONE 1. Инициализация класса с возможностью опционального добавления словаря по типу: {path: config}, если конфиг None или просто список path, то пытается использовать записанный конфиг файл в папке
-    # DONE 2. Метод add_source(path, config или {path: config}), который вносит в список путей
-    # DONE 3. Метод ({path: config}), также вносит в список путей, как и инит или add_source
-    # DONE 4. Добавить защиту от добавления уже какого-то пути, который есть
-    # DONE 5. Добавить метод add_sources_from_paths(path_list, extensions, config), который ищет определённые расширения в пути и вносит в список. Минус:  При этом нужно исключить сразу те названия, которые уже связаны с обработкой (типа определённых hdf5)
-    # DONE 6. Создать хранение конфигов в DataSource (путь и сам выгруженный конфиг класс в подпапке) и, собственно, выгрузку при инициализации пути к файлу. Если файл конфигов yaml отсутствует - создать и внести поверх базовой основы новые конфиги
-    # 7. (Сделать последним)Добавить проверку об изменениях параметров обработки или их соответствию старым, если они есть. Отметка, что старых не было тоже
-    # 8. (Сделать последним, а пока сделать заглушку в виде удаления)Добавить возможность автоматической сверки наличия обработанных данных и их конфигов обработки с поставляемыми, если совпадают - повторная обработка не производится.
-    # New TODO (TODO выше написана нейросеткой и на ревизии, ниже результаты ревизии)
-    # Done 1. Придумать способ и реализовать исключения совпадений названий образцов (с одинаковыми sample названиями).
-    # 2. Добавить отдельный класс для создания референсного списка пиков????????
-    # Done 3. Добавить удобную репрезентацию, чтобы отображало кратко какие датасеты находятся внутри. 
-    # Done Отображение: 
-    # Done 1) sample name, 
-    # Done 2) кол-во спектров, 
-    # Done 3) cont/discont, 
-    # Done 4) Путь с гиперссылкой?(html вариант), 
-    # Done 5) ?гиперссылка на конфиги локальные?(html вариант)
-    # Done 6) Есть ли пиклист
-    # Done 7) Есть ли обработанный вариант масс-спектров
-    # Not implemented 8) Есть ли pgrouping вариант?
-    # 9) (Сделать последним) Совпадает ли старый конфиг и новый?   
-    # 4. Удаление путей??????
+import sys
 
+class DataSet:
     # INDIVIDUAL PROCESSING AND REFERENCE
     # Done 9. Написать метод, который бы запустил обработку данных записанных в списке путей и на основе индивидиуальных конфигов (с вариантами: чисто пик-пикинг (по сути последний метод с изменёнными конфигами), 
     # чисто обработка спектров, пик-пикинг с обработкой и сохранение в hdf5 спектров). При этом, проводится проверка наличия атрибута рефернсного файла. Обработка "индивидуальная"
-    # 10. Написать атрибут, который хранил бы путь выбранного "референсного файла" для создания референсного пиклиста, также хранил бы и свой особый конфиг для обработки 
+    # Done 10. Написать атрибут, который хранил бы путь выбранного "референсного файла" для создания референсного пиклиста, также хранил бы и свой особый конфиг для обработки 
     # (отличный от того, когда файл используется для обработки и анализа, а не референсный).
     # 11. Написать атрибут, со списком референсных пиков от референсного файла
     # 12. Если менять конфиг рефернсного атрибута, то список рефернсных пиков удаляется/None-ится.
-    # upd. 13. Добавить автоматическое создание базового пайплайна с базовыми настройками при инициализации. Если хочется изменить пайплайн - использовать метод setPipeline (написать)
+    # Done 13. Добавить автоматическое создание базового пайплайна с базовыми настройками при инициализации. Если хочется изменить пайплайн - использовать метод setPipeline (написать)
     #New TODO:
     # 1. Добавить вместе с отображением ds, также какие-то данные о референсном/рефернсных датасетах.
     # 2. Добавить возможность разом удалить все уже обарботанные данные датасетов, добавленных в экземпляр DataSet. Обязательно наличие yes/no подтверждения (лучший вариант, не требующих новых зависимостей) 
     # MERGING AND PGROUPING
     # 13. Мерджинг координат, метадаты и датасетов с сохранением принадлежности к определённому файлу и roi (Мультииндекс в датафрейме?). 
     # Подумать насчёт сохранения в атрибут результата. Либо каждый раз доставать заново
-    # 14. Создать метод финальной коррекции m/z методом Pgrouping_KD для объединённых датасетов. Подумать над тем, как результирующие данные сохранять. По сути ведь лишь появляется новая колонка, 
+    # Done 14. Создать метод финальной коррекции m/z методом Pgrouping_KD для объединённых датасетов. Подумать над тем, как результирующие данные сохранять. По сути ведь лишь появляется новая колонка, 
     # но стоит как-то зафиксировать как она была получена (какие датасеты смерджены и какие были параметры их обработки?)
     # 15. Метод мерджинга основного датасета с координатами? По сути пользователи и сами смогут сделать, но тут фишка в упрощении действа, так как большинство моментов спратаны в классе.
     #New TODO:
-    # 1. Обдумать и добавить отображение для результата Pgrouping_KD в сочетании с какими датасетами он формировался.
+    # 1. Обдумать и добавить отображение для результата Коррекции m/z в сочетании с какими датасетами он формировался. Вероятно сделать возможность загрузки родных
+    # паркет данных с возможностью полностью восстановить, что же тут происходило
  
     """
     Central class for managing multiple mass spectrometry data sources.
@@ -79,23 +68,26 @@ class DataSet:
     :type sources: list or dict or None
     :type RamGb_limit_usage: int or float
     """
-    _EXCLUDED_EXTENSIONS = {'ingredients.hdf5', 'specdata.hdf5', 'peaklists.hdf5'}
+    _EXCLUDED_EXTENSIONS = {'ingredients.hdf5', 'specdata.hdf5', 'peaklists.hdf5',"peaks_density.hdf5"}
 
     def __init__(self, 
-                 sources = None, 
+                 sources = None,
+                 configs = None,
+                 kde_configs = None, 
                  RamGb_limit_usage = 2):
         self.sources = {}
         self.RamGb_limit_usage = RamGb_limit_usage
         self._reference_file_path = None
+        self._reference_source: PreparedDataSource = None
         self._reference_peaks = None
-        self._merged_result = None
+
 
         if sources is not None:
-            self.add_sources(sources)
+            self.add_sources(sources, configs, kde_configs)
         print(f"DataSet is initialized. Current data samples:")
         print(self)
 
-    def add_sources(self, source, config = None, extensions = None):
+    def add_sources(self, source, config = None, kde_configs = None, extensions = None):
         """
         Add one or more data sources to the DataSet.
 
@@ -116,25 +108,25 @@ class DataSet:
                 else:
                     self._add_single_source(path, cfg)
         elif isinstance(source, (list, tuple)):
-            self.add_sources_from_paths(source,extensions,config) 
+            self.add_sources_from_paths(source,extensions,config, kde_configs) 
         elif isinstance(source, str):
             if os.path.isdir(source):
-                self.add_sources_from_paths([source],extensions,config)
+                self.add_sources_from_paths([source],extensions,config, kde_configs)
             else:
-                self._add_single_source(source, config)
+                self._add_single_source(source, config, kde_configs)
         else:
             raise TypeError(f"Unsupported source type: {type(source)}")
 
-    def __call__(self, source, config = None, extensions = None):
+    def __call__(self, source, config = None, kde_configs = None, extensions = None):
         """
         Callable interface — same as :meth:`add_source`.
 
         Usage: ``dataset(path, config)`` or ``dataset({path: config})``.
         """
-        self.add_sources(source, config, extensions)
+        self.add_sources(source, config, kde_configs, extensions)
         return self
 
-    def _add_single_source(self, path, config = None):
+    def _add_single_source(self, path, config = None, kde_configs = None):
         """Internal: add a single source with duplicate protection."""
         if not os.path.exists(path):
             raise FileNotFoundError(f"Source path does not exist: {path}")
@@ -153,7 +145,7 @@ class DataSet:
                 f"Please, rename file name '{sample_name}' or folder '{folder_name}'"
             )
         resolved_config = self._resolve_config(config)
-        source = PreparedDataSource(source, resolved_config)
+        source = PreparedDataSource(source, resolved_config, kde_configs)
         self.sources[sample_name] = source
 
     @staticmethod
@@ -185,7 +177,7 @@ class DataSet:
             return config
         return {}
 
-    def add_sources_from_paths(self, path_list, extensions = None, config = None):
+    def add_sources_from_paths(self, path_list, extensions = None, config = None, kde_configs = None):
         """
         Search directories for data files with given extensions and add them as sources.
 
@@ -222,17 +214,54 @@ class DataSet:
 
         for path in found_paths:
             try:
-                self._add_single_source(path, config)
+                self._add_single_source(path, config, kde_configs)
             except (ValueError, FileNotFoundError) as e:
                 warnings.warn(f"Skipping {path}: {e}")
+    def set_reference_source(self, 
+                             source: DataSource | PreparedDataSource, 
+                             configs: PipelineConfigurator | dict[str, PipelineConfigurator] | None = None, 
+                             kde_configs: KDEConfigs | dict[str, KDEConfigs] | None = None,
+                             **kwargs):
+        if isinstance(source, DataSource):
+            source = PreparedDataSource(source, configs, kde_configs, **kwargs)
+        else:
+            KDEkwargs, Configkwargs = source._resolve_kwargs(kwargs)
+            if configs is not None:
+                source._load(configs, **Configkwargs)
+            else:
+                source.update(**Configkwargs)
+            if kde_configs is not None:
+                source._load_kde_configs(kde_configs, **KDEkwargs)
+            else:
+                source.update_kde(**KDEkwargs)
+        self._reference_source = source
 
+    def save_all_reference_configs(self):
+        """
+        Save the current configs for source to its ``processed_pelmesha/REFERENCE_<sample_name>_processing_recipe.yaml`` and ``processed_pelmesha/REFERENCE_<sample_name>_kde_recipe.yaml`` file.
+        """
+        pathsave_base = self._resolve_base_ref_path()
+        self._reference_source.dump(pathsave_base+"_processing_recipe.yaml")
+        self._reference_source.dump_kde_configs(pathsave_base+"_kde_recipe.yaml")
+
+    def _resolve_base_ref_path(self):
+        ref_source = self._reference_source
+        dirpath = os.path.dirname(ref_source._configs_source_path)
+        sample_name = ref_source.sample_name
+        pathsave_base = os.path.join(dirpath, "REFERENCE_" + sample_name)
+        return pathsave_base
     def save_configs(self): 
         """
-        Save the current config for each source to its ``raw_pelmesha/config.yaml`` file.
+        Save the current config for each source to its ``processed_pelmesha/<sample_name>_processing_recipe.yaml`` file.
         """
         for ds in self.sources.values():
             ds.save()
-
+    def save_kde_configs(self): 
+        """
+        Save the current config for each source to its ``processed_pelmesha/<sample_name>_kde_recipe.yaml`` file.
+        """
+        for ds in self.sources.values():
+            ds.dump_kde_configs()
     def check_config_changes(self): 
         """
         Compare current configs with saved configs for each source.
@@ -256,7 +285,96 @@ class DataSet:
             else:
                 changes[sample_name] = {"status": "new", "old": None, "new": current_config}
         return changes
+    def get_reference_peaks(self, 
+                            roi: str | list[str] | None = None,
+                            free_cpus: int = 1, 
+                            draw: bool = False, 
+                            draw_mz_range: tuple[float, float] | None = None,
+                            draw_spectrum_idx: int | None = None,
+                            Ram_GB_limit: float = 2,
+                            h5chunk_size_MB: int = 10,
+                            dtypeconv: np.dtype | str | None = None,
+                            merge_roi_results = False):
+        """
+        Get reference peaks for a given ROI.
+        
+        Parameters
+        ----------
+        roi : str | list[str] | None, optional
+            ROI name or list of ROI names (default None).
+        
+        Returns
+        -------
+        peaks : pd.DataFrame
+            Reference peaks, with columns:
+            - ``mz``: m/z values
+            - ``weights``: optional.
+        """
+        ref_source = self._reference_source
+        sample = ref_source.sample_name
+        cpu_num = cpu_count()-free_cpus
+        roi_metadata = ref_source.roi_metadata
+        if dtypeconv is None:
+            dtypeconv = ref_source._datasource.metadata.iloc[0]["dtype_raw"]
+        dtypeconv = np.dtype(dtypeconv)
+        if roi is None:
+            roi = list(roi_metadata.index)
+        if isinstance(roi, str):
+            roi = [roi]
+        pipeline = Pipeline(ref_source)
+        print(f"Processing REFERENCE SAMPLE {sample}...")
+        sample_peaks = {}
+        for r in roi:
+            print(f'Processing REFERENCE ROI {r}...')
+            peakpicking_stream = pipeline._multistream_pipeline(pipeline._peakpick_wrapper,
+                                                                roi = r,
+                                                                cpu_num = cpu_num,
+                                                                Ram_GB_limit = Ram_GB_limit,
+                                                                dtypeconv = dtypeconv)
+            gen_mz, headers_list = next(peakpicking_stream)
+            dict_peak = {}
+            for n, peaklists in enumerate(peakpicking_stream):
+                dict_peak[n] = peaklists
+            # print(pd.DataFrame(np.vstack(tuple(dict_peak.values())), columns = headers_list).astype({"spectra_ind": int}))
 
+            sample_peaks[r] = pd.DataFrame(np.vstack(tuple(dict_peak.values())), columns = headers_list).loc[:,['spectra_ind','mz','FWHML','FWHMR']].astype({"spectra_ind": int})
+
+            roi_peaks = sample_peaks[r]
+            discret_coeffs = roi_metadata.loc[r, 'discret_coeffs']
+            # TODO добавить вариант мёрджа после того, как напишу суммацию KDE графиков от разных сэмплов с роиё
+            X_plot, Y_plot = _compute_KDE(roi_peaks, discret_coeffs, cpu_num, **ref_source.roi_kde_configs[r].to_dict)
+            Y_plot = normalize(Y_plot.reshape(1,-1), norm = 'l1').squeeze() # Normalize the probability distribution
+            
+            diap = (X_plot > 790) & (X_plot < 810)
+            Xp_data = mspeaks_KD(X_plot,Y_plot)
+            Xp = Xp_data[0]
+            Xl = Xp_data[1]
+            Xr = Xp_data[2]
+            mz_sequence = np.sort(roi_peaks['mz'].unique())
+            mz_num = len(mz_sequence)
+            if mz_num < cpu_num*3:
+                batches_num = mz_num
+            else:
+                batches_num = cpu_num*3
+            idxmz_batches = list(pairwise(np.linspace(0,mz_sequence.shape[0],batches_num,dtype=int))) 
+            par_args=[None]*len(idxmz_batches)
+            for batch_n,idx_batch in enumerate(idxmz_batches):
+                mzb_min = mz_sequence[idx_batch[0]]
+                mzb_max = mz_sequence[idx_batch[1]-1]
+                Xl_min = Xl[Xl<=mzb_min][-1]
+                Xr_max = Xr[Xr>=mzb_max][0]
+                batch_indexes = (Xp>=Xl_min) & (Xp<=Xr_max)
+                par_args[batch_n] = (roi_peaks.loc[(roi_peaks['mz'] >= mzb_min) & (roi_peaks['mz'] <= mzb_max)], Xp_data[:,batch_indexes])
+            with Pool(cpu_num) as p:
+                grftable = p.starmap(Peak_assignment,par_args)
+            grftable=pd.concat(grftable)
+            print(grftable)
+            plt.figure(figsize=(25, 5))
+            plt.plot(X_plot[diap], Y_plot[diap])
+
+
+        self._reference_peaks = sample_peaks
+                
     def process(self,
                 sample_name: list | str | None = None,
                 free_cpus: int = 1, 
@@ -367,8 +485,101 @@ class DataSet:
                 Ram_GB_limit=Ram_GB_limit,
                 h5chunk_size_MB=h5chunk_size_MB,
                 dtypeconv=dtypeconv,
-                **kwargs,
+                **kwargs
             )
+    def estimate_peak_density_kde(self, 
+                                  sample_name: list | str | None = None,
+                                  free_cpus: int = 1,
+                                  draw: bool = True,
+                                  draw_borders: float = 1.5) -> None:
+        """
+        Estimate peak density using KDE.
+        
+        Parameters
+        ----------
+        sample_name : list | str | None, optional
+            Sample name (default None).
+        free_cpus : int, optional
+            Number of CPUs to leave free (default 1).
+        draw : bool, optional
+            Whether to draw processing results (default False).
+        draw_mz_range : tuple[float, float] | None, optional
+            m/z range for drawing (default None).
+        draw_spectrum_idx : int | None, optional
+            Spectrum index for drawing (default None).
+        Ram_GB_limit : float, optional
+            RAM limit in GB (default 2).
+        h5chunk_size_MB : int, optional
+            HDF5 chunk size in MB (default 10).
+        dtypeconv : np.dtype | str | None, optional
+            Data type conversion (default None).
+        
+        See Also
+        --------
+        Pipeline.process : The underlying processing method.
+        """
+        if sample_name is None:
+            sample_name = list(self.sources.keys())
+        elif isinstance(sample_name, str):
+            sample_name = [sample_name]
+
+        for sample in sample_name:
+            print(f"Estimating peak density for SAMPLE {sample}...")
+            source = self.sources[sample]
+            Pipeline(source).estimate_peak_density_kde(free_cpus=free_cpus,
+                                                       draw=draw,
+                                                       draw_borders=draw_borders)
+    
+    def feature_matrix(self,
+                       rois: dict[str, list[str]] = {},
+                        countf: int = 10,
+                        duplicates_drop: bool = True,
+                        pivot_values: str | list[str] | None = None,  # 'Intensity', ['Intensity', 'Area']
+                        fill_values = 0.0,
+                        free_cpus: int = 1,
+                        draw_borders: float = 1.5,
+                        draw: bool = True,
+                        save_path: str = None,
+                        local_roi_idx: bool = True,
+                        merge_with_coords: bool = False) -> pd.DataFrame:
+        """
+        Generate feature matrix from peak lists.
+        
+        Parameters
+        ----------
+        rois : dict
+            Dictionary of ROIs to process. Example: {sample_name: [roi_name, ...]}.
+        countf : int, optional
+            Number of features to keep (default 10).
+        duplicates_drop : bool, optional
+            Whether to drop duplicates (default True).
+        pivot_values : str | list[str], optional
+            Values to pivot on (default None).
+        fill_values : float, optional
+            Value to fill missing values with (default 0.0).
+        free_cpus : int, optional
+            Number of CPUs to leave free (default 1).
+        save_path : str, optional
+            Path to save feature matrix (default None).
+        
+        Returns
+        -------
+        pd.DataFrame
+            Feature matrix.
+        """
+        
+        return Pipeline.feature_matrix(self,
+                                       rois = rois,
+                                       countf = countf,
+                                       duplicates_drop = duplicates_drop,
+                                       pivot_values = pivot_values,
+                                       fill_values = fill_values,
+                                       free_cpus = free_cpus,
+                                       draw_borders = draw_borders,
+                                       draw = draw,
+                                       save_path = save_path,
+                                       local_roi_idx = local_roi_idx,
+                                       merge_with_coords = merge_with_coords)
 
 
     @property
@@ -394,95 +605,27 @@ class DataSet:
         self._reference_config = config
         self._reference_peaks = None
 
-    @property
-    def reference_peaks(self): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-        """
-        List of reference peaks (m/z values) from the reference file.
-
-        Lazily computed on first access. Returns ``None`` if no reference file is set.
-        """
-        if self._reference_peaks is None and self._reference_file_path is not None:
-            self._compute_reference_peaks()
-        return self._reference_peaks
-    def compute_KDE(self,  # TODO написать запуск рассчётов KDE
-                    KD_bandwidth = "med_fwhm", 
-                    bwc = 1,
-                    KD_kernel = "gaussian", 
-                    KD_func = None,
-                    CountF = 10,
-                    norm = (None,None), 
-                    draw_borders = 1.5,
-                    dupl_drop = True,
-                    min_res = 10, 
-                    pivoting4val = None,
-                    cpu_free=1, 
-                    path2save=None,
-                    sample="unknwn",roi="00", 
-                    coords4table=None, 
-                    account_mzscale = True, 
-                    draw=True,
-                    split_mz_min = 10, 
-                    split_peaks_min = 25, 
-                    **params2mspeaks_KD):
+    def coordinates(self, 
+                    rois: dict[str, list[str]] = {},
+                    local_roi_idx: bool = True):
+        multiindex_keys = []
+        coords = []
+        for datasource in self.sources.values():
+            sample_rois = rois.get(datasource.sample_name, None)
+            if sample_rois is None:
+                sample_rois = datasource.rois
+            for roi in sample_rois:                
+                multiindex_keys.append((datasource.sample_name, roi))
+                coords.append(datasource.get_coords(roi))
+                if local_roi_idx:
+                    roi_coords = coords[-1].reset_index(drop=True)
+                    roi_coords.index.name = coords[-1].index.name        
+                    coords[-1] = roi_coords
+                    
+        return pd.concat(coords, keys=multiindex_keys, names = ['sample', 'roi'])
+                    
+    def _save_coordinates(self, path2save):
         pass
-
-    def correct_mz(self, ftable = None, **kwargs): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-        """
-        Apply Pgrouping_KD m/z correction to the merged dataset.
-
-        Groups closely-spaced m/z values across spectra using kernel density estimation.
-
-        :param ftable: Input feature table. If ``None``, uses the merged result from :meth:`merge`.
-        :param kwargs: Additional parameters passed to :func:`Pgrouping_KD`.
-
-        :type ftable: pd.DataFrame or None
-
-        :return: Corrected feature table with a new ``Peak`` column.
-        :rtype: pd.DataFrame
-        """
-        from pelmesha.pfeats import Pgrouping_KD
-
-        if ftable is None:
-            merged = self.merge(extract_coords = False)
-            if isinstance(merged, tuple):
-                ftable = merged[0]
-            else:
-                ftable = merged
-
-        result = Pgrouping_KD(ftable, **kwargs)
-        return result
-
-    def merge_with_coords(self, extr_columns = None, pivoting4val = None,
-                          processed_feat = False, force = False): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-        """
-        Merge all sources and return a combined DataFrame with coordinates joined.
-
-        The result has a multi-index ``(slide, sample, roi, spectra_ind)`` and includes
-        ``x``, ``y`` (and optionally ``z``) columns alongside the feature data.
-
-        :param extr_columns: Columns to extract from feature data.
-        :param pivoting4val: If set, pivot the feature table.
-        :param processed_feat: If ``True``, use feature data instead of peaklists.
-        :param force: If ``True``, recompute even if cached.
-
-        :type extr_columns: list or None
-        :type pivoting4val: list or None
-        :type processed_feat: bool
-        :type force: bool
-
-        :return: DataFrame with feature columns and ``x``, ``y`` coordinates.
-        :rtype: pd.DataFrame
-        """
-        features, coords = self.merge(
-            extr_columns = extr_columns,
-            extract_coords = True,
-            pivoting4val = pivoting4val,
-            processed_feat = processed_feat,
-            force = force
-        )
-
-        combined = features.join(coords, how = 'left')
-        return combined
 
     def __getitem__(self, sample):
         return self.sources[sample]
@@ -507,7 +650,33 @@ class DataSet:
     #  Table representations (__repr__ / _repr_html_)                    #
     #  Single Source of Truth: _generate_table_data()                    #
     # ------------------------------------------------------------------ #
+    def audit_processing(self,
+                        sources: str | list[str] | None = None,
+                        roi: str | list[str] | None = None,
+                        draw_mz_range: tuple[float, float] | None = None,
+                        draw_spectrum_idx: int | None = None,
+                        dtypeconv: np.dtype | None = None):
+        """Audit the processing of the data source.
 
+        Parameters
+        ----------
+        sources : str or list, optional
+            The data source to audit. If None, all sources are audited.
+        roi : str or list, optional
+            The ROI to audit. If None, all ROIs are audited.
+        draw_mz_range : tuple of float, optional
+            If not None, draw a spectrum within the given m/z range.
+        draw_spectrum_idx : int, optional
+            If not None, draw the spectrum at the given index.
+        dtypeconv : numpy.dtype, optional
+            If not None, convert the data to the given dtype.
+        """
+        if sources is None:
+            sources = list(self.sources.keys())
+        if isinstance(sources, str):
+            sources = [sources]
+        for source in sources:
+            Drawer(self.sources[source]).audit_processing(roi, draw_mz_range, draw_spectrum_idx, dtypeconv)
     @staticmethod
     def _file_url(path):
         """
@@ -580,6 +749,7 @@ class DataSet:
             ("Continious",              "left"),
             ("Peaklists",               "left"),
             ("Processed mass spectra",  "left"),
+            ("Peaks density",           "left"),
             ("Directory",               "left"),
             ("Previous configs",        "left")
         ]
@@ -597,6 +767,7 @@ class DataSet:
                     source._datasource.dcont,                                                                           #Continuous
                     os.path.exists(os.path.join(dir_path,'processed_pelmesha', f'{sample}_peaklists.hdf5')),            #Peaklists
                     os.path.exists(os.path.join(dir_path,'processed_pelmesha', f'{sample}_processed_spectra.hdf5')),    #Processed mass spectra
+                    source._datasource.peaks_density_path is not None,                                                  #Peaks density
                     dir_path,                                                                                           #Directory
                     config_file if os.path.exists(config_file) else "—",                                                #Previous configs
                     ]
@@ -777,3 +948,797 @@ class DataSet:
         else:
             for s in self.sources.values():
                 s.close()
+
+
+
+class Drawer():
+    def __init__(self, datasource: "str | DataSource | PreparedDataSource"):
+        if isinstance(datasource, (DataSource, str)):
+            if isinstance(datasource, str):
+                datasource = DataSource(datasource)
+            self.datasource = datasource
+            if datasource.configs_path is not None:
+                self.prepdata = PreparedDataSource(datasource, datasource.configs_path)
+            else:
+                self.prepdata = None
+                if self.processed_spectra_path is None and self.peaklists_path is None:
+                    raise ValueError("No processed spectra, peaklist or configs found. Only raw datasource")
+        elif isinstance(datasource, PreparedDataSource):
+            self.prepdata = datasource
+            self.datasource = datasource._datasource
+        self.peaks_density_path = self.datasource.peaks_density_path
+        self.processed_spectra_path = self.datasource.processed_spectra_path
+        self.peaklists_path = self.datasource.peaklists_path
+    def _draw(self,
+              mz: np.ndarray,
+              intens: np.ndarray,
+              peaklist: np.ndarray | None = None,
+              headers: list[str] | None = None,
+              roi: str | None = None,
+              mz_range: tuple[float, float] | None = None,
+              spectrum_idx: int | None = None,
+              axes: plt.Axes | None = None):
+        datasource = self.datasource
+        if axes is None:    
+            plt.figure().set_figwidth(25)
+            plt.gcf().set_figheight(5)
+            axes = plt.gca()
+            plt.xlabel("m/z")
+            plt.ylabel("Intensity")
+            plt.minorticks_on()
+            plt.grid(visible=True,which="both")
+            plt.title(f"Sample: {datasource.sample_name}, roi: {roi}, spectrum idx: {spectrum_idx}")
+        else:
+            plt.sca(axes)
+        diapcalc = lambda mz, plot_mz_range: (np.array(mz>plot_mz_range[0]) & np.array(mz<plot_mz_range[1])) if plot_mz_range is not None else range(len(mz))
+
+        # Draw raw
+        mz_raw, intens_raw = datasource.get_spectrum(spectrum_idx)
+
+        if mz is None:
+            mz = mz_raw
+        if mz_range is None:
+            mz_range = (mz[0], mz[-1])
+
+        diap_raw = diapcalc(mz_raw, mz_range)
+        plt.plot(mz_raw[diap_raw], intens_raw[diap_raw],alpha=0.75, label = f"Raw mass spectrum N{spectrum_idx}")
+
+        # Draw processed
+        diap = diapcalc(mz, mz_range)
+        plt.plot(mz[diap], intens[diap],alpha=0.75, label = f"Processed mass spectrum N{spectrum_idx}")
+        
+        # Draw peaklist
+        if peaklist is not None:
+            if isinstance(peaklist, np.ndarray):
+                peaklist = pd.DataFrame(peaklist, columns = headers)
+            peaklist = peaklist.astype({"spectra_ind": int})
+            # .plot(x="mz", y="Intensity",ax = plt.gca(),)
+            plt.plot(*peaklist.query("mz>@mz_range[0] and mz<@mz_range[1] and spectra_ind == @spectrum_idx").loc[:,['mz','Intensity']].values.T, "o", markersize=9, fillstyle='none', mew = 1.25, color = "k", label = "Peaks")
+            left_intens=[]
+            for left_base in peaklist.query("PextL>@mz_range[0] and PextL<@mz_range[1] and spectra_ind == @spectrum_idx")['PextL']:
+                left_intens.append(intens[mz>=left_base][0])
+            right_intens = []
+            for right_base in peaklist.query("PextR>@mz_range[0] and PextR<@mz_range[1] and spectra_ind == @spectrum_idx")['PextR']:
+                right_intens.append(intens[mz<=right_base][-1])
+            plt.plot(peaklist.query("PextL>@mz_range[0] and PextL<@mz_range[1] and spectra_ind == @spectrum_idx")['PextL'],
+            left_intens,'^', color = 'g', label = 'Left peak base')
+            plt.plot(peaklist.query("PextR>@mz_range[0] and PextR<@mz_range[1] and spectra_ind == @spectrum_idx")['PextR'],
+            right_intens,'v', color = 'r', label = 'Right peak base')
+        old_legend = axes.get_legend()
+        if old_legend:
+            old_handles = old_legend.legend_handles
+            old_labels = [text.get_text() for text in old_legend.get_texts()]
+        else:
+            old_handles, old_labels = [], []
+        handles, labels = axes.get_legend_handles_labels()
+        old_handles += handles 
+        old_labels += labels
+         
+        axes.legend(old_handles, old_labels)
+        plt.xlim(mz_range)
+
+    def audit_processing(self,
+                         roi: str | list | None = None,
+                         draw_mz_range: tuple[float, float] | None = None,
+                         draw_spectrum_idx: int | None = None,
+                         dtypeconv: np.dtype | None = None,
+                         axes: plt.Axes | None = None,
+                         configs_path: str | None = None):
+        if roi is None:
+            roi = list(self.datasource.roi_metadata.index)
+        elif isinstance(roi, str):
+            roi = [roi]
+        elif isinstance(roi, list):
+            pass
+        else:
+            raise ValueError("Invalid roi")
+        if configs_path:
+            prepdata = PreparedDataSource(self.datasource, configs_source= configs_path)
+        else:
+            prepdata = self.prepdata
+        pipeline = Pipeline(prepdata)
+        datasource = self.datasource
+        roi_metadata = datasource.roi_metadata
+        for r in roi:
+            if draw_spectrum_idx is None:
+                rmeta = roi_metadata.loc[r]
+                idxs = Indexator(rmeta["idxroi"].to_numpy(int))
+                spectrum_idx = list(idxs)[np.random.randint(0,idxs.count)]
+            else:
+                spectrum_idx = draw_spectrum_idx
+
+            processing_stream = pipeline._multistream_pipeline(Pipeline._procfunc_wrapper, r, idxs = spectrum_idx, dtypeconv=dtypeconv)
+            mz, headers = next(processing_stream)
+            loc_idx, proc_intensity = next(processing_stream)
+            roi_configs = prepdata.roi_configs[r]
+            peakpick_function = roi_configs._peakpick_function
+            if peakpick_function:
+                peaklist_configs = roi_configs.get_step_configs('peakpick')
+                peaklist = peakpick_function(mz,
+                                             proc_intensity.squeeze(),
+                                             [spectrum_idx],
+                                             peaklist_configs,
+                                             )
+                # headers = peaklist_configs['headers']
+            else:
+                peaklist = None
+
+            self._draw(mz, proc_intensity.squeeze(), peaklist, headers, r, draw_mz_range, spectrum_idx, axes)
+
+    def draw_processed_data(self,
+                            roi: str | list | None = None,
+                            draw_mz_range: tuple[float, float] | None = None,
+                            draw_spectrum_idx: int | None = None,
+                            axes: plt.Axes | None = None):
+        if roi is None:
+            roi = list(self.prepdata.roi_metadata.index)
+        elif isinstance(roi, str):
+            roi = [roi]
+        elif isinstance(roi, list):
+            pass
+        else:
+            raise ValueError("Invalid roi")
+        datasource = self.datasource
+
+        for r in roi:
+            headers = None
+            if draw_spectrum_idx is None:
+                rmeta = datasource.roi_metadata.loc[r]
+                idxs = Indexator(rmeta["idxroi"])
+                spectrum_idx = list(idxs)[np.random.randint(0,idxs.count)]
+            else:
+                spectrum_idx = draw_spectrum_idx
+            
+            if os.path.exists(self.processed_spectra_path):
+                with File(self.processed_spectra_path, "r") as hdf5:
+                    data_int = hdf5[r]["int"][datasource._get_local_roi_idx(spectrum_idx), :]
+                    mz = hdf5[r]["mz"][:]
+            else:
+                if self.prepdata is None:
+                    raise ValueError("No processed spectra path or configs to get processed spectrum")
+                else:
+                    pipeline = Pipeline(self.prepdata)
+                    stream = pipeline._multistream_pipeline(Pipeline._procfunc_wrapper,r, cpu_num=1, idxs = spectrum_idx)
+                    mz, headers = next(stream)
+                    _, data_int = next(stream)
+                    data_int = data_int[0]
+            if os.path.exists(self.peaklists_path):
+                with File(self.peaklists_path, "r") as hdf5:
+                    headers = hdf5[r].attrs["Column headers"]
+                    peaklist = pd.DataFrame(hdf5[r][:], columns = headers).astype({"spectra_ind": int}).query('spectra_ind == @spectrum_idx')
+            else:
+                peaklist = None
+
+            self._draw(mz, data_int, peaklist, headers, r, draw_mz_range, spectrum_idx, axes)
+
+    def draw_peak_density(self,
+                           roi: str | list | None = None,
+                           draw_mz_borders: tuple[float, float] | None = None):
+
+        if roi is None:
+            roi = self.prepdata.rois
+        if isinstance(roi, str):
+            roi = [roi]
+
+        formatter = AbsoluteFormatter(useMathText=True)
+        formatter.set_scientific(True)
+        formatter.set_powerlimits((-3, 3))
+        for r in roi:
+            with File(self.peaks_density_path, "r") as hdf5:
+                kde_mz = hdf5[r]["mz"][:]
+                kde_density = hdf5[r]["peaks_density"][:]
+                kde_density = normalize( kde_density.reshape(1, -1), norm='l1' ).squeeze()
+            peaklists = self.datasource.peaklists(r)
+            rand_num = np.random.randint(0,peaklists.shape[0])
+            peak_mz = peaklists.at[rand_num, "mz"]
+
+            rand_spec = peaklists.at[rand_num, "spectra_ind"]
+            mz_borders = (peak_mz-draw_mz_borders,peak_mz+draw_mz_borders)
+
+            dots_bord = (np.array(kde_mz)>=mz_borders[0]) & (np.array(kde_mz)<=mz_borders[1])
+            local_kde_mz = np.array(kde_mz)[dots_bord]
+            local_kde_density = np.array(kde_density)[dots_bord]
+            plt.figure(figsize=(25, 6), dpi=600)
+            kde_line, = plt.plot(local_kde_mz, local_kde_density*(-1), color="k",alpha=0.85)
+            graphs = [kde_line]
+            leg = ["Probability density function"]
+            plt.xlim(mz_borders)
+            
+            quered_peaklists = peaklists.query("mz>=@mz_borders[0] and mz<=@mz_borders[1]")
+            quered_peaklists['uncor_mz'] = quered_peaklists['mz'].copy()
+
+            corrected_peaklists = apply_kde_mzcorrection(quered_peaklists, kde_mz, kde_density)
+            
+            Peaks_list=corrected_peaklists["mz"].sort_values().unique()
+            for peak in Peaks_list:
+                temp_query = corrected_peaklists.query("mz == @peak")
+                color = plt.gca()._get_lines.get_next_color()
+                peak_dot, = plt.plot([peak],[0],'|', markersize=12,alpha=1, color = color, mew =3)
+                graphs+=[peak_dot]
+                leg+=[f"Peak {peak:.3f} m/z: On adjust/Original"]
+                plt.plot(temp_query['uncor_mz'], [0]*temp_query.shape[0],'|', markersize=6,alpha=0.33, color = color)
+            plt.xlabel('m/z')
+            plt.ylabel("Probability Density")
+            plt.gca().set_title(f"Probability density by KDE around {peak_mz:.3f} m/z. Sample: {self.datasource.sample_name}. roi: {r}.")
+            plt.minorticks_on()
+            plt.grid(visible=True,which="both")
+            axes_prob = plt.gca()
+            axes_prob.yaxis.set_major_formatter(formatter)
+            ylim_min, ylim_max = axes_prob.get_ylim() 
+            axes_prob.set_ylim((-max((abs(ylim_min), ylim_max)), max((abs(ylim_min), ylim_max))) )
+            axes = plt.gca().twinx()
+            legend1 = axes.legend(graphs, leg, loc = 'upper left',framealpha=0.95)
+            axes.plot(*self.datasource.get_mean_spectrum(mz_range = mz_borders), color="r",alpha=0.85)
+            leg_twin=[f'Mean spectrum']
+            axes.set_ylabel("Intensity")
+            axes.add_artist(legend1)
+            axes.legend(leg_twin, loc = 'upper right')
+            self.audit_processing(r,mz_borders, rand_spec, axes = axes, configs_path = self.datasource.configs_path)
+            ylim_min, ylim_max = axes.get_ylim() 
+            limit = max(abs(ylim_min), abs(ylim_max))
+            axes.set_ylim( (-limit, limit) )
+            plt.show()
+            
+
+    @staticmethod
+    def _draw_datasets_mzcorrection( datasources: dict[PreparedDataSource],
+ # exampled_datasource: PreparedDataSource,
+                                    rois: dict[str, list[str]],
+                                    kde_mz: np.ndarray,
+                                    kde_density: np.ndarray,
+                                    peak_mz: float,
+                                    draw_mz_borders: float = 1.5,
+                                    countf_rel: float | None = None,
+                                    countf: int | None = None,
+                                    duplicates_drop: bool = True,
+                                    cpu_num: int = 1):
+        """Метод для постройки проверочного графика коррекции m/z пиков от одного случайного источника, после получении общей фиче-матрицы источников/сэмплов класса DataSet"""
+        formatter = AbsoluteFormatter(useMathText=True)
+        formatter.set_scientific(True)
+        formatter.set_powerlimits((-3, 3))
+        mz_borders = (peak_mz-draw_mz_borders,peak_mz+draw_mz_borders)
+        # datasources = dataset.sources
+        multiindex_keys = []
+        feature_matrix = []
+        for datasource in datasources.values():
+            sample_rois = rois.get(datasource.sample_name, None)
+            if sample_rois is None:
+                sample_rois = datasource.rois
+            
+            if os.path.exists(datasource.peaklists_path):
+                for roi in sample_rois:
+                    multiindex_keys.append((datasource.sample_name, roi))
+                    uncor_peaklist = datasource.peaklists(roi)
+                    uncor_quered_peaklist = uncor_peaklist.query("mz>=@mz_borders[0] and mz<=@mz_borders[1]")
+                    uncor_quered_peaklist['uncor_mz'] = uncor_quered_peaklist['mz'].copy()
+
+                    feature_matrix.append(uncor_quered_peaklist)
+        feature_matrix = pd.concat(feature_matrix, keys=multiindex_keys, names = ['sample', 'roi'])
+        feature_matrix = apply_kde_mzcorrection(feature_matrix, kde_mz, kde_density, cpu_num)
+        if duplicates_drop:
+            feature_matrix = _consesusing_peaks(feature_matrix)
+        
+        if countf or countf_rel:
+            if countf is None and countf_rel is not None:
+                countf = countf_rel*uncor_peaklist.shape[0]
+            feature_matrix = feature_matrix.merge(feature_matrix['mz'].value_counts().to_frame(name='count'),left_on="mz",right_index=True)
+
+            excluded_peaks = feature_matrix.loc[feature_matrix['count'] < countf]
+            feature_matrix = feature_matrix.loc[feature_matrix['count'] >= countf]
+            # corrected_peaklist = _peaks_filtration(corrected_peaklist, countf_loc, countf_rel_loc)
+            feature_matrix.drop(columns=['count'], inplace=True)
+            excluded_peaks.drop(columns=['count'], inplace=True)
+            
+        else:
+            excluded_peaks = pd.DataFrame(columns=feature_matrix.columns)
+        
+        dots_bord = (np.array(kde_mz)>=mz_borders[0]) & (np.array(kde_mz)<=mz_borders[1])
+        local_kde_mz = np.array(kde_mz)[dots_bord]
+        local_kde_density = np.array(kde_density)[dots_bord]
+
+        plt.figure(figsize=(25, 6), dpi=600)
+        kde_line, = plt.plot(local_kde_mz, local_kde_density*(-1), color="k",alpha=0.85)
+        graphs = [kde_line]
+        leg = ["Probability density function"]
+        plt.xlim(mz_borders)        
+        
+        Peaks_list=feature_matrix["mz"].sort_values().unique()
+        excluded_peaks_list=excluded_peaks["mz"].sort_values().unique()
+        for peak in Peaks_list:
+            # assert peak in excluded_peaks_list 
+            temp_query = feature_matrix.query("mz == @peak")
+            color = plt.gca()._get_lines.get_next_color()
+            peak_dot, = plt.plot([peak],[0],'|', markersize=12,alpha=1, color = color, mew =3)
+            graphs+=[peak_dot]
+            leg+=[f"Peak {peak:.3f} m/z: Adjusted / Original"]
+            plt.plot(temp_query['uncor_mz'], [0]*temp_query.shape[0],'|', markersize=6,alpha=0.33, color = color)
+        excl_dots, = plt.plot(excluded_peaks_list, [0]*len(excluded_peaks_list),'x', markersize=12,alpha=1, color = 'k', mew=3)
+        graphs+=[excl_dots]
+        leg+=[f"Excluded peaks"]
+        plt.plot(excluded_peaks['uncor_mz'], [0]*excluded_peaks.shape[0],'x', markersize=6,alpha=0.5, color = 'k')
+        plt.xlabel('m/z')
+        plt.ylabel("Probability Density")
+        plt.gca().set_title(f"Dataset m/z correction results around {peak_mz:.3f} m/z.")
+        plt.legend(graphs, leg, loc = 'upper left')
+        plt.minorticks_on()
+        plt.grid(visible=True,which="both")
+        axes_prob = plt.gca()
+        axes_prob.yaxis.set_major_formatter(formatter)
+        ylim_min, ylim_max = axes_prob.get_ylim()
+        limit = max(abs(ylim_min), abs(ylim_max))
+        axes_prob.set_ylim((-limit, limit)) 
+        # leg_twin=[f'Mean spectrum']
+        axes = plt.gca().twinx()
+        legend1 = axes.legend(graphs, leg, loc = 'upper left',framealpha=0.95)
+        # axes.plot(*exampled_datasource.get_mean_spectrum(roi,mz_range = mz_borders), color="r",alpha=0.85)
+
+        axes.set_ylabel("Intensity")
+
+        axes.add_artist(legend1)
+        # axes.legend(leg_twin, loc = 'upper right')
+        rand_ds = np.random.randint(0, len(datasources))
+        rand_ds = list(datasources.values())[rand_ds]
+        sample_rois = rois.get(rand_ds.sample_name, None)
+        if sample_rois is None:
+            sample_rois = rand_ds.rois
+        rand_roi = np.random.randint(0, len(sample_rois))
+        rand_roi = sample_rois[rand_roi]
+        rand_spec = feature_matrix.loc[(rand_ds.sample_name, rand_roi)].query("mz == @peak_mz")['spectra_ind']
+        rand_spec = np.random.choice(rand_spec)
+
+        axes.plot(*rand_ds.get_mean_spectrum(rand_roi,mz_range = mz_borders), color="r",alpha=0.85)
+        leg_twin=[f'Mean spectrum. Sample: {rand_ds.sample_name}, ROI: {rand_roi}']
+        legend2 = axes.legend(leg_twin, loc = 'upper right')
+        Drawer(rand_ds).audit_processing(rand_roi,mz_borders, rand_spec, axes = axes, configs_path = rand_ds.configs_path)
+        ylim_min, ylim_max = axes.get_ylim() 
+        limit = max(abs(ylim_min), abs(ylim_max))
+        axes.set_ylim( (-limit, limit) )
+        legend2 = axes.get_legend()
+        legend2.get_texts()[1].set_text(f'Raw mass spectrum. Sample: {rand_ds.sample_name}, ROI: {rand_roi}, N{rand_spec}')
+        legend2.get_texts()[2].set_text(f'Processed mass spectrum. Sample: {rand_ds.sample_name}, ROI: {rand_roi}, N{rand_spec}' )
+        plt.show()
+
+class AbsoluteFormatter(ticker.ScalarFormatter):
+    def _set_format(self):
+        # Этот метод вызывается внутренне для настройки формата
+        super()._set_format()
+        
+    def __call__(self, x, pos=None):
+        # Главный метод: берем abs(x) и отдаем стандартному родителю
+        return super().__call__(abs(x), pos)
+
+class Pipeline:
+    def __init__(self,
+                 prepdata: "PreparedDataSource"):
+        '''WIP
+        Unified interface for running MSI data processing.
+
+        Pipeline is a thin orchestrator that accepts a PreparedDataSource 
+        and runs processing methods using the pipeline functions stored in the configs object.
+
+        Parameters
+        ----------
+        configs : PreparedDataSource
+            Configuration object with datasource and pipeline functions.
+        '''
+        if isinstance(prepdata, PreparedDataSource):
+            self.prepdata = prepdata
+            self.roi_configs = prepdata.roi_configs
+            self._configs_source_path = prepdata._configs_source_path
+            self._datasource = prepdata._datasource
+        else:
+            raise ValueError(
+                "Provide a PreparedDataSource."
+            )
+
+    def process(self,
+                free_cpus: int = 1, 
+                draw: bool = False, 
+                draw_mz_range: tuple[float, float] | None = None,
+                draw_spectrum_idx: int | None = None,
+                Ram_GB_limit: float = 2,
+                h5chunk_size_MB: int = 10,
+                dtypeconv: np.dtype | str | None = None):
+        '''
+        Parameters
+        ----------
+        free_cpus : int, optional
+            Number of CPUs to leave free (default 1).
+        draw : bool, optional
+            Whether to draw processing results (default False).
+        draw_mz_range : tuple[float, float] | None, optional
+            m/z range for drawing (default None).
+        draw_spectrum_idx : int | None, optional
+            Spectrum index for drawing (default None).
+        Ram_GB_limit : float, optional
+            RAM limit in GB (default 2).
+        h5chunk_size_MB : int, optional
+            HDF5 chunk size in MB (default 10).
+        dtypeconv : np.dtype | str | None, optional
+            Data type conversion (default None).
+        '''
+        datasource = self._datasource
+        
+        hdf5_save_path = self._resolve_base_path("processed_spectra.hdf5")
+        if os.path.exists(hdf5_save_path):
+            os.remove(hdf5_save_path)
+
+        cpu_num = cpu_count()-free_cpus
+        roi_metadata = datasource.roi_metadata
+
+        if dtypeconv is None:
+            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
+        dtypeconv = np.dtype(dtypeconv)
+        bytes_flsize = dtypeconv.itemsize
+        chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
+        for roi in roi_metadata.index:
+            print(f'Processing ROI {roi}')
+            processing_stream = self._multistream_pipeline(self._procfunc_wrapper,
+                                                           roi = roi,
+                                                           cpu_num = cpu_num,
+                                                           Ram_GB_limit = Ram_GB_limit,
+                                                           dtypeconv = dtypeconv)
+            gen_mz, headers_list = next(processing_stream)
+            if gen_mz is None:
+                processing_stream.close()
+                warnings.warn(f"Discontinuous data detected for sample '{datasource.sample_name}' (ROI: {roi}). "  
+                              "Resampling is required before writing to HDF5.")
+                
+                continue
+            
+            with File(hdf5_save_path,"a") as hdf5:
+                dots_num = len(gen_mz)
+                hdf5.create_dataset(roi+"/int", (Indexator(roi_metadata.loc[roi,"idxroi"]).count, dots_num), chunks=(int(chunk_size_by_elements/dots_num), dots_num), dtype = dtypeconv)
+                hdf5.create_dataset(roi+"/mz", data = gen_mz, dtype = dtypeconv)
+                
+                for loc_idxs, proc_intensity in processing_stream:
+                
+                    hdf5[roi]["int"][next(loc_idxs.__iter__()),:] = proc_intensity
+                    # hdf5[roi]["int"][loc_idxs,:] = proc_intensity
+
+            if draw:
+                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
+
+        self.prepdata.save()
+        
+
+    def peakpick(self,
+                 free_cpus: int = 1, 
+                 draw: bool = False, 
+                 draw_mz_range: tuple[float, float] | None = None,
+                 draw_spectrum_idx: int | None = None,
+                 Ram_GB_limit: float = 2,
+                 h5chunk_size_MB: int = 10,
+                 dtypeconv: np.dtype | str | None = None):    
+             
+        datasource = self._datasource
+        hdf5_save_path = self._resolve_base_path("peaklists.hdf5")
+        if os.path.exists(hdf5_save_path):
+            os.remove(hdf5_save_path)
+        peaks_density_path = self._resolve_base_path("peaks_density.hdf5")
+        if os.path.exists(peaks_density_path):
+            os.remove(peaks_density_path)
+
+
+        if dtypeconv is None:
+            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
+        dtypeconv = np.dtype(dtypeconv)
+        cpu_num = cpu_count()-free_cpus
+        bytes_flsize = dtypeconv.itemsize
+        chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
+        
+        roi_metadata = datasource.roi_metadata
+        for roi in roi_metadata.index:
+            print(f'Processing ROI {roi}')
+            peakpicking_stream = self._multistream_pipeline(self._peakpick_wrapper,
+                                                           roi = roi,
+                                                           cpu_num = cpu_num,
+                                                           Ram_GB_limit = Ram_GB_limit,
+                                                           dtypeconv = dtypeconv)
+            gen_mz, headers_list = next(peakpicking_stream)
+            
+            with File(hdf5_save_path,"a") as hdf5:
+                n_heads = len(headers_list)
+                hdf5.create_dataset(roi,(0, n_heads), maxshape = (None, n_heads), chunks=(chunk_size_by_elements/n_heads, n_heads), dtype=dtypeconv)
+                hdf5[roi].attrs["Column headers"] = headers_list
+                for peaklists in peakpicking_stream:
+                    list_size = len(peaklists)
+                    hdf5[roi].resize((hdf5[roi].shape[0] + list_size, n_heads))
+                    hdf5[roi][-list_size:,:] = peaklists
+
+            if draw:
+                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
+
+        self.prepdata.save()
+    def estimate_peak_density_kde(self,
+                                  free_cpus: int = 1,
+                                  draw: bool = True,
+                                  draw_borders: float = 1.5):
+        prepdata = self.prepdata
+        source = prepdata._datasource
+        save_path = prepdata._default_save_path('peaks_density.hdf5')
+        
+        if os.path.exists(save_path):
+            os.remove(save_path)
+        
+        peaklists_path = prepdata._default_save_path('peaklists.hdf5')
+        
+        if not os.path.exists(peaklists_path):
+            raise FileNotFoundError(f"Peaklists file {peaklists_path} does not exist. Please run peakpicking first")
+        roi_metadata = source.roi_metadata
+        cpu_num = cpu_count() - free_cpus
+        roi_kde_configs = prepdata.roi_kde_configs
+        with File(save_path, 'w') as f:
+            for roi in prepdata.rois:
+                peaklist = source.peaklists(roi)
+                roi_peak_density = _compute_KDE(peaklist, roi_metadata.loc[roi,"discret_coeffs"], cpu_num, **roi_kde_configs[roi].to_dict)
+                f.create_dataset(f"{roi}/mz", data=roi_peak_density[0])
+                f.create_dataset(f"{roi}/peaks_density", data=roi_peak_density[1])
+        prepdata.dump_kde_configs()
+        for roi in prepdata.rois:
+            if draw:
+                Drawer(self.prepdata).draw_peak_density(roi, draw_borders)
+    @staticmethod
+    def feature_matrix(dataset: DataSet,
+                        rois: dict[str, list[str]] = {},
+                        countf: int = 10,
+                        countf_rel: float | None = None,
+                        duplicates_drop: bool = True,
+                        pivot_values: str | list[str] | None = None,  # 'Intensity', ['Intensity', 'Area']
+                        fill_values = 0.0,
+                        free_cpus: int = 1,
+                        save_path: str = None,
+                        draw_borders: float = 1.5,
+                        draw: bool = True,
+                        local_roi_idx: bool = True,
+                        merge_with_coords: bool = False) -> pd.DataFrame:
+        # Получим общую плотность вероятности пиков
+        kde_mz_list = []
+        kde_density_list = []
+        cpu_num = cpu_count() - free_cpus
+        datasources = dataset.sources
+        for datasource in datasources.values():
+            sample_rois = rois.get(datasource.sample_name, None)
+            if sample_rois is None:
+                sample_rois = datasource.rois
+            if os.path.exists(datasource.peaks_density_path):
+
+                with File(datasource.peaks_density_path, 'r') as f:
+                    for roi in sample_rois: 
+                        kde_mz_list.append(f[roi]['mz'][:])
+                        kde_density_list.append( normalize( f[roi]['peaks_density'][:].reshape(1, -1), norm='l1').squeeze() )
+            else:
+                raise FileNotFoundError(f"Peaks density file {datasource.peaks_density_path} does not exist.\nPlease run `estimate_peak_density_kde` method first")
+
+        common_kde_mz = _align_kde_mz_grids(kde_mz_list)
+        total_density = np.zeros_like(common_kde_mz)
+        for kmz, kden in zip(kde_mz_list, kde_density_list):
+            total_density += np.interp(common_kde_mz, kmz, kden, left=0, right=0)
+        total_density = normalize( total_density.reshape(1, -1), norm='l1' ).squeeze()
+        kde_mz, kde_density = common_kde_mz, total_density
+
+        multiindex_keys = []
+        feature_matrix = []
+        for datasource in datasources.values():
+            sample_rois = rois.get(datasource.sample_name, None)
+            if sample_rois is None:
+                sample_rois = datasource.rois
+            
+            if os.path.exists(datasource.peaklists_path):
+                for roi in sample_rois:
+                    multiindex_keys.append((datasource.sample_name, roi))
+                    peaklists = datasource.peaklists(roi).set_index('spectra_ind',drop = True)
+                    if not local_roi_idx:
+                        idx_map = Indexator(datasource.roi_metadata.loc[roi, 'idxroi'])
+                        idx_map = dict(zip(range(idx_map.count), idx_map))
+                        peaklists.index = peaklists.index.map(idx_map)
+                    feature_matrix.append(peaklists)
+            else:
+                raise FileNotFoundError(f"Peaklists file {datasource.peaklists_path} does not exist.\nPlease run `peakpick` method first")
+        nunique_stats = []
+        feature_matrix = pd.concat(feature_matrix, keys=multiindex_keys, names = ['sample', 'roi'])
+        nunique_stats.append(_nunique_summary(feature_matrix,'before correction'))
+        feature_matrix = apply_kde_mzcorrection(feature_matrix, kde_mz, kde_density, cpu_num)
+        nunique_stats.append(_nunique_summary(feature_matrix,'after correction'))
+        
+        # Duplicates manipulations
+        # Counting duplicates
+        dupl_stats = _consensus_peaks_summary(feature_matrix)
+
+        # Peaks filtration
+        if countf or countf_rel:
+            feature_matrix = _peaks_filtration(feature_matrix, countf, countf_rel)
+            nunique_stats.append(_nunique_summary(feature_matrix,'after filtration'))
+            # Duplicates recounting with merging
+            dupl_stats_filtration = _consensus_peaks_summary(feature_matrix)
+            all_columns = dupl_stats.columns.union(dupl_stats_filtration.columns)
+            dupl_stats = dupl_stats.reindex(columns=all_columns, fill_value=0)
+            dupl_stats_filtration = dupl_stats_filtration.reindex(columns=all_columns, fill_value=0)
+            dupl_stats = pd.concat([dupl_stats, dupl_stats_filtration],axis=1, keys=["before filtration", "after filtration"])#.fillna(0)
+        # Merging duplicates and create consensus peaks
+        if duplicates_drop:
+            feature_matrix = _consesusing_peaks(feature_matrix)
+
+
+        nunique_stats = pd.concat(nunique_stats, axis=1)
+        nunique_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique peaks', c, '') for c in nunique_stats.columns] )
+        dupl_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique consensus peaks', *c) for c in dupl_stats.columns] )
+        show_df(pd.concat([nunique_stats, dupl_stats], axis=1), 'Peaks statistics')
+        if draw:
+            rand_num = np.random.randint(0,feature_matrix.shape[0])
+            col_idx = feature_matrix.columns.get_loc("mz")
+            peak_mz = feature_matrix.iat[rand_num, col_idx]
+        
+        if pivot_values is not None:
+            feature_matrix = feature_matrix.pivot_table(index= [name for name in feature_matrix.index.names if name is not None], 
+                                                        columns='mz', 
+                                                        values=pivot_values, 
+                                                        fill_value = fill_values)
+        if save_path or merge_with_coords: 
+            coords = dataset.coordinates(rois=rois, local_roi_idx=local_roi_idx)
+        if merge_with_coords:
+            nlevels = feature_matrix.columns.nlevels
+            if nlevels != 1:
+                base_cols = coords.columns.get_level_values(0)
+                n_cols = len(base_cols)
+                empty_layers = [[""]*n_cols] * (nlevels - 2)
+                coords.columns = pd.MultiIndex.from_arrays([['Coordinates'] * n_cols, *empty_layers, base_cols])
+
+            feature_matrix = feature_matrix.merge(coords, left_index=True, right_index=True)
+
+        if save_path is not None:
+            dirpath = os.path.dirname(save_path)
+            os.makedirs(dirpath, exist_ok=True)
+            if not save_path.endswith('.parquet'):
+                save_path += '.parquet'
+            feature_matrix.to_parquet(save_path)
+            if not merge_with_coords:
+                coords.to_parquet(os.path.join(dirpath, 'coordinates.parquet'))
+                
+            with open(os.path.join(dirpath, 'aggregation_configs.yaml'), 'w', encoding='utf-8') as f:
+                sample_dict = {}
+                for sample, roi in multiindex_keys:
+                    sample_dict[sample] = sample_dict.get(sample, []) + [roi]
+                yaml.dump({'samples': sample_dict,
+                           'countf': countf, 
+                           'countf_rel': countf_rel, 
+                           'duplicates_drop': duplicates_drop, 
+                           'pivoting values': pivot_values, 
+                           'fill values on pivoting': fill_values, 
+                           'merge_with_coords': merge_with_coords, 
+                           'local_roi_idx': local_roi_idx}, f, allow_unicode=True, sort_keys=False)
+        if draw:           
+            Drawer._draw_datasets_mzcorrection(datasources, rois, kde_mz, kde_density, peak_mz, draw_borders, countf_rel=countf_rel, countf=countf, duplicates_drop=duplicates_drop, cpu_num=cpu_num)
+
+            
+        return feature_matrix
+
+    def _multistream_pipeline(self,
+                              process_wrapper: Callable,
+                              roi: str = None,
+                              cpu_num: int = 1, 
+                              Ram_GB_limit: int = 2,
+                              dtypeconv:  np.dtype | str | None = None,
+                              idxs: Indexator | SliceIndexator | int | None = None):
+        """Основная функция генератор результатов мультипроцессинга"""
+        datasource = self._datasource
+        if dtypeconv is None:
+            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
+        dtypeconv = np.dtype(dtypeconv)
+        roi_metadata = datasource.roi_metadata
+        rmeta = roi_metadata.loc[roi]
+        if idxs is None:
+            idxs = rmeta["idxroi"]
+        # Get per-ROI PipelineConfigurator pipeline functions and its configs from PreparedDataSource
+        roi_configs = self.roi_configs[roi]
+        preprocess_function = roi_configs._preprocess_function
+        
+        mz = None
+        headers_list = None
+        size_per_spec = None
+        if preprocess_function:
+            mz, headers_list, internal_configs = preprocess_function(datasource, roi, rmeta, roi_configs)
+            if mz is None and datasource.loader.dcont:
+                mz = datasource.loader.mz_scale_cont
+        else:
+            if datasource.loader.dcont:
+                mz = datasource.loader.mz_scale_cont
+
+        if process_wrapper.__name__ == "_procfunc_wrapper":
+            internal_configs['process_pipeline']= roi_configs._process_function
+            wrapper_configs = roi_configs.get_step_configs("process")
+        elif process_wrapper.__name__ == "_peakpick_wrapper":
+            internal_configs['process_pipeline']  = roi_configs._process_function
+            internal_configs['peakpick_function']  = roi_configs._peakpick_function
+            wrapper_configs = {"peakpick":roi_configs.get_step_configs("peakpick"), 
+                               "process":roi_configs.get_step_configs("process")}
+        else:
+            raise ValueError("Unknown process_wrapper function")
+
+        yield mz, headers_list # mz common mz to spectra, if mz is not common, None is returned. Headers list for peaklists.
+
+        partial_worker = partial(process_wrapper,
+            datasource = datasource,
+            configs = wrapper_configs,
+            dtypeconv = dtypeconv,
+            **internal_configs
+            )
+        
+        if isinstance(idxs, (int, np.integer)):
+            row_idxs, data = partial_worker(np.asarray((idxs,idxs+1), dtype=np.int64))
+            yield row_idxs, data
+        else:
+            if mz is not None:
+                size_per_spec = len(mz)
+            idxs_batches = datasource.split_idxs(idxs = idxs,cpu_count=cpu_num, Ramcap_GB = Ram_GB_limit, size_per_spec = size_per_spec)
+
+            with Pool(cpu_num) as p:
+                for data in tqdm(p.imap_unordered(partial_worker, idxs_batches), total=len(idxs_batches), unit = 'batch'):
+                    yield data
+
+    def _resolve_base_path(self, end):
+        datasource = self._datasource
+        path = os.path.join(os.path.split(datasource.file_path)[0],'processed_pelmesha',datasource.sample_name + '_' + end)
+        if not os.path.exists(os.path.split(path)[0]):
+            os.makedirs(os.path.split(path)[0])
+        return path
+    @staticmethod
+    def _procfunc_wrapper(idxs: Indexator | SliceIndexator | tuple| np.ndarray,
+                          datasource: "DataSource",
+                          configs: "dict | Configs | PipelineConfigurator",
+                          dtypeconv: np.dtype | None = None,
+                          **internal_configs
+                          ):
+        process_function = internal_configs.pop("process_pipeline")
+        internal_process_configs = internal_configs['process']
+        row_idxs = SliceIndexator(datasource._get_local_roi_idx(idxs))
+        processed_spectra: list[np.ndarray] = [None] * row_idxs.count
+        batch_iter = datasource.get_spectra_stream(Indexator(idxs))
+        for n, (_mz, raw_intensity) in enumerate(batch_iter):
+            _, proc_intensity = process_function(_mz, np.asarray(raw_intensity, dtype=dtypeconv), configs, **internal_process_configs)
+            processed_spectra[n] = proc_intensity
+        return row_idxs, np.vstack(processed_spectra)
+    
+    @staticmethod
+    def _peakpick_wrapper(idxs: Indexator | SliceIndexator | tuple| np.ndarray,
+                          datasource: "DataSource",
+                          configs: "dict | Configs | PipelineConfigurator",
+                          dtypeconv: np.dtype | None = None,
+                          **internal_configs
+                          ):
+        
+        process_function = internal_configs.pop("process_pipeline")
+        peakpick_function = internal_configs.pop("peakpick_function")
+        proc_configs = configs['process']
+        internal_proc_configs = internal_configs['process']
+        peakpick_configs = configs['peakpick']
+        internal_peakpick_configs = internal_configs['peakpick']
+
+        peaklists = {}
+        idxs_list = list(Indexator(idxs))
+        batch_iter = datasource.get_spectra_stream(Indexator(idxs))
+        for n, (_mz, raw_intensity) in enumerate(batch_iter):
+            _mz, proc_intensity = process_function(_mz, raw_intensity, proc_configs, **internal_proc_configs)
+            peaklists[n] = peakpick_function(_mz, np.asarray(proc_intensity, dtype=dtypeconv).squeeze(), idxs_list[n], peakpick_configs, **internal_peakpick_configs)
+        return np.vstack(tuple(peaklists.values()))
+

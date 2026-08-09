@@ -13,11 +13,8 @@ if __name__ == '__main__':
     # dataset.add_sources(path, configs) # or dataset(path)
 
     # dataset.peakpick(draw_mz_range=[600,800],free_cpus=18)
+    path = r"D:\Testing\Our_data\Rapiflex"
 
-    configs = PipelineConfigurator(SNR_threshold=9)
-    configs.delete('Baseline')
-    print(configs)
-    path = r'D:\Testing\Our_data\Orbitrap\1'
-    dataset = DataSet()
-    dataset.add_sources(path, configs)
-    dataset.peakpick()
+    data = DataSet(path)
+
+    data.estimate_peak_density_kde()

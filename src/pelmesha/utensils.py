@@ -8,6 +8,8 @@ import numpy as np
 import scipy.interpolate as interpolate
 from tqdm.auto import tqdm
 import os
+import math
+from multiprocessing import Pool
 
 FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2)) 
 
@@ -342,7 +344,21 @@ def split_pdtable_by_peaks_gap(pd_table, split_peaks_min = 25, split_mz_min = 10
             batched_pd_table[n_batch] = (mz[slc], KD_bandwidth[slc])
     return batched_pd_table
 
+def _set_KDE_X_plot(plot_start, plot_end, min_dist):
+    mz_range = plot_end - plot_start
+    num_of_dots = int((mz_range)*5/min_dist)+1
 
+    X_plot = np.linspace(np.float64(plot_start),np.float64(plot_end),num_of_dots)
+    diffs = np.diff(X_plot)
+
+    while not np.allclose(np.ones_like(diffs) * diffs[0], diffs):
+        warnings.warn(f"X_plot is not uniform between {plot_start} and {plot_end} with num of dots: {num_of_dots} and distances between points {np.unique_values(diffs)}. Reducing number of dots for X_plot by 2 times")
+        num_of_dots=int(num_of_dots/2)
+        X_plot = np.linspace(plot_start,plot_end,num_of_dots)
+        diffs = np.diff(X_plot)
+        if num_of_dots<=1:
+            raise AssertionError("Cannot get uniform data for KDE. See logs for info")
+    return X_plot
 #NEW 08072026
 
 ### Utility functions for multiprocessing
@@ -385,3 +401,302 @@ def del_hdf5(hdf5_path):
     if os.path.exists(hdf5_path):
         os.remove(hdf5_path)
         print(f"Deleted file {os.path.basename(hdf5_path)} in directory {os.path.dirname(hdf5_path)}")
+
+
+def mspeaks_KD(X, Y,oversegmentationfilter=None,peaklocation=1, return_pkY = False):
+    """
+    Detect peaks in a KDE curve and return their centers and boundaries.
+
+    Parameters
+    ----------
+    X : ndarray
+        Monotonic array of X coordinates (e.g., m/z grid).
+    Y : ndarray
+        Corresponding density/height values.
+    oversegmentation_filter : float or None, optional
+        Minimal allowed separation between adjacent peaks; when provided, peaks
+        closer than this threshold are merged.
+    peak_location : float, optional
+        Fraction of the peak height to compute a barycentric center; used in
+        boundary calculations as a threshold. Default is 1.
+
+    Returns
+    -------
+    pk_x : ndarray
+        Estimated peak centers (X positions). May contain NaNs if a region has
+        no samples above the threshold.
+    left : ndarray
+        Left boundary (valley position) for each peak.
+    right : ndarray
+        Right boundary (valley position) for each peak.
+    """
+    n = X.size
+    # Robust valley finding
+    valley_dots = np.concatenate((np.where(np.diff(Y) != 0)[0], [n-1]))    
+    loc_min = np.diff(Y[valley_dots])
+    loc_min = (np.array([True,*(loc_min < 0)])) & np.array(([*(loc_min > 0),True]))
+    left_min = np.concatenate([[-1],valley_dots[:-1]])[loc_min][:-1] + 1
+    right_min = valley_dots[loc_min][1:]
+    # Compute max and min for every peak
+    size = left_min.shape
+    val_max = np.empty(size)
+    pos_peak = np.empty(size)
+    for idx, [lm, rm] in enumerate(zip(left_min, right_min)):
+        pp = lm + np.argmax(Y[lm:rm])
+        vm = np.max(Y[lm:rm])
+        val_max[idx] = vm 
+        pos_peak[idx] = pp
+    
+    # Remove oversegmented peaks
+    if oversegmentationfilter:
+        while True:
+            peak_thld = val_max * peaklocation - math.sqrt(np.finfo(float).eps)
+            pkX = np.empty(left_min.shape)
+            
+            for idx, [lm, rm, th] in enumerate(zip(left_min, right_min, peak_thld)):
+                mask = Y[lm:rm] >= th
+                if not mask.any():
+                    pkX[idx]=np.nan
+                else:
+                    pkX[idx] = np.sum(Y[lm:rm][mask] * X[lm:rm][mask]) / np.sum(Y[lm:rm][mask])
+            dpkX = np.concatenate(([np.inf], np.diff(pkX), [np.inf]))
+            
+            j = np.where((dpkX[1:-1] <= oversegmentationfilter) & (dpkX[1:-1] <= dpkX[:-2]) & (dpkX[1:-1] < dpkX[2:]))[0]
+            if j.size == 0:
+                break
+            left_min = np.delete(left_min, j + 1)
+            right_min = np.delete(right_min, j)
+            
+            val_max[j] = np.maximum(val_max[j], val_max[j + 1])
+            val_max = np.delete(val_max, j + 1)
+    else:
+        peak_thld = val_max * peaklocation - math.sqrt(np.finfo(float).eps)
+        pkX = np.empty(left_min.shape)
+        
+        for idx, [lm, rm, th] in enumerate(zip(left_min, right_min, peak_thld)):
+            mask = Y[lm:rm] >= th
+            if not mask.any():
+                pkX[idx]=np.nan
+            else:
+                pkX[idx] = np.sum(Y[lm:rm][mask] * X[lm:rm][mask]) / np.sum(Y[lm:rm][mask])
+    if return_pkY:
+        return np.array((pkX, X[left_min], X[right_min], val_max))
+    return np.array((pkX, X[left_min], X[right_min]))
+
+def Peak_assignment(peakstable_batch,Xp_batch):
+    """    
+    Описание
+    ----
+    Вспомогательная функция к основной `Pgrouping_KD`. Определяет принадлежность значений mz к определённому значению пика  
+    """
+    if not peakstable_batch.empty:
+        if len(Xp_batch) == 3:
+            
+            for peak, xl, xr in Xp_batch.T:
+                bool_mask = (peakstable_batch['mz']>=xl) & (peakstable_batch['mz']<=xr)
+                peakstable_batch.loc[bool_mask,"mz"] = peak
+        else:
+
+            for peak, xl, xr, density in Xp_batch.T:
+                bool_mask = (peakstable_batch['mz']>=xl) & (peakstable_batch['mz']<=xr)
+                peakstable_batch.loc[bool_mask,"mz"] = peak
+                peakstable_batch.loc[bool_mask,"Density"] = density
+    return peakstable_batch
+
+def _align_kde_mz_grids(kde_mz_list: list[np.ndarray]) -> np.ndarray:
+    """Построить общую mz-сетку для суммирования KDE от разных источников."""
+    mz_min = min(kmz[0] for kmz in kde_mz_list)
+    mz_max = max(kmz[-1] for kmz in kde_mz_list)
+    # Использовать самую мелкую дискретизацию
+    min_step = min(np.quantile(np.diff(kmz), q= 0.25) for kmz in kde_mz_list)
+    num_points = int((mz_max - mz_min) / min_step) + 1
+    return np.linspace(mz_min, mz_max, num_points)
+
+def apply_kde_mzcorrection(peaklist: pd.DataFrame, 
+                           kde_mz: np.ndarray, 
+                           kde_density: np.ndarray,
+                           cpu_num: int = 1) -> pd.DataFrame:
+    """Применить коррекцию mz для пиков"""
+    Xp_data = mspeaks_KD(kde_mz,kde_density)
+    Xp = Xp_data[0]
+    Xl = Xp_data[1]
+    Xr = Xp_data[2]
+    mz_sequence = np.sort(peaklist['mz'].unique())
+    mz_num = len(mz_sequence)
+    if mz_num < cpu_num*3:
+        batches_num = mz_num
+    else:
+        batches_num = cpu_num*3
+    idxmz_batches = list(pairwise(np.linspace(0,mz_sequence.shape[0],batches_num,dtype=int)))
+    par_args=[None]*len(idxmz_batches)
+    for batch_n,idx_batch in enumerate(idxmz_batches):
+        mzb_min = mz_sequence[idx_batch[0]]
+        mzb_max = mz_sequence[idx_batch[1]-1]
+        idx_l = np.searchsorted(Xl, mzb_min, side='right') - 1
+        idx_r = np.searchsorted(Xr, mzb_max, side='left')
+        Xl_min = Xl[max(0, idx_l)]
+        Xr_max = Xr[min(len(Xr) - 1, idx_r)]
+        batch_indexes = (Xp>=Xl_min) & (Xp<=Xr_max)
+        par_args[batch_n] = (peaklist.loc[(peaklist['mz'] >= mzb_min) & (peaklist['mz'] <= mzb_max)],
+                             Xp_data[:,batch_indexes])
+    with Pool(cpu_num) as p:
+        grftable = p.starmap(Peak_assignment,par_args)
+    grftable=pd.concat(grftable)
+    return grftable
+
+def _consesusing_peaks(peaklists: pd.DataFrame):
+    """Удалить дублирующиеся пики после корректировки mz 
+    с помощью плотности вероятности соследующими правилами:
+    SNR - максимальное
+    Intensity - максимальное
+    Area - сумма
+    PextL - минимальное
+    PextR - максимальное
+    FWHML - минимальное
+    FWHMR - максимальное
+    Остальные столбцы - первый встречающийся"""
+
+    column_headers = peaklists.columns
+    preset_rules = {
+        "SNR": "max", "Intensity": "max", "Area": "sum",
+        "PextL": "min", "PextR": "max", "FWHML": "min", "FWHMR": "max"
+    }
+    dict4drop = {col: agg for col, agg in preset_rules.items() if col in column_headers}
+    excluded_cols = set(dict4drop.keys()) | {'spectra_ind', 'mz'}
+    oth_cols = [col for col in column_headers if col not in excluded_cols]
+    
+    for col in oth_cols:
+        dict4drop[col] = 'first'
+    
+    # Если у индекса есть имя (MultiIndex или именованный SingleIndex), сохраняем его
+    base_index = [name for name in peaklists.index.names if name is not None]
+    group_keys = base_index + ['spectra_ind', 'mz']
+
+    result = peaklists.groupby(group_keys, as_index=False).agg(dict4drop)
+    
+    return result.set_index(base_index)
+
+def _consensus_peaks_summary(feature_matrix: pd.DataFrame) -> pd.DataFrame:
+    """Summarise consensus peaks per (sample, roi, mz) multiplicity.
+
+    Counts how many times each (index combo, mz) group occurs, keeps only
+    groups that are actual has multiplicity (count > 1), then pivots to show the
+    number of unique m/z values for each multiplicity, per (sample, roi)
+    and globally across all samples.
+
+    Parameters
+    ----------
+    feature_matrix : pd.DataFrame
+        Frame whose index is a (sample, roi, ...) MultiIndex and which has
+        a corrected 'mz' column.
+
+    Returns
+    -------
+    pd.DataFrame
+        Pivot with index ('sample', 'roi'), columns = multiplicity ('count'),
+        values = number of unique m/z, and column name
+        'mz multiplicity'. Empty frame if there are no consensus peaks.
+    """
+    # Derive index names dynamically so nothing depends on a fixed level count.
+    index_names = [name for name in feature_matrix.index.names if name is not None]
+
+    peak_counts = (
+        feature_matrix
+        .groupby([*index_names, "mz"], observed=True)
+        .size()
+        .rename("count")
+        .reset_index()
+    )
+    # Proper boolean filter on the 'count' column (fixes the old [..., "mz"] mis-filter).
+    consesused = peak_counts[peak_counts["count"] > 1].copy()
+
+    # Global row: collapse (sample, roi) into a single "all samples" bucket.
+    total_summary = consesused.assign(
+        sample="Total",
+        roi="",
+    )
+    
+    return pd.concat([consesused, total_summary], ignore_index=True).pivot_table(
+        index=["sample", "roi"],
+        columns="count",
+        values="mz",
+        aggfunc="nunique",
+    ).add_suffix(" subs")
+
+def _nunique_summary(feature_matrix: pd.DataFrame,
+                     column_name: str | None = None) -> pd.DataFrame:
+    sample_roi_nunique = feature_matrix.groupby(["sample", "roi"])["mz"].nunique()
+    
+    total_index = pd.MultiIndex.from_tuples([("Total", "")], names=["sample", "roi"])
+    total_nunique = pd.Series([feature_matrix["mz"].nunique()], index=total_index)
+    resulted = pd.concat([sample_roi_nunique, total_nunique])
+    if column_name:
+        resulted.rename(column_name, inplace= True)
+    return resulted
+def _peaks_filtration(peaklist: pd.DataFrame,
+                      countf: int | float | None = 10,
+                      countf_rel: float | None = None) -> pd.DataFrame:
+    """Filter peaks that occur with a minimum multiplicity.
+
+    Keeps only the rows whose ``mz`` value appears at least ``countf`` times in
+    ``peaklist``. A relative threshold ``countf_rel`` (a fraction of the total
+    number of rows) may be supplied instead of, or in addition to, the absolute
+    one; when both are given the stricter (larger) threshold wins.
+
+    Parameters
+    ----------
+    peaklist : pd.DataFrame
+        Feature matrix that must contain an ``mz`` column.
+    countf : int | float | None, default 10
+        Minimum absolute occurrence count. Ignored when ``None``.
+    countf_rel : float | None, default None
+        Minimum occurrence count expressed as a fraction of ``len(peaklist)``.
+
+    Returns
+    -------
+    pd.DataFrame
+        A filtered copy of ``peaklist`` with only the original columns. The
+        input frame is never mutated.
+
+    Raises
+    ------
+    ValueError
+        If ``countf`` is negative, if ``countf_rel`` is not within ``(0, 1]``,
+        or if ``peaklist`` has no ``mz`` column.
+    """
+    if "mz" not in peaklist.columns:
+        raise ValueError("peaklist must contain an 'mz' column")
+    if countf is not None and countf < 0:
+        raise ValueError(f"countf must be >= 0, got {countf!r}")
+    if countf_rel is not None and not 0 < countf_rel <= 1:
+        raise ValueError(f"countf_rel must be in (0, 1], got {countf_rel!r}")
+
+    if countf is None and countf_rel is None:
+        return peaklist
+
+    total_rows = len(peaklist)
+    rel_threshold = countf_rel * total_rows if countf_rel is not None else None
+
+    # Effective threshold: the stricter (larger) of the absolute and relative.
+    threshold = countf
+    if rel_threshold is not None:
+        threshold = rel_threshold if threshold is None else max(threshold, rel_threshold)
+    # Count occurrences of each m/z and keep rows meeting the threshold. When counting unqiue peaks - ignoring duplicates
+    counts = peaklist[["mz"]].reset_index().drop_duplicates()['mz'].value_counts().rename("count")
+    peaklist_with_counts = peaklist.merge(counts, left_on="mz", right_index=True)
+    return peaklist_with_counts.loc[
+        peaklist_with_counts["count"] >= threshold, peaklist.columns
+    ]
+
+def show_df(dataframe, title=""):
+    try:
+        from IPython.display import HTML
+        # В Jupyter выводим красивый жирный заголовок HTML и саму таблицу
+        if title:
+            display(HTML(f"<h3>{title}</h3>"))
+        display(dataframe)
+    except (ImportError, NameError):
+        # В обычном терминале выводим текст и dataframe
+        if title:
+            print(f"=== {title} ===")
+        print(dataframe)
