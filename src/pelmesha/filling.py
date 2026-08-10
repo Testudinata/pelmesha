@@ -708,7 +708,7 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
         if not os.path.exists(meta_file_folder):
             os.makedirs(meta_file_folder)
         if (not meta_file_exist) or respec:
-            print('new_metadata_file!!!')
+
             chunk_Mbsize = chunk_Mbsize * (1024**2)
             metadata, roi_metadata, coords = self.get_metadata(draw) # TODO @задачка: Создать в новом классе выгрузки данных из cdf метод get_metadata, чтобы сработал этот метод. 
                                                                         #             Отмечу: coords в cdf - это RT, а roi - это по планам каналы 0-3 (где разные масс анализаторы и моды) 
@@ -1086,14 +1086,14 @@ class loader_mzxml(BaseLoader): # TODO дописать.
 class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: Собственно сам класс, который надо написать
     def __init__(self, file_path, respec = False):
         self.file_path = file_path
-        source = xr.load_dataset(self.file_path)
+        source = xr.open_dataset(self.file_path)
         # фактически данные изначально всегда неконтинуальные
         self.dcont = False
 
         self.create_metafile(respec=respec)  # фактически метаданные находятся в самом cdf
     @cached_property
     def source(self):
-        return xr.load_dataset(self.file_path)
+        return xr.open_dataset(self.file_path)
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -1103,7 +1103,7 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
     def __setstate__(self, state):
         self.__dict__.update(state)
 
-    def _load_spectra(self, idx):
+    def get_spectrum(self, idx):
         """собираем один спектр по его индексу"""
 
         start_idx = self.source['scan_index'][idx].item()
@@ -1116,24 +1116,29 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
 
     def get_spectra_stream(self, idxs = None):
         for idx in idxs:
-            yield self._load_spectra(idx)
+            yield self.get_spectrum(idx)
+
+    def get_mz(self, idx):
+        start_idx = self.source['scan_index'][idx].item()
+        end_idx = self.source['point_count'][idx].item() + start_idx
+        dot_selection = slice(start_idx, end_idx, 1)
+        mz_single = self.source['mass_values'][dot_selection].values
+        return mz_single
 
     def get_mz_stream(self, idxs = None):
         for idx in idxs:
-            yield self._load_spectra(idx)[0]
+            yield self.get_mz(idx)
+
+    def get_intensity(self, idx):
+        start_idx = self.source['scan_index'][idx].item()
+        end_idx = self.source['point_count'][idx].item() + start_idx
+        dot_selection = slice(start_idx, end_idx, 1)
+        intens_single = self.source['intensity_values'][dot_selection].values
+        return intens_single
 
     def get_intensities_stream(self, idxs = None):
         for idx in idxs:
-            yield self._load_spectra(idx)[0]
-
-    def get_spectrum(self, idx):
-        return self._load_spectra(idx)
-
-    def get_mz(self, idx):
-        return self._load_spectra(idx)[0]
-
-    def get_intensity(self, idx):
-        return self._load_spectra(idx)[1]
+            yield self.get_intensity(idx)
 
     def get_batch(self, idxs):
         """заглушка"""
@@ -1150,19 +1155,21 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
         roi_idx = {int(i): Indexator(_to_index(np.where(self.source['scan_filters'].values == i)[0])) for i in
                    roi_list}
 
-
-
-        # в cdf нет информации о координатах спектров
+        #как координату записываем retention_time - могут быть записаны как aquisition time
+        coords = []
+        possible_names = ['retention_time','acquisition_time','scan_acquisition_time']#TODO не уверен, всегда ли подпись scan_acquisition_time
+        for name in possible_names:
+            if name in self.source:
+                coords = self.source[name].values
+                break
+        specdata['RT'] = coords
 
         for roi in roi_list:
             roi_metadata[str(roi)] = {}
             roi_metadata[str(roi)]['idxroi'] = roi_idx[roi]
-
-
-
         # данные в cdf discontinuous
         metadata['continuous'] = self.dcont
-        metadata['dtype_raw'] = self._load_spectra(0)[1].dtype.name
+        metadata['dtype_raw'] = self.get_intensity(0).dtype.name
 
         # дискретизация
         for roi in roi_list:
