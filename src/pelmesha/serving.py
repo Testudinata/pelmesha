@@ -22,14 +22,6 @@ from urllib.parse import quote
 import sys
 
 class DataSet:
-    # INDIVIDUAL PROCESSING AND REFERENCE
-    # Done 9. Написать метод, который бы запустил обработку данных записанных в списке путей и на основе индивидиуальных конфигов (с вариантами: чисто пик-пикинг (по сути последний метод с изменёнными конфигами), 
-    # чисто обработка спектров, пик-пикинг с обработкой и сохранение в hdf5 спектров). При этом, проводится проверка наличия атрибута рефернсного файла. Обработка "индивидуальная"
-    # Done 10. Написать атрибут, который хранил бы путь выбранного "референсного файла" для создания референсного пиклиста, также хранил бы и свой особый конфиг для обработки 
-    # (отличный от того, когда файл используется для обработки и анализа, а не референсный).
-    # 11. Написать атрибут, со списком референсных пиков от референсного файла
-    # 12. Если менять конфиг рефернсного атрибута, то список рефернсных пиков удаляется/None-ится.
-    # Done 13. Добавить автоматическое создание базового пайплайна с базовыми настройками при инициализации. Если хочется изменить пайплайн - использовать метод setPipeline (написать)
     #New TODO:
     # 1. Добавить вместе с отображением ds, также какие-то данные о референсном/рефернсных датасетах.
     # 2. Добавить возможность разом удалить все уже обарботанные данные датасетов, добавленных в экземпляр DataSet. Обязательно наличие yes/no подтверждения (лучший вариант, не требующих новых зависимостей)
@@ -1667,7 +1659,7 @@ class Pipeline:
                                                            cpu_num = cpu_num,
                                                            Ram_GB_limit = Ram_GB_limit,
                                                            dtypeconv = dtypeconv)
-            gen_mz, headers_list = next(peakpicking_stream)
+            _, headers_list = next(peakpicking_stream)
             
             with File(hdf5_save_path,"a") as hdf5:
                 n_heads = len(headers_list)
@@ -1682,6 +1674,7 @@ class Pipeline:
                 Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
 
         self.prepdata.save()
+
     def estimate_peak_density_kde(self,
                                   free_cpus: int = 1,
                                   draw: bool = True,
@@ -1903,9 +1896,11 @@ class Pipeline:
                 for data in tqdm(p.imap_unordered(partial_worker, idxs_batches), total=len(idxs_batches), unit = 'batch', desc = f'Processing ROI {roi}'):
                     yield data
 
-    def _resolve_base_path(self, end):
+    def _resolve_base_path(self, suffix = "", prefix = ""):
+        prefix = prefix + '_' if prefix else prefix
+        suffix = '_' + suffix if suffix else suffix
         datasource = self._datasource
-        path = os.path.join(os.path.split(datasource.file_path)[0],'processed_pelmesha',datasource.sample_name + '_' + end)
+        path = os.path.join(os.path.split(datasource.file_path)[0],'processed_pelmesha',datasource.sample_name + suffix)
         if not os.path.exists(os.path.split(path)[0]):
             os.makedirs(os.path.split(path)[0])
         return path
