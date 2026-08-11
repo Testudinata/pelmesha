@@ -1,12 +1,15 @@
 import itertools
 import os
 import re
+import sys
+
 import numpy as np
 from h5py import File
 import pandas as pd 
 import xarray as xr
 from pyteomics import mzxml
 from pyimzml.ImzMLParser import ImzMLParser
+from msi_parse import ImzMLParser as rust_ImzMLParser
 import matplotlib.pyplot as plt
 from scipy.signal import medfilt
 import math
@@ -15,6 +18,7 @@ from itertools import  pairwise
 from functools import cached_property
 from pelmesha.dough import Indexator, SliceIndexator
 from pelmesha.utensils import del_hdf5
+import importlib.util
 
 class DataSource: 
     """
@@ -853,6 +857,224 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
         pass
 
 ###################### IMZML
+
+class loader_imzml_rust(BaseLoader):
+    def __init__(self, file_path, respec=False):
+        self.file_path = file_path
+        source = rust_ImzMLParser(file_path)
+        # Назначение функции подгрузки в зависимости от континуальности данных
+        mzoffsets = source.mzOffsets
+        if mzoffsets[0] == mzoffsets[1]:
+            self.dcont = True
+            self.mz_scale_cont = source.getspectrum(0)[0]
+        #     self.get_batch = self._get_batch_cont
+        else:
+            self.dcont = False
+        #     self.get_batch = self._get_batch_discont
+        self.create_metafile(respec=respec)
+
+    @cached_property
+    def source(self):
+        return rust_ImzMLParser(self.file_path)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('source', None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+    def get_spectra_stream(self, idxs):
+        """
+        Lazily yield individual discontinuous spectra.
+
+        :param idxs: Index segments to load.
+        :type idxs: Indexator
+
+        :yields: Tuple ``(mz_array, intensity_array)`` for each spectrum.
+        """
+        for idx in idxs:
+            yield self.source.getspectrum(idx)
+
+    def _get_batch_cont(self, idxs):
+        """
+        Load a batch of continuous spectra as a single matrix.
+
+        :param idxs: Index segments to load.
+        :type idxs: Indexator
+
+        :yields: Tuple ``(mz_scale, intensity_matrix)``.
+        """
+        yield self.mz_scale_cont, np.vstack(tuple(self.get_intensities_stream(idxs)))
+
+    def _get_batch_discont(self, idxs):
+        """
+        Lazily yield individual discontinuous spectra.
+
+        :param idxs: Index segments to load.
+        :type idxs: Indexator
+
+        :yields: Tuple ``(mz_array, intensity_array)`` for each spectrum.
+        """
+        for idx in idxs:
+            yield self.source.getspectrum(idx)
+
+    def _poslog_parser(self, poslog_path, specnum):
+        """
+        Parse a Bruker ``_poslog.txt`` file to extract ROI assignments and coordinates.
+
+        :param poslog_path: Path to the ``_poslog.txt`` file.
+        :param specnum: Total number of spectra expected.
+
+        :type poslog_path: str
+        :type specnum: int
+
+        :return: Tuple ``(roi_list, roi_idx, poslog_specdata)`` where ``roi_idx`` maps ROI names
+            to :class:`Indexator` segments and ``poslog_specdata`` is a list of ``(roi, x, y, z)`` tuples.
+        :rtype: tuple
+        """
+        idx = 0
+        roi_idx = {}
+        roi_list = []
+        current_roi = None
+        poslog_specdata = [None] * specnum
+        roi_pattern = re.compile(r'R(.+?)X')
+
+        with open(poslog_path) as f:
+            data = f.readlines()[2:]
+        for line in data:
+            line_search = roi_pattern.search(line)
+            if not line_search:
+                continue
+            roi_num = line_search.group(1)
+            coords = line.split(' ')[-3:]
+            try:
+                x, y, z = map(float, coords)
+            except (ValueError, IndexError):
+                continue
+            if roi_num != current_roi:
+                if current_roi is not None:
+                    roi_idx[current_roi] = Indexator([start_idx, idx])
+                current_roi = roi_num
+                start_idx = idx
+                roi_list.append(roi_num)
+            poslog_specdata[idx] = (x, y, z)
+            idx += 1
+
+        # Final ROI update
+        if current_roi:
+            roi_idx[current_roi] = Indexator((start_idx, idx))
+        # return roi_list, roi_idx, poslog_specdata # 160626 перепись легаси функции, теперь координаты выгружаются как общие метаданные в виде единого массива. Суть, выгружать конкретные - позже,
+        # так как есть целая таблица с индексацией
+        return roi_list, roi_idx, np.vstack(poslog_specdata)
+
+    def get_mz_stream(self, idxs=None):
+        if idxs is None:
+            idxs = range(len(self.source.mzLengths))
+        if self.dcont:
+            for idx in idxs:
+                yield self.mz_scale_cont
+        else:
+            for idx in idxs:
+                yield self.source.getspectrum(idx)[0]
+
+    def get_intensities_stream(self, idxs):
+        for idx in idxs:
+            yield self.source.getspectrum(idx)[1]
+
+    def get_spectrum(self, idx):
+        return self.source.getspectrum(idx)
+
+    def get_mz(self, idx=None):
+        if self.dcont:
+            return self.mz_scale_cont
+        else:
+            return self.source.getspectrum(idx)[0]
+
+    def get_intensity(self, idx):
+        return self.source.getspectrum(idx)[1]
+
+    def get_batch(self, idxs):
+        """Заглушка от @abstractmethod, get_batch назначится динамически после __init__"""
+        pass
+
+    def get_metadata(self, draw=True):
+        metadata = {}
+        roi_metadata = {}
+        specdata = {}
+        file_path = self.file_path
+        sample_name = os.path.splitext(os.path.basename(file_path))[0]  # Имя файла без расширения
+        folder_path = os.path.dirname(file_path)
+
+        base_path = os.path.join(folder_path, sample_name)  # Базовый стринг пути к файлам без расширения
+        poslog_path = os.path.join(folder_path, sample_name) + "_poslog.txt"
+        if os.path.exists(base_path + "_info.txt"):
+            with open(base_path + "_info.txt") as f:
+                data_info = f.readlines()
+                specnum = int(data_info[2].split(' ')[-1])  # Информация по кол-ву спектров в sample
+        else:
+            dpoints = self.source.mzLengths
+            specnum = len(dpoints)
+        if os.path.exists(poslog_path):
+            roi_list, roi_idx, poslog_specdata = self._poslog_parser(poslog_path, specnum)
+            specdata["x"] = poslog_specdata[:, 0]
+            specdata['y'] = poslog_specdata[:, 1]
+            specdata["z"] = poslog_specdata[:, 2]
+        else:  # If there is no poslog file in the folder, take coordinates from imzml
+            # Get base info and coordinates
+            roi = "00"  # Only one roi
+            roi_list = [roi]
+            roi_idx = {}
+            roi_idx[roi] = Indexator((0, specnum))
+            specdata = {}
+            try:
+                coords = np.vstack(list(self._get_physical_coordinates(range(specnum))))
+
+            except:
+                coords = np.array(self.source.coordinates)[:, [0, 1]]
+            specdata["x"] = coords[:, 0]
+            specdata['y'] = coords[:, 1]
+            specdata["z"] = np.array([0] * specnum)
+        for roi in roi_list:
+            roi_metadata[roi] = {}
+            roi_metadata[roi]["idxroi"] = roi_idx[roi]
+        metadata["continuous"] = self.dcont
+        metadata["dtype_raw"] = np.asarray(self.get_spectrum(0)[1]).dtype.name
+
+        for roi in roi_list:
+            # находим коэффициенты для интерполяции дискретизации (для экономии хранения в метаданных, так как mz_scale может выйти на некоторых приборах в несколько ГБ)
+            roi_metadata[roi]["mz_range"] = self.get_mz_range(roi_idx[roi])
+            roi_metadata[roi]["discret_coeffs"] = self.get_mz_discretion_coeffs(roi_idx[roi], degree=3,
+                                                                                mz_range=roi_metadata[roi]["mz_range"],
+                                                                                draw=draw)
+            if draw:
+                plt.title(f'm/z discretization in sample {os.path.basename(file_path)} and roi {roi}')
+                plt.show()
+
+        # return metadata, roi_metadata, roi_data
+        return metadata, roi_metadata, specdata
+
+    def get_spectrum_sizes(self, idxs=None) -> list:
+        if idxs is None:
+            return self.source.mzLengths
+        else:
+            if isinstance(idxs, (np.ndarray, SliceIndexator)):
+                if isinstance(idxs, np.ndarray):
+                    idxs = SliceIndexator(idxs)
+                mz_lengths = []
+                for idxs_slice in idxs:
+                    mz_lengths.extend(self.source.mzLengths[idxs_slice])
+                return mz_lengths
+            elif isinstance(idxs, int):
+                return [self.source.mzLengths[idxs]]
+            else:
+                raise ValueError("Invalid index type")
+
+    def _get_physical_coordinates(self, idxs):
+        for idx in idxs:
+            yield self.source.get_physical_coordinates(idx)
+
 class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузки как пример 
                                 #TODO @задачка: Совет: есть особый класс Indexator, упрощающий индексацию и хранение индексов. Просто пишу краткое пояснение к нему:
                                 #  Индексы разбиваются на непрерывные сегменты и сегмент обозначен начальным и конечным индексом. Класс может считать кол-во индексов в сложных случаях (когда много сегментов) (свойство .count).
