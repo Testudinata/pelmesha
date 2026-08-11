@@ -2,7 +2,7 @@ from pelmesha.cookbook import Configs, PreparedDataSource, PipelineConfigurator,
 from pelmesha.filling import DataSource
 from pelmesha.dough import Indexator, SliceIndexator
 from pelmesha.kneading import _compute_KDE
-from pelmesha.utensils import mspeaks_KD, Peak_assignment, _align_kde_mz_grids, _consesusing_peaks, apply_kde_mzcorrection, _peaks_filtration, _consensus_peaks_summary, show_df, _nunique_summary
+from pelmesha.utensils import _summerize_kde_mz, _consesusing_peaks, apply_kde_mzcorrection, _peaks_filtration, _consensus_peaks_summary, show_df, _nunique_summary
 from sklearn.preprocessing import normalize
 from itertools import pairwise
 import pyarrow.parquet as pq
@@ -32,13 +32,7 @@ class DataSet:
     # Done 13. Добавить автоматическое создание базового пайплайна с базовыми настройками при инициализации. Если хочется изменить пайплайн - использовать метод setPipeline (написать)
     #New TODO:
     # 1. Добавить вместе с отображением ds, также какие-то данные о референсном/рефернсных датасетах.
-    # 2. Добавить возможность разом удалить все уже обарботанные данные датасетов, добавленных в экземпляр DataSet. Обязательно наличие yes/no подтверждения (лучший вариант, не требующих новых зависимостей) 
-    # MERGING AND PGROUPING
-    # 13. Мерджинг координат, метадаты и датасетов с сохранением принадлежности к определённому файлу и roi (Мультииндекс в датафрейме?). 
-    # Подумать насчёт сохранения в атрибут результата. Либо каждый раз доставать заново
-    # Done 14. Создать метод финальной коррекции m/z методом Pgrouping_KD для объединённых датасетов. Подумать над тем, как результирующие данные сохранять. По сути ведь лишь появляется новая колонка, 
-    # но стоит как-то зафиксировать как она была получена (какие датасеты смерджены и какие были параметры их обработки?)
-    # 15. Метод мерджинга основного датасета с координатами? По сути пользователи и сами смогут сделать, но тут фишка в упрощении действа, так как большинство моментов спратаны в классе.
+    # 2. Добавить возможность разом удалить все уже обарботанные данные датасетов, добавленных в экземпляр DataSet. Обязательно наличие yes/no подтверждения (лучший вариант, не требующих новых зависимостей)
     #New TODO:
     # 1. Обдумать и добавить отображение для результата Коррекции m/z в сочетании с какими датасетами он формировался. Вероятно сделать возможность загрузки родных
     # паркет данных с возможностью полностью восстановить, что же тут происходило
@@ -70,36 +64,392 @@ class DataSet:
     """
     _EXCLUDED_EXTENSIONS = {'ingredients.hdf5', 'specdata.hdf5', 'peaklists.hdf5',"peaks_density.hdf5"}
 
-    def __init__(self, 
+    def __init__(self,
                  sources = None,
                  configs = None,
-                 kde_configs = None, 
-                 RamGb_limit_usage = 2):
+                 kde_configs = None,
+                 RamGb_limit_usage = 2,
+                 **kwargs):
+        """
+        Initialize a DataSet instance.
+
+        Creates an empty ``sources`` dictionary, stores the RAM usage limit,
+        and (optionally) adds the provided initial sources. If ``sources`` is
+        not ``None``, they are passed to :meth:`add_sources`.
+
+        Parameters
+        ----------
+        sources : list | dict | None, optional
+            Initial sources to add. See :meth:`add_sources` for accepted formats.
+            Default ``None``.
+        configs : dict | str | PipelineConfigurator | None, optional
+            Processing config to apply to the added sources. Default ``None``.
+        kde_configs : KDEConfigs | dict | None, optional
+            KDE configs to apply to the added sources. Default ``None``.
+        RamGb_limit_usage : int | float, optional
+            RAM limit in GB used for batch processing. Default ``2``.
+        """
         self.sources = {}
         self.RamGb_limit_usage = RamGb_limit_usage
         self._reference_file_path = None
         self._reference_source: PreparedDataSource = None
         self._reference_peaks = None
+        self._reference_peaks_weights = None
 
 
         if sources is not None:
-            self.add_sources(sources, configs, kde_configs)
+            self.add_sources(sources, configs, kde_configs, **kwargs)
+        elif sources is None and (configs is not None or kde_configs is not None or kwargs):
+            warnings.warn("No sources provided. Configs or KDE configs are skipped. Use add_sources to add sources with configs.")
+
         print(f"DataSet is initialized. Current data samples:")
         print(self)
+    
+    #################################################################
+    # Reference file methods                                        #
+    #################################################################
+    def set_reference_source(self,
+                             source: DataSource | PreparedDataSource | str,
+                             configs: PipelineConfigurator | dict[str, PipelineConfigurator] | None = None,
+                             kde_configs: KDEConfigs | dict[str, KDEConfigs] | None = None,
+                             **kwargs):
+        """
+        Set the reference source used to generate the reference peak list.
 
-    def add_sources(self, source, config = None, kde_configs = None, extensions = None):
+        If *source* is a raw :class:`DataSource`, it is wrapped into a
+        :class:`PreparedDataSource`. If it is already prepared, its configs
+        and KDE configs are (re)loaded or updated from the provided values.
+
+        Parameters
+        ----------
+        source : DataSource | PreparedDataSource
+            The data source to use as a reference.
+        configs : PipelineConfigurator | dict[str, PipelineConfigurator] | None, optional
+            Processing configs to apply. Default ``None``.
+        kde_configs : KDEConfigs | dict[str, KDEConfigs] | None, optional
+            KDE configs to apply. Default ``None``.
+        **kwargs
+            Additional keyword arguments forwarded to config resolution.
+        """
+        if isinstance(source, PreparedDataSource):
+            KDEkwargs, Configkwargs = source._resolve_kwargs(kwargs)
+            if configs is not None:
+                source._load(configs, **Configkwargs)
+            else:
+                source.update(**Configkwargs)
+            if kde_configs is not None:
+                source._load_kde_configs(kde_configs, **KDEkwargs)
+            else:
+                source.update_kde(**KDEkwargs)
+        else:
+            if isinstance(source, [DataSource,str]):
+                source = PreparedDataSource(source, configs, kde_configs, **kwargs)
+
+        self._reference_source = source
+
+    def save_all_reference_configs(self):
+        """
+        Save the current configs for source to its ``processed_pelmesha/REFERENCE_<sample_name>_processing_recipe.yaml`` and ``processed_pelmesha/REFERENCE_<sample_name>_kde_recipe.yaml`` file.
+        """
+        pathsave_base = self._resolve_base_ref_path()
+        self._reference_source.dump(pathsave_base+"_processing_recipe.yaml")
+        self._reference_source.dump_kde_configs(pathsave_base+"_kde_recipe.yaml")
+
+    def _resolve_base_ref_path(self):
+        """
+        Resolve the base path used to store the reference source configs.
+
+        Combines the directory of the reference source config file with the
+        ``REFERENCE_<sample_name>`` prefix.
+
+        Returns
+        -------
+        str
+            Base path without extension (e.g. ``.../REFERENCE_<sample_name>``).
+        """
+        ref_source = self._reference_source
+        dirpath = os.path.dirname(ref_source.configs_path)
+        sample_name = ref_source.sample_name
+        pathsave_base = os.path.join(dirpath, "REFERENCE_" + sample_name)
+        return pathsave_base
+
+    def get_reference_peaks(self,
+                            roi: str | list[str] | None = None,
+                            step: int = 100,
+                            num_peaks_per_step: int = 5,
+                            min_occurence: float = 0.1,
+                            return_weight: bool = True,
+                            free_cpus: int = 1,
+                            Ram_GB_limit: float = 2,
+                            dtypeconv: np.dtype | str | None = None):
+        """
+        Get reference peaks for a given ROI.
+
+        Runs peak picking and KDE density estimation for the reference
+        source, corrects m/z values, and selects the most common peaks
+        within each m/z step. Optionally stores their occurrence weights.
+
+        Parameters
+        ----------
+        roi : str | list[str] | None, optional
+            ROI name or list of ROI names (default ``None`` - all ROIs).
+        step : int, optional
+            Width of the m/z window used to collect candidate peaks (default ``100``).
+        num_peaks_per_step : int, optional
+            Number of most common peaks kept per m/z step (default ``5``).
+        min_occurence : float, optional
+            Minimum normalized occurrence weight a peak must have to be kept
+            (default ``0.1``).
+        return_weight : bool, optional
+            Whether to store the occurrence weights of selected peaks
+            (default ``True``).
+        free_cpus : int, optional
+            Number of CPUs to reserve for other tasks (default ``1``).
+        Ram_GB_limit : float, optional
+            RAM limit in GB for batch processing (default ``2``).
+        dtypeconv : np.dtype | str | None, optional
+            Data type conversion for processing (default ``None``).
+
+        Returns
+        -------
+        None
+            Populates ``_reference_peaks`` (the selected m/z list) and, if
+            ``return_weight``, ``_reference_peaks_weights`` (their occurrence
+            weights) attributes in place.
+        """
+        ref_source = self._reference_source
+        if ref_source is None:
+            raise ValueError(
+                "Reference source is not set. Call `set_reference_source` "
+                "before requesting reference peaks."
+            )
+
+        if step <= 0:
+            raise ValueError(f"`step` must be positive, got {step}.")
+        if num_peaks_per_step <= 0:
+            raise ValueError(
+                f"`num_peaks_per_step` must be positive, got {num_peaks_per_step}."
+            )
+        if not 0 < min_occurence <= 1:
+            raise ValueError(
+                f"`min_occurence` must be in the (0, 1] range, got {min_occurence}."
+            )
+        if free_cpus < 0:
+            raise ValueError(f"`free_cpus` cannot be negative, got {free_cpus}.")
+
+        sample = ref_source.sample_name
+        cpu_num = max(1, cpu_count() - free_cpus)
+        roi_metadata = ref_source.roi_metadata
+        dtypeconv = np.dtype(
+            dtypeconv
+            if dtypeconv is not None
+            else ref_source._datasource.metadata.iloc[0]["dtype_raw"]
+        )
+
+        # Normalize the ROI selection to a list of ROI names.
+        if roi is None:
+            roi = list(roi_metadata.index)
+        elif isinstance(roi, str):
+            roi = [roi]
+        missing = [r for r in roi if r not in roi_metadata.index]
+        if missing:
+            raise ValueError(
+                f"Unknown ROI(s) for the reference source: {missing}. "
+                f"Available ROIs: {list(roi_metadata.index)}."
+            )
+
+        pipeline = Pipeline(ref_source)
+        print(f"Processing REFERENCE SAMPLE {sample}...")
+
+        sample_peaks: dict[str, pd.DataFrame] = {}
+        kde_mz_list: list[np.ndarray] = []
+        kde_density_list: list[np.ndarray] = []
+        multiindex_keys: list[tuple[str, str]] = []
+
+        for r in roi:
+            peakpicking_stream = pipeline._multistream_pipeline(
+                pipeline._peakpick_wrapper,
+                roi=r,
+                cpu_num=cpu_num,
+                Ram_GB_limit=Ram_GB_limit,
+                dtypeconv=dtypeconv,
+            )
+            multiindex_keys.append((sample, r))
+            _, headers_list = next(peakpicking_stream)
+
+            dict_peak = {}
+            for n, peaklists in enumerate(peakpicking_stream):
+                dict_peak[n] = peaklists
+            if not dict_peak:
+                raise RuntimeError(
+                    f"Peak picking produced no data for ROI '{r}' of sample "
+                    f"'{sample}'."
+                )
+
+            roi_peaklists = pd.DataFrame(np.vstack(tuple(dict_peak.values())), columns = headers_list).loc[:,['spectra_ind','mz','FWHML','FWHMR']].astype({"spectra_ind": int})
+            sample_peaks[r] = roi_peaklists
+
+            discret_coeffs = roi_metadata.loc[r, "discret_coeffs"]
+            X_plot, Y_plot = _compute_KDE(
+                roi_peaklists,
+                discret_coeffs,
+                cpu_num,
+                **ref_source.roi_kde_configs[r].to_dict,
+            )
+            # Normalize the probability distribution.
+            Y_plot = normalize(Y_plot.reshape(1, -1), norm="l1").squeeze()
+            kde_mz_list.append(X_plot)
+            kde_density_list.append(Y_plot)
+
+        kde_mz, kde_density = _summerize_kde_mz(kde_mz_list, kde_density_list)
+
+        if len(sample_peaks) > 1:
+            feature_matrix = pd.concat(
+                sample_peaks.values(),
+                keys=multiindex_keys,
+                names=["sample", "roi"],
+            )
+        else:
+            feature_matrix = sample_peaks[r]
+
+        feature_matrix = apply_kde_mzcorrection(
+            feature_matrix, kde_mz, kde_density, cpu_num
+        )
+
+        # Occurrence weights per corrected m/z across all spectra.
+        weights = (
+            feature_matrix["spectra_ind"]
+            .groupby(feature_matrix["mz"], observed=True)
+            .size()
+            .astype(float)
+        )
+        if weights.empty:
+            raise RuntimeError(
+                "No peaks remained after m/z correction for the reference "
+                f"sample '{sample}'."
+            )
+        weights = weights / weights.max()
+
+        selected_mz = list(weights[weights > min_occurence].index)
+        if not selected_mz:
+            raise RuntimeError(
+                "No reference peaks passed the `min_occurence` threshold "
+                f"({min_occurence}) for sample '{sample}'."
+            )
+
+        # Collect the most common peaks within each m/z window.
+        align_list: list[float] = []
+        window_edges = list(
+            pairwise(
+                np.arange(min(selected_mz), max(selected_mz) + step + 1, step)
+            )
+        )
+        for low, high in window_edges:
+            in_window = weights[(weights.index >= low) & (weights.index < high)]
+            align_list.extend(
+                list(
+                    in_window.sort_values(ascending=False)
+                    .head(num_peaks_per_step)
+                    .index
+                )
+            )
+
+        if not align_list:
+            raise RuntimeError(
+                f"No peaks selected for any m/z window for sample '{sample}'."
+            )
+        print(f'Resulted number of reference peaks: {len(align_list)}')
+        if return_weight:
+            self._reference_peaks_weights = weights.loc[align_list].to_list()
+        self._reference_peaks = align_list
+    def set_align_peaks_from_ref(self, 
+                                samples: list[str] | None = None,
+                                rois: dict[str, list[str]] = {},
+                                set_weights: bool = True):
+        
+        """Set reference peaks from a reference file.
+
+        Parameters
+        ----------
+        samples : list[str] | None, optional
+            A list of sample names to set reference peaks.
+            Default ``None`` means all samples.
+        rois : dict[str, list[str]], optional
+            A mapping of sample names to lists of ROI names.
+        """
+        if self._reference_peaks is None:
+            warnings.warn(f"No reference peaks are set. Please get reference peaks first by calling `get_reference_peaks`.")
+            return
+
+        if samples is None:
+            samples = list(self.sources.keys())
+        for sample in samples:
+            sample_rois = rois.get(sample, None)
+            datasource = self.sources[sample]
+            if sample_rois is None:
+                sample_rois = datasource.rois
+            datasource.update(rois = sample_rois,align_peaks = self._reference_peaks)
+            if set_weights and self._reference_peaks_weights is not None:
+                datasource.update(rois = sample_rois, align_pweights = self._reference_peaks_weights)
+        self.save_all_reference_configs()
+    @property
+    def reference_file_path(self): 
+        """Path to the reference data file used for reference peak list generation."""
+        return self._reference_file_path
+
+    @reference_file_path.setter
+    def reference_file_path(self, path): 
+        """Set reference file path. Resets reference peaks if config changes."""
+        if path != self._reference_file_path:
+            self._reference_file_path = path
+            self._reference_peaks = None
+            self._reference_peaks_weights = None
+
+    @property
+    def reference_config(self):
+        """Config dict for reference file processing (may differ from analysis config)."""
+        return self._reference_config
+
+    @reference_config.setter
+    def reference_config(self, config):
+        """Set reference config. Resets cached reference peaks."""
+        self._reference_config = config
+        self._reference_peaks = None
+        self._reference_peaks_weights = None
+
+    #################################################
+    # Sources methods                               #
+    #################################################
+    def add_sources(self, source, config = None, kde_configs = None, extensions = None, **kwargs):
         """
         Add one or more data sources to the DataSet.
 
-        :param source: A single file path, a list of paths, or a dict ``{path: config_or_None}``.
-        :param config: Config dict or path to a YAML file. Ignored if ``source`` is a dict.
+        Accepts a single file path, a list of paths, a directory, or a dict
+        mapping paths to per-source configs. Directories are searched for
+        supported data files using :meth:`add_sources_from_paths`.
+
+        Parameters
+        ----------
+        source : str | list | tuple | dict
+            A single file path, a list/tuple of paths, or a dict
+            ``{path: config_or_None}``. Dict entries may also be directories.
+        config : dict | str | None, optional
+            Config dict or path to a YAML file. Ignored for dict ``source``.
             If ``None``, attempts to load a saved config from the source directory.
+        kde_configs : KDEConfigs | dict | None, optional
+            KDE configs to apply to the added sources. Default ``None``.
+        extensions : list[str] | None, optional
+            File extensions to search for when *source* is a directory.
+            If ``None``, uses the module default supported extensions.
 
-        :type source: str or list or dict
-        :type config: dict or str or None
-
-        :raises FileNotFoundError: If a source path does not exist.
-        :raises ValueError: If a source path has already been added.
+        Raises
+        ------
+        FileNotFoundError
+            If a source path does not exist.
+        ValueError
+            If a source path has already been added.
+        TypeError
+            If ``source`` is not of a supported type.
         """
         if isinstance(source, dict):
             for path, cfg in source.items():
@@ -108,12 +458,12 @@ class DataSet:
                 else:
                     self._add_single_source(path, cfg)
         elif isinstance(source, (list, tuple)):
-            self.add_sources_from_paths(source,extensions,config, kde_configs) 
+            self.add_sources_from_paths(source,extensions,config, kde_configs, **kwargs) 
         elif isinstance(source, str):
             if os.path.isdir(source):
-                self.add_sources_from_paths([source],extensions,config, kde_configs)
+                self.add_sources_from_paths([source],extensions,config, kde_configs, **kwargs)
             else:
-                self._add_single_source(source, config, kde_configs)
+                self._add_single_source(source, config, kde_configs, **kwargs)
         else:
             raise TypeError(f"Unsupported source type: {type(source)}")
 
@@ -126,7 +476,7 @@ class DataSet:
         self.add_sources(source, config, kde_configs, extensions)
         return self
 
-    def _add_single_source(self, path, config = None, kde_configs = None):
+    def _add_single_source(self, path, config = None, kde_configs = None, **kwargs):
         """Internal: add a single source with duplicate protection."""
         if not os.path.exists(path):
             raise FileNotFoundError(f"Source path does not exist: {path}")
@@ -145,7 +495,7 @@ class DataSet:
                 f"Please, rename file name '{sample_name}' or folder '{folder_name}'"
             )
         resolved_config = self._resolve_config(config)
-        source = PreparedDataSource(source, resolved_config, kde_configs)
+        source = PreparedDataSource(source, resolved_config, kde_configs, **kwargs)
         self.sources[sample_name] = source
 
     @staticmethod
@@ -177,7 +527,7 @@ class DataSet:
             return config
         return {}
 
-    def add_sources_from_paths(self, path_list, extensions = None, config = None, kde_configs = None):
+    def add_sources_from_paths(self, path_list, extensions = None, config = None, kde_configs = None, **kwargs):
         """
         Search directories for data files with given extensions and add them as sources.
 
@@ -214,42 +564,11 @@ class DataSet:
 
         for path in found_paths:
             try:
-                self._add_single_source(path, config, kde_configs)
+                self._add_single_source(path, config, kde_configs, **kwargs)
             except (ValueError, FileNotFoundError) as e:
                 warnings.warn(f"Skipping {path}: {e}")
-    def set_reference_source(self, 
-                             source: DataSource | PreparedDataSource, 
-                             configs: PipelineConfigurator | dict[str, PipelineConfigurator] | None = None, 
-                             kde_configs: KDEConfigs | dict[str, KDEConfigs] | None = None,
-                             **kwargs):
-        if isinstance(source, DataSource):
-            source = PreparedDataSource(source, configs, kde_configs, **kwargs)
-        else:
-            KDEkwargs, Configkwargs = source._resolve_kwargs(kwargs)
-            if configs is not None:
-                source._load(configs, **Configkwargs)
-            else:
-                source.update(**Configkwargs)
-            if kde_configs is not None:
-                source._load_kde_configs(kde_configs, **KDEkwargs)
-            else:
-                source.update_kde(**KDEkwargs)
-        self._reference_source = source
 
-    def save_all_reference_configs(self):
-        """
-        Save the current configs for source to its ``processed_pelmesha/REFERENCE_<sample_name>_processing_recipe.yaml`` and ``processed_pelmesha/REFERENCE_<sample_name>_kde_recipe.yaml`` file.
-        """
-        pathsave_base = self._resolve_base_ref_path()
-        self._reference_source.dump(pathsave_base+"_processing_recipe.yaml")
-        self._reference_source.dump_kde_configs(pathsave_base+"_kde_recipe.yaml")
-
-    def _resolve_base_ref_path(self):
-        ref_source = self._reference_source
-        dirpath = os.path.dirname(ref_source._configs_source_path)
-        sample_name = ref_source.sample_name
-        pathsave_base = os.path.join(dirpath, "REFERENCE_" + sample_name)
-        return pathsave_base
+    
     def save_configs(self): 
         """
         Save the current config for each source to its ``processed_pelmesha/<sample_name>_processing_recipe.yaml`` file.
@@ -285,96 +604,10 @@ class DataSet:
             else:
                 changes[sample_name] = {"status": "new", "old": None, "new": current_config}
         return changes
-    def get_reference_peaks(self, 
-                            roi: str | list[str] | None = None,
-                            free_cpus: int = 1, 
-                            draw: bool = False, 
-                            draw_mz_range: tuple[float, float] | None = None,
-                            draw_spectrum_idx: int | None = None,
-                            Ram_GB_limit: float = 2,
-                            h5chunk_size_MB: int = 10,
-                            dtypeconv: np.dtype | str | None = None,
-                            merge_roi_results = False):
-        """
-        Get reference peaks for a given ROI.
-        
-        Parameters
-        ----------
-        roi : str | list[str] | None, optional
-            ROI name or list of ROI names (default None).
-        
-        Returns
-        -------
-        peaks : pd.DataFrame
-            Reference peaks, with columns:
-            - ``mz``: m/z values
-            - ``weights``: optional.
-        """
-        ref_source = self._reference_source
-        sample = ref_source.sample_name
-        cpu_num = cpu_count()-free_cpus
-        roi_metadata = ref_source.roi_metadata
-        if dtypeconv is None:
-            dtypeconv = ref_source._datasource.metadata.iloc[0]["dtype_raw"]
-        dtypeconv = np.dtype(dtypeconv)
-        if roi is None:
-            roi = list(roi_metadata.index)
-        if isinstance(roi, str):
-            roi = [roi]
-        pipeline = Pipeline(ref_source)
-        print(f"Processing REFERENCE SAMPLE {sample}...")
-        sample_peaks = {}
-        for r in roi:
-            print(f'Processing REFERENCE ROI {r}...')
-            peakpicking_stream = pipeline._multistream_pipeline(pipeline._peakpick_wrapper,
-                                                                roi = r,
-                                                                cpu_num = cpu_num,
-                                                                Ram_GB_limit = Ram_GB_limit,
-                                                                dtypeconv = dtypeconv)
-            gen_mz, headers_list = next(peakpicking_stream)
-            dict_peak = {}
-            for n, peaklists in enumerate(peakpicking_stream):
-                dict_peak[n] = peaklists
-            # print(pd.DataFrame(np.vstack(tuple(dict_peak.values())), columns = headers_list).astype({"spectra_ind": int}))
-
-            sample_peaks[r] = pd.DataFrame(np.vstack(tuple(dict_peak.values())), columns = headers_list).loc[:,['spectra_ind','mz','FWHML','FWHMR']].astype({"spectra_ind": int})
-
-            roi_peaks = sample_peaks[r]
-            discret_coeffs = roi_metadata.loc[r, 'discret_coeffs']
-            # TODO добавить вариант мёрджа после того, как напишу суммацию KDE графиков от разных сэмплов с роиё
-            X_plot, Y_plot = _compute_KDE(roi_peaks, discret_coeffs, cpu_num, **ref_source.roi_kde_configs[r].to_dict)
-            Y_plot = normalize(Y_plot.reshape(1,-1), norm = 'l1').squeeze() # Normalize the probability distribution
-            
-            diap = (X_plot > 790) & (X_plot < 810)
-            Xp_data = mspeaks_KD(X_plot,Y_plot)
-            Xp = Xp_data[0]
-            Xl = Xp_data[1]
-            Xr = Xp_data[2]
-            mz_sequence = np.sort(roi_peaks['mz'].unique())
-            mz_num = len(mz_sequence)
-            if mz_num < cpu_num*3:
-                batches_num = mz_num
-            else:
-                batches_num = cpu_num*3
-            idxmz_batches = list(pairwise(np.linspace(0,mz_sequence.shape[0],batches_num,dtype=int))) 
-            par_args=[None]*len(idxmz_batches)
-            for batch_n,idx_batch in enumerate(idxmz_batches):
-                mzb_min = mz_sequence[idx_batch[0]]
-                mzb_max = mz_sequence[idx_batch[1]-1]
-                Xl_min = Xl[Xl<=mzb_min][-1]
-                Xr_max = Xr[Xr>=mzb_max][0]
-                batch_indexes = (Xp>=Xl_min) & (Xp<=Xr_max)
-                par_args[batch_n] = (roi_peaks.loc[(roi_peaks['mz'] >= mzb_min) & (roi_peaks['mz'] <= mzb_max)], Xp_data[:,batch_indexes])
-            with Pool(cpu_num) as p:
-                grftable = p.starmap(Peak_assignment,par_args)
-            grftable=pd.concat(grftable)
-            print(grftable)
-            plt.figure(figsize=(25, 5))
-            plt.plot(X_plot[diap], Y_plot[diap])
-
-
-        self._reference_peaks = sample_peaks
-                
+    
+    ###############################################################################
+    # Processing methods                                                          #
+    ###############################################################################       
     def process(self,
                 sample_name: list | str | None = None,
                 free_cpus: int = 1, 
@@ -581,29 +814,10 @@ class DataSet:
                                        local_roi_idx = local_roi_idx,
                                        merge_with_coords = merge_with_coords)
 
+    ##################################################################
+    # QoL methods                                                    #
+    ##################################################################
 
-    @property
-    def reference_file_path(self): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-        """Path to the reference data file used for reference peak list generation."""
-        return self._reference_file_path
-
-    @reference_file_path.setter
-    def reference_file_path(self, path): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-        """Set reference file path. Resets reference peaks if config changes."""
-        if path != self._reference_file_path:
-            self._reference_file_path = path
-            self._reference_peaks = None
-
-    @property
-    def reference_config(self): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-        """Config dict for reference file processing (may differ from analysis config)."""
-        return self._reference_config
-
-    @reference_config.setter
-    def reference_config(self, config): # TODO Проверить !!!!!!!!!!!!!!!!!!!!!!
-        """Set reference config. Resets cached reference peaks."""
-        self._reference_config = config
-        self._reference_peaks = None
 
     def coordinates(self, 
                     rois: dict[str, list[str]] = {},
@@ -623,9 +837,6 @@ class DataSet:
                     coords[-1] = roi_coords
                     
         return pd.concat(coords, keys=multiindex_keys, names = ['sample', 'roi'])
-                    
-    def _save_coordinates(self, path2save):
-        pass
 
     def __getitem__(self, sample):
         return self.sources[sample]
@@ -646,10 +857,6 @@ class DataSet:
     def __contains__(self, item):
         return item in self.sources
 
-    # ------------------------------------------------------------------ #
-    #  Table representations (__repr__ / _repr_html_)                    #
-    #  Single Source of Truth: _generate_table_data()                    #
-    # ------------------------------------------------------------------ #
     def audit_processing(self,
                         sources: str | list[str] | None = None,
                         roi: str | list[str] | None = None,
@@ -677,6 +884,11 @@ class DataSet:
             sources = [sources]
         for source in sources:
             Drawer(self.sources[source]).audit_processing(roi, draw_mz_range, draw_spectrum_idx, dtypeconv)
+    
+    # ------------------------------------------------------------------ #
+    #  Table representations (__repr__ / _repr_html_)                    #
+    #  Single Source of Truth: _generate_table_data()                    #
+    # ------------------------------------------------------------------ #
     @staticmethod
     def _file_url(path):
         """
@@ -1530,12 +1742,7 @@ class Pipeline:
             else:
                 raise FileNotFoundError(f"Peaks density file {datasource.peaks_density_path} does not exist.\nPlease run `estimate_peak_density_kde` method first")
 
-        common_kde_mz = _align_kde_mz_grids(kde_mz_list)
-        total_density = np.zeros_like(common_kde_mz)
-        for kmz, kden in zip(kde_mz_list, kde_density_list):
-            total_density += np.interp(common_kde_mz, kmz, kden, left=0, right=0)
-        total_density = normalize( total_density.reshape(1, -1), norm='l1' ).squeeze()
-        kde_mz, kde_density = common_kde_mz, total_density
+        kde_mz, kde_density = _summerize_kde_mz(kde_mz_list, kde_density_list)
 
         multiindex_keys = []
         feature_matrix = []
@@ -1574,7 +1781,7 @@ class Pipeline:
             all_columns = dupl_stats.columns.union(dupl_stats_filtration.columns)
             dupl_stats = dupl_stats.reindex(columns=all_columns, fill_value=0)
             dupl_stats_filtration = dupl_stats_filtration.reindex(columns=all_columns, fill_value=0)
-            dupl_stats = pd.concat([dupl_stats, dupl_stats_filtration],axis=1, keys=["before filtration", "after filtration"])#.fillna(0)
+            dupl_stats = pd.concat([dupl_stats, dupl_stats_filtration],axis=1, keys=["before filtration", "after filtration"])
         # Merging duplicates and create consensus peaks
         if duplicates_drop:
             feature_matrix = _consesusing_peaks(feature_matrix)
@@ -1632,10 +1839,10 @@ class Pipeline:
 
             
         return feature_matrix
-
+    
     def _multistream_pipeline(self,
                               process_wrapper: Callable,
-                              roi: str = None,
+                              roi: str,
                               cpu_num: int = 1, 
                               Ram_GB_limit: int = 2,
                               dtypeconv:  np.dtype | str | None = None,
@@ -1693,7 +1900,7 @@ class Pipeline:
             idxs_batches = datasource.split_idxs(idxs = idxs,cpu_count=cpu_num, Ramcap_GB = Ram_GB_limit, size_per_spec = size_per_spec)
 
             with Pool(cpu_num) as p:
-                for data in tqdm(p.imap_unordered(partial_worker, idxs_batches), total=len(idxs_batches), unit = 'batch'):
+                for data in tqdm(p.imap_unordered(partial_worker, idxs_batches), total=len(idxs_batches), unit = 'batch', desc = f'Processing ROI {roi}'):
                     yield data
 
     def _resolve_base_path(self, end):

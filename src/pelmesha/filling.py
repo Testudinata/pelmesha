@@ -1242,41 +1242,46 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
     def __setstate__(self, state):
         self.__dict__.update(state)
 
-    def _load_spectra(self, idx):
+    def _dots_slice(self, idx):
         """собираем один спектр по его индексу"""
 
         start_idx = self.source['scan_index'][idx].item()
         end_idx = self.source['point_count'][idx].item() + start_idx
-        dot_selection = slice(start_idx, end_idx,1)
-        mz_single = self.source['mass_values'][dot_selection].values
-        intens_single = self.source['intensity_values'][dot_selection].values
+        dots_slice = slice(start_idx, end_idx,1)
 
-        return mz_single, intens_single
-
+        return dots_slice
+    
     def get_spectra_stream(self, idxs = None):
+        if idxs is None:
+            idxs = range(len(self.source['scan_index']))
         for idx in idxs:
-            yield self._load_spectra(idx)
+            dots_slice = self._dots_slice(idx)
+            mz_single = self.source['mass_values'][dots_slice].values
+            intens_single = self.source['intensity_values'][dots_slice].values
+            yield mz_single, intens_single
 
     def get_mz_stream(self, idxs = None):
         for idx in idxs:
-            yield self._load_spectra(idx)[0]
+            dots_slice = self._dots_slice(idx)
+            yield self.source['mass_values'][dots_slice].values
 
     def get_intensities_stream(self, idxs = None):
         for idx in idxs:
-            yield self._load_spectra(idx)[0]
+            dots_slice = self._dots_slice(idx)
+            yield self.source['intensity_values'][dots_slice].values
 
     def get_spectrum(self, idx):
-        return self._load_spectra(idx)
+        return next(self.get_spectra_stream([idx]))
 
     def get_mz(self, idx):
-        return self._load_spectra(idx)[0]
+        return next(self.get_mz_stream([idx]))
 
     def get_intensity(self, idx):
-        return self._load_spectra(idx)[1]
+        return next(self.get_intensities_stream([idx]))
 
     def get_batch(self, idxs):
-        """заглушка"""
-        pass
+        """заглушка""" # TODO Проверить использую ли я по итогу этот метод
+        yield from self.get_spectra_stream(idxs)
 
     def get_metadata(self, draw=True):
         metadata = {}
@@ -1301,7 +1306,7 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
 
         # данные в cdf discontinuous
         metadata['continuous'] = self.dcont
-        metadata['dtype_raw'] = self._load_spectra(0)[1].dtype.name
+        metadata['dtype_raw'] = self.get_intensity(0).dtype.name
 
         # дискретизация
         for roi in roi_list:

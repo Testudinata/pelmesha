@@ -10,6 +10,7 @@ from tqdm.auto import tqdm
 import os
 import math
 from multiprocessing import Pool
+from sklearn.preprocessing import normalize
 
 FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2)) 
 
@@ -512,6 +513,17 @@ def _align_kde_mz_grids(kde_mz_list: list[np.ndarray]) -> np.ndarray:
     num_points = int((mz_max - mz_min) / min_step) + 1
     return np.linspace(mz_min, mz_max, num_points)
 
+def _summerize_kde_mz(kde_mz_list: list[np.ndarray],
+                      kde_density_list: list[np.ndarray], 
+                      normalize_bool: bool = True) -> tuple[np.ndarray, np.ndarray]:
+    common_kde_mz = _align_kde_mz_grids(kde_mz_list)
+    total_density = np.zeros_like(common_kde_mz)
+    for kmz, kden in zip(kde_mz_list, kde_density_list):
+        total_density += np.interp(common_kde_mz, kmz, kden, left=0, right=0)
+    if normalize_bool:
+        total_density = normalize( total_density.reshape(1, -1), norm='l1' ).squeeze()
+    return common_kde_mz, total_density
+
 def apply_kde_mzcorrection(peaklist: pd.DataFrame, 
                            kde_mz: np.ndarray, 
                            kde_density: np.ndarray,
@@ -621,7 +633,7 @@ def _consensus_peaks_summary(feature_matrix: pd.DataFrame) -> pd.DataFrame:
         columns="count",
         values="mz",
         aggfunc="nunique",
-    ).add_suffix(" subs")
+    ).add_suffix(" subs").fillna(0).astype('int')
 
 def _nunique_summary(feature_matrix: pd.DataFrame,
                      column_name: str | None = None) -> pd.DataFrame:
