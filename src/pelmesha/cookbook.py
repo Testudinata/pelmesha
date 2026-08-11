@@ -11,7 +11,7 @@ Provides a Pydantic-based configuration system that supports:
 
 Main class: Configs
 Special classes: PreparedDataSource and PipelineConfigurator
-Supporting classes: AdaptiveParameter, DatasetHeaders
+Supporting classes: AdaptiveParameter
 """
 from __future__ import annotations
 import ast
@@ -23,13 +23,11 @@ from typing import Any, Callable
 import numpy as np
 import yaml
 import importlib
-from h5py import File
 from pybaselines import Baseline #Необходимо для set_method PipelineConfigurator
-from multiprocessing import Pool, cpu_count
 from pelmesha.filling import DataSource
-from pelmesha.dough import Indexator, SliceIndexator
+from pelmesha.dough import SliceIndexator, Indexator
 from pelmesha.kneading import preprocess_configuration_base, process_spectra_base, peakpicking_base
-
+from pydantic import BaseModel, Field, field_validator
 # Names of the built-in (base) pipeline step functions from pelmesha.kneading.
 # Used to detect custom vs. base functions during YAML save/load.
 _BASE_PIPELINE_FUNC_NAMES: frozenset[str] = frozenset({
@@ -37,10 +35,8 @@ _BASE_PIPELINE_FUNC_NAMES: frozenset[str] = frozenset({
     "process_spectra_base",
     "peakpicking_base",
 })
-from tqdm.auto import tqdm
-from functools import partial
+
 import copy
-import matplotlib.pyplot as plt
 import pandas as pd
 # --------------------------------------------------------------------------- #
 #  Utility functions for adaptive parameter conversion                        #
@@ -290,422 +286,10 @@ yaml.add_constructor("!obj", _yaml_to_callable, Loader=yaml.FullLoader)
 yaml.add_constructor("!obj", _yaml_to_callable, Loader=yaml.UnsafeLoader)
 yaml.add_constructor("!obj", _yaml_to_callable, Loader=yaml.Loader)
 
-class Drawer():
-    def __init__(self, datasource: str | DataSource | PreparedDataSource):
-        if isinstance(datasource, (DataSource, str)):
-            if isinstance(datasource, str):
-                datasource = DataSource(datasource)
-            self.processed_spectra_path = datasource.processed_spectra_path
-            self.peaklist_path = datasource.peaklist_path
-            self.datasource = datasource
-            if datasource.configs_path is not None:
-                self.prepdata = PreparedDataSource(datasource, datasource.configs_path)
-            else:
-                self.prepdata = None
-                if self.processed_spectra_path is None and self.peaklist_path is None:
-                    raise ValueError("No processed spectra, peaklist or configs found. Only raw datasource")
-        elif isinstance(datasource, PreparedDataSource):
-            self.prepdata = datasource
-            self.datasource = datasource._datasource
-            self.processed_spectra_path = self.datasource.processed_spectra_path
-            self.peaklist_path = self.datasource.peaklist_path
-    def _draw(self,
-              mz: np.ndarray,
-              intens: np.ndarray,
-              peaklist: np.ndarray | None = None,
-              headers: list[str] | None = None,
-              roi: str | None = None,
-              mz_range: tuple[float, float] | None = None,
-              spectrum_idx: int | None = None):
-        
-        plt.figure().set_figwidth(25)
-        plt.gcf().set_figheight(5)
-        datasource = self.datasource
-        diapcalc = lambda mz, plot_mz_range: (np.array(mz>plot_mz_range[0]) & np.array(mz<plot_mz_range[1])) if plot_mz_range is not None else range(len(mz))
-
-        # Draw raw
-        Label = ["Raw mass spectrum"]
-        mz_raw, intens_raw = datasource.get_spectrum(spectrum_idx)
-
-        if mz is None:
-            mz = mz_raw
-        if mz_range is None:
-            mz_range = (mz[0], mz[-1])
-
-        diap_raw = diapcalc(mz_raw, mz_range)
-        plt.plot(mz_raw[diap_raw], intens_raw[diap_raw],alpha=0.75)
-
-        # Draw processed
-
-        Label.append("Processed mass spectrum")
-        diap = diapcalc(mz, mz_range)
-        plt.plot(mz[diap], intens[diap],alpha=0.75)
-        
-        # Draw peaklist
-        if peaklist is not None:
-            if isinstance(peaklist, np.ndarray):
-                peaklist = pd.DataFrame(peaklist, columns = headers)
-            peaklist = peaklist.astype({"spectra_ind": int})
-            peaklist.query("mz>@mz_range[0] and mz<@mz_range[1] and spectra_ind == @spectrum_idx").plot(x="mz",y="Intensity",ax = plt.gca(),style = "x", color = "k")
-            left_intens=[]
-            for left_base in peaklist.query("PextL>@mz_range[0] and PextL<@mz_range[1] and spectra_ind == @spectrum_idx")['PextL']:
-                left_intens.append(intens[mz>=left_base][0])
-            right_intens = []
-            for right_base in peaklist.query("PextR>@mz_range[0] and PextR<@mz_range[1] and spectra_ind == @spectrum_idx")['PextR']:
-                right_intens.append(intens[mz<=right_base][-1])
-            plt.plot(peaklist.query("PextL>@mz_range[0] and PextL<@mz_range[1] and spectra_ind == @spectrum_idx")['PextL'],
-            left_intens,'v')
-            plt.plot(peaklist.query("PextR>@mz_range[0] and PextR<@mz_range[1] and spectra_ind == @spectrum_idx")['PextR'],
-            right_intens,'^')
-            Label=Label+[f'Peaks', 'Left peak base','Right peak base']
-        plt.grid(visible=True,which="both")
-        plt.xlim(mz_range)
-        plt.legend([*Label])
-        plt.minorticks_on()
-        plt.xlabel("m/z")
-        plt.ylabel("Intensity")
-        plt.title(f"Sample: {datasource.sample_name}, roi: {roi}, spectrum idx: {spectrum_idx}")
-        plt.show()
-
-    def audit_processing(self,
-                         roi: str | list | None = None,
-                         draw_mz_range: tuple[float, float] | None = None,
-                         draw_spectrum_idx: int | None = None,
-                         dtypeconv: np.dtype | None = None):
-        if roi is None:
-            roi = list(self.datasource.roi_metadata.index)
-        elif isinstance(roi, str):
-            roi = [roi]
-        elif isinstance(roi, list):
-            pass
-        else:
-            raise ValueError("Invalid roi")
-
-        pipeline = Pipeline(self.prepdata)
-        datasource = self.datasource
-        roi_metadata = datasource.roi_metadata
-        for r in roi:
-            if draw_spectrum_idx is None:
-                rmeta = roi_metadata.loc[r]
-                idxs = Indexator(rmeta["idxroi"].to_numpy(int))
-                spectrum_idx = list(idxs)[np.random.randint(0,idxs.count)]
-            else:
-                spectrum_idx = draw_spectrum_idx
-
-            processing_stream = pipeline._multistream_pipeline(Pipeline._procfunc_wrapper, r, idxs = spectrum_idx, dtypeconv=dtypeconv)
-            mz, headers = next(processing_stream)
-            loc_idx, proc_intensity = next(processing_stream)
-            roi_configs = self.prepdata.roi_configs[r]
-            peakpick_function = roi_configs._peakpick_function
-            if peakpick_function:
-                peaklist_configs = roi_configs.get_step_configs('peakpick')
-                peaklist = peakpick_function(mz,
-                                             proc_intensity.squeeze(),
-                                             [spectrum_idx],
-                                             peaklist_configs,
-                                             )
-                # headers = peaklist_configs['headers']
-            else:
-                peaklist = None
-
-            self._draw(mz, proc_intensity.squeeze(), peaklist, headers, r, draw_mz_range, spectrum_idx)
-
-    def draw_processed_data(self,
-                            roi: str | list | None = None,
-                            draw_mz_range: tuple[float, float] | None = None,
-                            draw_spectrum_idx: int | None = None):
-        if roi is None:
-            roi = list(self.prepdata.roi_metadata.index)
-        elif isinstance(roi, str):
-            roi = [roi]
-        elif isinstance(roi, list):
-            pass
-        else:
-            raise ValueError("Invalid roi")
-        datasource = self.datasource
-
-        for r in roi:
-            headers = None
-            if draw_spectrum_idx is None:
-                rmeta = datasource.roi_metadata.loc[r]
-                idxs = Indexator(rmeta["idxroi"])
-                spectrum_idx = list(idxs)[np.random.randint(0,idxs.count)]
-            else:
-                spectrum_idx = draw_spectrum_idx
-            
-            if self.processed_spectra_path is None:
-                if self.prepdata is None:
-                    raise ValueError("No processed spectra path or configs to get processed spectrum")
-                else:
-                    pipeline = Pipeline(self.prepdata)
-                    stream = pipeline._multistream_pipeline(Pipeline._procfunc_wrapper,r, cpu_num=1, idxs = spectrum_idx)
-                    mz, headers = next(stream)
-                    _, data_int = next(stream)
-                    data_int = data_int[0]
-            else:
-                with File(self.processed_spectra_path, "r") as hdf5:
-                    data_int = hdf5[r]["int"][datasource._get_local_roi_idx(spectrum_idx), :]
-                    mz = hdf5[r]["mz"][:]
-            if self.peaklist_path is not None:
-                with File(self.peaklist_path, "r") as hdf5:
-                    headers = hdf5[r]['peaklists'].attrs["Column headers"]
-                    peaklist = pd.DataFrame(hdf5[r]["peaklists"][:], columns = headers).astype({"spectra_ind": int}).query('spectra_ind == @spectrum_idx')
-            else:
-                peaklist = None
-
-            self._draw(mz, data_int, peaklist, headers, r, draw_mz_range, spectrum_idx)
-class Pipeline:
-    def __init__(self,
-                 prepdata: PreparedDataSource):
-        '''WIP
-        Unified interface for running MSI data processing.
-
-        Pipeline is a thin orchestrator that accepts a PreparedDataSource 
-        and runs processing methods using the pipeline functions stored in the configs object.
-
-        Parameters
-        ----------
-        configs : PreparedDataSource
-            Configuration object with datasource and pipeline functions.
-        '''
-        if isinstance(prepdata, PreparedDataSource):
-            self.prepdata = prepdata
-            self.roi_configs = prepdata.roi_configs
-            self._configs_source_path = prepdata._configs_source_path
-            self._datasource = prepdata._datasource
-        else:
-            raise ValueError(
-                "Provide a PreparedDataSource."
-            )
-
-    def process(self,
-                free_cpus: int = 1, 
-                draw: bool = False, 
-                draw_mz_range: tuple[float, float] | None = None,
-                draw_spectrum_idx: int | None = None,
-                Ram_GB_limit: float = 2,
-                h5chunk_size_MB: int = 10,
-                dtypeconv: np.dtype | str | None = None):
-        '''
-        Parameters
-        ----------
-        free_cpus : int, optional
-            Number of CPUs to leave free (default 1).
-        draw : bool, optional
-            Whether to draw processing results (default False).
-        draw_mz_range : tuple[float, float] | None, optional
-            m/z range for drawing (default None).
-        draw_spectrum_idx : int | None, optional
-            Spectrum index for drawing (default None).
-        Ram_GB_limit : float, optional
-            RAM limit in GB (default 2).
-        h5chunk_size_MB : int, optional
-            HDF5 chunk size in MB (default 10).
-        dtypeconv : np.dtype | str | None, optional
-            Data type conversion (default None).
-        '''
-        datasource = self._datasource
-        
-        hdf5_save_path = os.path.join(os.path.split(datasource.file_path)[0],'processed_pelmesha',datasource.sample_name + '_processed_spectra.hdf5')
-        if os.path.exists(hdf5_save_path):
-            os.remove(hdf5_save_path)
-        if not os.path.exists(os.path.split(hdf5_save_path)[0]):
-            os.makedirs(os.path.split(hdf5_save_path)[0])
-
-        cpu_num = cpu_count()-free_cpus
-        roi_metadata = datasource.roi_metadata
-
-        if dtypeconv is None:
-            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
-        dtypeconv = np.dtype(dtypeconv)
-        bytes_flsize = dtypeconv.itemsize
-        chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
-        for roi in roi_metadata.index:
-            print(f'Processing ROI {roi}')
-            processing_stream = self._multistream_pipeline(self._procfunc_wrapper,
-                                                           roi = roi,
-                                                           cpu_num = cpu_num,
-                                                           Ram_GB_limit = Ram_GB_limit,
-                                                           dtypeconv = dtypeconv)
-            gen_mz, headers_list = next(processing_stream)
-            if gen_mz is None:
-                processing_stream.close()
-                warnings.warn(f"Discontinuous data detected for sample '{datasource.sample_name}' (ROI: {roi}). "  
-                              "Resampling is required before writing to HDF5.")
-                
-                continue
-            
-            with File(hdf5_save_path,"a") as hdf5:
-                dots_num = len(gen_mz)
-                hdf5.create_dataset(roi+"/int", (Indexator(roi_metadata.loc[roi,"idxroi"]).count, dots_num), chunks=(int(chunk_size_by_elements/dots_num), dots_num), dtype = dtypeconv)
-                hdf5.create_dataset(roi+"/mz", data = gen_mz, dtype = dtypeconv)
-                
-                for loc_idxs, proc_intensity in processing_stream:
-                
-                    hdf5[roi]["int"][next(loc_idxs.__iter__()),:] = proc_intensity
-                    # hdf5[roi]["int"][loc_idxs,:] = proc_intensity
-
-            if draw:
-                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
-
-        self.prepdata.save()
-        
-
-    def peakpick(self,
-                 free_cpus: int = 1, 
-                 draw: bool = False, 
-                 draw_mz_range: tuple[float, float] | None = None,
-                 draw_spectrum_idx: int | None = None,
-                 Ram_GB_limit: float = 2,
-                 h5chunk_size_MB: int = 10,
-                 dtypeconv: np.dtype | str | None = None):    
-             
-        datasource = self._datasource
-        hdf5_save_path = os.path.join(os.path.split(datasource.file_path)[0],'processed_pelmesha',datasource.sample_name + '_peaklists.hdf5')
-        if os.path.exists(hdf5_save_path):
-            os.remove(hdf5_save_path)
-        if not os.path.exists(os.path.split(hdf5_save_path)[0]):
-            os.makedirs(os.path.split(hdf5_save_path)[0])
-
-        if dtypeconv is None:
-            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
-        dtypeconv = np.dtype(dtypeconv)
-        cpu_num = cpu_count()-free_cpus
-        bytes_flsize = dtypeconv.itemsize
-        chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
-        
-        roi_metadata = datasource.roi_metadata
-        for roi in roi_metadata.index:
-            print(f'Processing ROI {roi}')
-            peakpicking_stream = self._multistream_pipeline(self._peakpick_wrapper,
-                                                           roi = roi,
-                                                           cpu_num = cpu_num,
-                                                           Ram_GB_limit = Ram_GB_limit,
-                                                           dtypeconv = dtypeconv)
-            gen_mz, headers_list = next(peakpicking_stream)
-            
-            with File(hdf5_save_path,"a") as hdf5:
-                n_heads = len(headers_list)
-                hdf5.create_dataset(roi + "/peaklists",(0, n_heads), maxshape = (None, n_heads), chunks=(chunk_size_by_elements/n_heads, n_heads), dtype=dtypeconv)
-                hdf5[roi]["peaklists"].attrs["Column headers"] = headers_list
-                for peaklists in peakpicking_stream:
-                    list_size = len(peaklists)
-                    hdf5[roi]["peaklists"].resize((hdf5[roi]["peaklists"].shape[0] + list_size, n_heads))
-                    hdf5[roi]["peaklists"][-list_size:,:] = peaklists
-
-            if draw:
-                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
-
-        self.prepdata.save()
-        
-    def _multistream_pipeline(self,
-                              process_wrapper: Callable,
-                              roi: str = None,
-                              cpu_num: int = 1, 
-                              Ram_GB_limit: int = 2,
-                              dtypeconv:  np.dtype | str | None = None,
-                              idxs: Indexator | SliceIndexator | int | None = None):
-        """Основная функция генератор результатов мультипроцессинга"""
-        datasource = self._datasource
-        if dtypeconv is None:
-            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
-        dtypeconv = np.dtype(dtypeconv)
-        roi_metadata = datasource.roi_metadata
-        rmeta = roi_metadata.loc[roi]
-        if idxs is None:
-            idxs = rmeta["idxroi"]
-        # Get per-ROI PipelineConfigurator pipeline functions and its configs from PreparedDataSource
-        roi_configs = self.roi_configs[roi]
-        preprocess_function = roi_configs._preprocess_function
-        
-        mz = None
-        headers_list = None
-        size_per_spec = None
-        if preprocess_function:
-            mz, headers_list, internal_configs = preprocess_function(datasource, roi, rmeta, roi_configs)
-            if mz is None and datasource.loader.dcont:
-                mz = datasource.loader.mz_scale_cont
-        else:
-            if datasource.loader.dcont:
-                mz = datasource.loader.mz_scale_cont
-
-        if process_wrapper.__name__ == "_procfunc_wrapper":
-            internal_configs['process_pipeline']= roi_configs._process_function
-            wrapper_configs = roi_configs.get_step_configs("process")
-        elif process_wrapper.__name__ == "_peakpick_wrapper":
-            internal_configs['process_pipeline']  = roi_configs._process_function
-            internal_configs['peakpick_function']  = roi_configs._peakpick_function
-            wrapper_configs = {"peakpick":roi_configs.get_step_configs("peakpick"), 
-                               "process":roi_configs.get_step_configs("process")}
-        else:
-            raise ValueError("Unknown process_wrapper function")
-
-        yield mz, headers_list # mz common mz to spectra, if mz is not common, None is returned. Headers list for peaklists.
-
-        partial_worker = partial(process_wrapper,
-            datasource = datasource,
-            configs = wrapper_configs,
-            dtypeconv = dtypeconv,
-            **internal_configs
-            )
-        
-        if isinstance(idxs, int):
-            row_idxs, data = partial_worker(np.asarray((idxs,idxs+1), dtype=np.int64))
-            yield row_idxs, data
-        else:
-            if mz is not None:
-                size_per_spec = len(mz)
-            idxs_batches = datasource.split_idxs(idxs = idxs,cpu_count=cpu_num, Ramcap_GB = Ram_GB_limit, size_per_spec = size_per_spec)
-
-            with Pool(cpu_num) as p:
-                for data in tqdm(p.imap_unordered(partial_worker, idxs_batches), total=len(idxs_batches), unit = 'batch'):
-                    yield data
-        
-
-    @staticmethod
-    def _procfunc_wrapper(idxs: Indexator | SliceIndexator | tuple| np.ndarray,
-                          datasource: DataSource,
-                          configs: dict | Configs | PipelineConfigurator,
-                          dtypeconv: np.dtype | None = None,
-                          **internal_configs
-                          ):
-        process_function = internal_configs.pop("process_pipeline")
-        internal_process_configs = internal_configs['process']
-        row_idxs = SliceIndexator(datasource._get_local_roi_idx(idxs))
-        processed_spectra: list[np.ndarray] = [None] * row_idxs.count
-        batch_iter = datasource.get_spectra_stream(Indexator(idxs))
-        for n, (_mz, raw_intensity) in enumerate(batch_iter):
-            _, proc_intensity = process_function(_mz, np.asarray(raw_intensity, dtype=dtypeconv), configs, **internal_process_configs)
-            processed_spectra[n] = proc_intensity
-        return row_idxs, np.vstack(processed_spectra)
-    
-    @staticmethod
-    def _peakpick_wrapper(idxs: Indexator | SliceIndexator | tuple| np.ndarray,
-                          datasource: DataSource,
-                          configs: dict | Configs | PipelineConfigurator,
-                          dtypeconv: np.dtype | None = None,
-                          **internal_configs
-                          ):
-        
-        process_function = internal_configs.pop("process_pipeline")
-        peakpick_function = internal_configs.pop("peakpick_function")
-        proc_configs = configs['process']
-        internal_proc_configs = internal_configs['process']
-        peakpick_configs = configs['peakpick']
-        internal_peakpick_configs = internal_configs['peakpick']
-
-        peaklists = {}
-        idxs_list = list(Indexator(idxs))
-        batch_iter = datasource.get_spectra_stream(Indexator(idxs))
-        for n, (_mz, raw_intensity) in enumerate(batch_iter):
-            _mz, proc_intensity = process_function(_mz, raw_intensity, proc_configs, **internal_proc_configs)
-            peaklists[n] = peakpick_function(_mz, np.asarray(proc_intensity, dtype=dtypeconv).squeeze(), idxs_list[n], peakpick_configs, **internal_peakpick_configs)
-        return np.vstack(tuple(peaklists.values()))
-
 
 class Configs():
     def __init__(self,
-                 configs_source: str | dict = {},
+                 configs_source: str | dict | None = None,
                  **kwargs):
         self.configs: dict[str, Any] = {}
         # Maps (cls_name, storage_key) -> set[str] of parameter names that
@@ -713,7 +297,18 @@ class Configs():
         # from default extraction. Populated by PipelineConfigurator during
         # AST-based extraction; used by set_method to preserve exclusions.
         self._explicit_params_map: dict[tuple[str, str], set[str]] = {}
-        self.set(configs_source, **kwargs)
+        if configs_source:
+            if isinstance(configs_source, str):
+                self.load_config(configs_source)
+            elif isinstance(configs_source, dict):
+                self.replace_config(configs_source)
+            else:
+                warnings.warn(
+                    f"configs_source must be a str (YAML path) or dict, "
+                    f"got {type(configs_source).__name__} - ignoring."
+                )
+        if kwargs:
+            self.update(kwargs)
 
     @staticmethod
     def _validate_configs_structure(data: dict) -> None:
@@ -785,6 +380,38 @@ class Configs():
                     f"got {type(params).__name__}."
                 )
     # ------------------------------------------------------------------ #
+    #  Construct methods: full config replacement                         #
+    # ------------------------------------------------------------------ #
+
+    def replace_config(self, configs_dict: dict[str, Any]) -> None:
+        """Replace the entire configuration with *configs_dict*.
+
+        Validates the overall structure of *configs_dict* via
+        :meth:`_validate_configs_structure` before replacing ``self.configs``.
+        """
+        self._validate_configs_structure(configs_dict)
+        self.configs = copy.deepcopy(configs_dict)
+
+    def load_config(self, yaml_path: str) -> None:
+        """Load a full configuration from a YAML file and replace the current one.
+
+        Loads the YAML file into a dict and delegates to
+        :meth:`replace_config` after validating the structure.
+        """
+        if not yaml_path.endswith(".yaml"):
+            yaml_path += ".yaml"
+        if not os.path.exists(yaml_path):
+            raise FileNotFoundError(f"YAML file not found: {yaml_path}")
+        with open(yaml_path, "rb") as f:
+            loaded = yaml.load(f, Loader=yaml.FullLoader)
+        if not isinstance(loaded, dict):
+            raise ValueError(
+                f"YAML file must contain a top-level mapping (dict), "
+                f"got {type(loaded).__name__}."
+            )
+        self.replace_config(loaded)
+
+    # ------------------------------------------------------------------ #
     #  Name-based parameter access                                       #
     # ------------------------------------------------------------------ #
 
@@ -829,8 +456,13 @@ class Configs():
             )
         cls_name, func_name = matches[0].split(".")
         return cls_name, func_name
-    def __setitem__(self, key: str, value: Any):
-        self._update_flat({key: value})
+    def __setitem__(self, key: str | tuple[str, ...], value: Any):
+        if isinstance(key, tuple):
+            self._set_by_path(list(key), value)
+        elif isinstance(key, str) and "." in key:
+            self._set_by_path(key.split("."), value)
+        else:
+            self._update_flat({key: value})
     def get(self, key: str | tuple[str, ...], default: Any = None) -> dict[str, Any]:
         try:
             return self.__getitem__(key)
@@ -1036,31 +668,43 @@ class Configs():
         return "\n".join(lines)
     
     def update(self,
-               params_source: str | dict[str, Any] | None = {},
+               params_source: str | dict[str, Any] | None = None,
                **kwargs) -> None:
-        """Update configuration parameters.
+        """Update configuration parameters (change-only).
+
+        Only changes **existing** parameter values; never creates new
+        entries.  If a method, function, or parameter does not exist, a
+        warning is issued and it is skipped.
 
         Accepts parameters from a YAML file, a dictionary, or keyword
         arguments.  When both *params_source* and **kwargs* are given,
         a warning is issued and **kwargs* take priority.
 
-        Parameters
-        ----------
-        params_source : str or dict or None
-            Path to a ``.yaml`` file, or a dictionary with parameter
-            overrides.  The dictionary supports two modes:
+        The dictionary supports several modes:
 
-            * **Structured mode** - keys are callables (or their string
-              names), values are dicts of parameters for that specific
-              function::
+        * **Full config dict** - top-level ``methods`` / ``functions``
+          keys, deep-merged into the existing config (only existing keys
+          are touched)::
 
-                  cfg.update({msalign: {"smooth_window": 0.15}})
+              cfg.update({"methods": {"Baseline": {"asls": {"params": {"lam": 1e5}}}}})
 
-            * **Flat mode** - keys are plain parameter names, values
-              are new values.  Every known method/function group that
-              contains that parameter name is updated::
+        * **Partial nested path** - keys are class or function names,
+          values are nested dicts navigating the config hierarchy::
 
-                  cfg.update({"smooth_window": 0.15})
+              cfg.update({"Baseline": {"asls": {"params": {"lam": 1e5}}}})
+              cfg.update({"msalign": {"smooth_window": 0.15}})
+
+        * **Structured mode** - keys are callables (or their string
+          names), values are dicts of parameters for that specific
+          function::
+
+              cfg.update({msalign: {"smooth_window": 0.15}})
+
+        * **Flat mode** - keys are plain parameter names, values are new
+          values.  Every known method/function group that contains that
+          parameter name is updated::
+
+              cfg.update({"smooth_window": 0.15})
 
         **kwargs
             Additional parameter overrides applied on top of
@@ -1102,49 +746,108 @@ class Configs():
         if not func_params:
             return
 
-        # --- Distribute to the correct function groups ---
-        nested_groups: dict[str, dict[str, Any]] = {}
-        flat_overrides: dict[str, Any] = {}
-
-        for key, value in func_params.items():
-            if key in ("cls_init_params", "params") and isinstance(value, dict):
-                nested_groups[key] = value
-            else:
-                flat_overrides[key] = value
-
-        structured_mode = False
-        for key in flat_overrides:
-            if callable(key):
-                structured_mode = True
-                break
-            if isinstance(key, str):
-                try:
-                    candidate = eval(key)
-                    if callable(candidate):
-                        structured_mode = True
-                        break
-                except (ValueError, NameError):
-                    continue
-
-        if structured_mode:
-            self._update_structured(flat_overrides)
+        # --- Full config dict {"methods": ..., "functions": ...} ---
+        if "methods" in func_params or "functions" in func_params:
+            self._validate_configs_structure(func_params)
+            self._update_nested(self.configs, func_params, "configs")
             return
 
-        self._update_flat(flat_overrides)
+        # --- Partial nested path (class/function names as keys) ---
+        if self._is_partial_path_dict(func_params):
+            self._update_partial_path(func_params)
+            return
 
-        if nested_groups:
-            self._update_structured(nested_groups)
+        # --- Structured mode (callable keys) ---
+        if self._has_callable_keys(func_params):
+            self._update_structured(func_params)
+            return
+
+        # --- Flat mode ---
+        self._update_flat(func_params)
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
     # ------------------------------------------------------------------ #
 
+    def _update_nested(self,
+                       target: dict[str, Any],
+                       source: dict[str, Any],
+                       label: str) -> None:
+        """Recursively update *target* with *source*, touching only existing keys.
+
+        When a key is missing from *target*, a warning is issued and the
+        key is skipped.  Nested dicts are merged recursively.
+        """
+        if not isinstance(source, dict):
+            return
+        for key, value in source.items():
+            if key not in target:
+                warnings.warn(
+                    f"'{key}' not found in '{label}' - ignoring."
+                )
+                continue
+            if isinstance(value, dict) and isinstance(target[key], dict):
+                self._update_nested(target[key], value, f"{label}.{key}")
+            else:
+                target[key] = value
+
+    def _is_partial_path_dict(self, d: dict[str, Any]) -> bool:
+        """Return ``True`` if *d* looks like a partial nested-path dict.
+
+        A partial path dict has class or function names as keys with dict
+        values (e.g. ``{"Baseline": {"asls": {...}}}``).
+        """
+        methods = self.configs.get("methods", {})
+        functions = self.configs.get("functions", {})
+        for key, value in d.items():
+            if not isinstance(key, str):
+                return False
+            if (key in methods or key in functions) and isinstance(value, dict):
+                return True
+        return False
+
+    def _update_partial_path(self, partial: dict[str, Any]) -> None:
+        """Update configs following a partial nested path.
+
+        Keys are class or function names; values are nested dicts that
+        navigate the config hierarchy.  Only existing keys are changed.
+        """
+        methods = self.configs.get("methods", {})
+        functions = self.configs.get("functions", {})
+        for key, value in partial.items():
+            if key in methods:
+                self._update_nested(methods[key], value, f"methods.{key}")
+            elif key in functions:
+                self._update_nested(functions[key], value, f"functions.{key}")
+            else:
+                warnings.warn(
+                    f"Unknown class or function '{key}' - ignoring."
+                )
+
+    def _has_callable_keys(self, d: dict[str, Any]) -> bool:
+        """Return ``True`` if any key of *d* is a callable or resolves to one."""
+        for key in d:
+            if callable(key):
+                return True
+            if isinstance(key, str):
+                try:
+                    candidate = eval(key)
+                    if callable(candidate):
+                        return True
+                except (ValueError, NameError):
+                    continue
+        return False
+
     def _update_structured(self,
                            func_params: dict[str | Callable, dict[str, Any]]
                            ) -> None:
-        """Apply overrides where keys are callables (or their string names)."""
-        methods = self.configs.setdefault("methods", {})
-        functions = self.configs.setdefault("functions", {})
+        """Apply overrides where keys are callables (or their string names).
+
+        Change-only: existing entries are updated, missing ones are
+        skipped with a warning.
+        """
+        methods = self.configs.get("methods", {})
+        functions = self.configs.get("functions", {})
 
         for func_key, params in func_params.items():
             # Resolve string to callable (SAFE - no eval)
@@ -1174,24 +877,86 @@ class Configs():
                 cls_name = cls.__name__
                 func_name = func.__name__
 
-                cls_bucket = methods.setdefault(cls_name, {})
-                func_bucket = cls_bucket.setdefault(func_name, {})
-
-                cls_init = params.pop("cls_init_params", None)
-                method_params = params.pop("params", params)
-
-                if cls_init is not None and isinstance(cls_init, dict):
-                    init_bucket = func_bucket.setdefault("cls_init_params", {})
-                    self._merge_params(init_bucket, cls_init, func_key)
-
-                param_bucket = func_bucket.setdefault("params", {})
-                self._merge_params(param_bucket, method_params, func_key)
+                cls_bucket = methods.get(cls_name)
+                if cls_bucket is None:
+                    warnings.warn(
+                        f"Class '{cls_name}' not found in config - ignoring."
+                    )
+                    continue
+                func_bucket = cls_bucket.get(func_name)
+                if func_bucket is None:
+                    warnings.warn(
+                        f"Method '{cls_name}.{func_name}' not found in "
+                        f"config - ignoring."
+                    )
+                    continue
+                self._update_method(func_bucket, params, f"{cls_name}.{func_name}")
 
             # Plain function
             else:
                 func_name = func.__name__
-                func_bucket = functions.setdefault(func_name, {})
-                self._merge_params(func_bucket, params, func_key)
+                func_bucket = functions.get(func_name)
+                if func_bucket is None:
+                    warnings.warn(
+                        f"Function '{func_name}' not found in config - ignoring."
+                    )
+                    continue
+                self._update_function(func_bucket, params, func_name)
+
+    def _update_method(self,
+                       func_bucket: dict[str, Any],
+                       params: dict[str, Any],
+                       label: str) -> None:
+        """Update a method bucket's ``params`` / ``cls_init_params``.
+
+        If *params* contains neither ``params`` nor ``cls_init_params``
+        keys, all keys are treated as method parameters.
+        """
+        if not isinstance(params, dict):
+            return
+        cls_init = params.get("cls_init_params")
+        method_params = params.get("params")
+        if cls_init is None and method_params is None:
+            method_params = params
+
+        if cls_init is not None:
+            if not isinstance(cls_init, dict):
+                warnings.warn(
+                    f"'cls_init_params' for '{label}' must be a dict - ignoring."
+                )
+            else:
+                init_bucket = func_bucket.get("cls_init_params")
+                if init_bucket is None:
+                    warnings.warn(
+                        f"'cls_init_params' not found in '{label}' - ignoring."
+                    )
+                else:
+                    self._update_nested(init_bucket, cls_init,
+                                        f"{label}.cls_init_params")
+
+        if method_params is not None:
+            if not isinstance(method_params, dict):
+                warnings.warn(
+                    f"'params' for '{label}' must be a dict - ignoring."
+                )
+            else:
+                param_bucket = func_bucket.get("params")
+                if param_bucket is None:
+                    warnings.warn(
+                        f"'params' not found in '{label}' - ignoring."
+                    )
+                else:
+                    self._update_nested(param_bucket, method_params,
+                                        f"{label}.params")
+
+    def _update_function(self,
+                         func_bucket: dict[str, Any],
+                         params: dict[str, Any],
+                         label: str) -> None:
+        """Update a plain function's parameters (change-only)."""
+        if not isinstance(params, dict):
+            return
+        self._update_nested(func_bucket, params, label)
 
     def _find_param_locations(
         self, param_name: str
@@ -1273,166 +1038,23 @@ class Configs():
                     f"    cfg.update({{\"func_name\": {{'{param_name}': {value!r}}}}})"
                 )
 
-    def set(self,
-            params_source: str | dict[str, Any] | None = {},
-            **kwargs) -> None:
-        """Set configuration parameters, creating new entries if needed.
+    def _set_by_path(self, parts: list[str], value: Any) -> None:
+        """Set a value at a nested path, creating intermediate dicts as needed.
 
-        Like :meth:`update`, but:
-
-        * If the dict has ``"methods"`` or ``"functions"`` as top-level keys,
-          it is treated as a **structured config dict** and merged directly
-          into ``self.configs`` (no flat-mode lookup).
-
-        * In structured mode, string keys that do **not** resolve to an
-          existing callable are treated as new function or method names and
-          created automatically::
-
-              # Create a new plain function entry
-              cfg.set({"new_func": {"param1": 1, "param2": 2}})
-
-              # Create a new class + method entry
-              cfg.set({"MyClass.my_method": {"params": {"x": 10}}})
-
-              # Existing callable — same behaviour as update()
-              cfg.set({msalign: {"smooth_window": 0.15}})
-
-        Parameters
-        ----------
-        params_source : str or dict or None
-            Same as :meth:`update` — a YAML path, a dict, or ``None``.
-        **kwargs
-            Additional parameter overrides applied on top of
-            *params_source*.
+        Used by :meth:`__setitem__` for tuple / dotted keys.  The path is
+        navigated relative to ``self.configs``; missing intermediate keys
+        are created as dicts.
         """
-        func_params: dict[str, Any] = {}
-        if params_source:
-            if isinstance(params_source, str):
-                path = params_source
-                if not path.endswith(".yaml"):
-                    path += ".yaml"
-                if os.path.exists(path):
-                    with open(path, "rb") as f:
-                        loaded = yaml.load(f, Loader=yaml.FullLoader)
-                        if loaded:
-                            func_params.update(loaded)
-                else:
-                    warnings.warn(f"YAML file '{path}' not found - skipping.")
-            elif isinstance(params_source, dict):
-                func_params.update(params_source)
-            else:
-                warnings.warn(f"params_source must be a str or dict, got {type(params_source).__name__} - skipping.")
-        if kwargs:
-            if params_source:
-                warnings.warn("Both params_source and **kwargs provided. **kwargs will override params_source on conflict.")
-            func_params.update(kwargs)
-        if not func_params:
+        if not parts:
             return
-
-        # --- Detect structured config dict {"methods": ..., "functions": ...} ---
-        if "methods" in func_params or "functions" in func_params:
-            self.configs.setdefault("methods", {}).update(
-                func_params.get("methods", {}))
-            self.configs.setdefault("functions", {}).update(
-                func_params.get("functions", {}))
-            return
-
-        nested_groups: dict[str, dict[str, Any]] = {}
-        flat_overrides: dict[str, Any] = {}
-        for key, value in func_params.items():
-            if key in ("cls_init_params", "params") and isinstance(value, dict):
-                nested_groups[key] = value
-            else:
-                flat_overrides[key] = value
-        structured_mode = False
-        for key in flat_overrides:
-            if callable(key):
-                structured_mode = True
-                break
-            if isinstance(key, str):
-                try:
-                    candidate = eval(key)
-                    if callable(candidate):
-                        structured_mode = True
-                        break
-                except (ValueError, NameError):
-                    continue
-        if structured_mode:
-            self._set_structured(flat_overrides)
-            return
-        self._update_flat(flat_overrides)
-        if nested_groups:
-            self._update_structured(nested_groups)
-
-    def _set_structured(self,
-                        func_params: dict[str | Callable, dict[str, Any]]
-                        ) -> None:
-        """Like :meth:`_update_structured`, but creates new entries for
-        unknown string keys instead of skipping them.
-
-        * ``"ClassName.method_name"`` → creates a method entry under ``methods``
-        * ``"func_name"`` → creates a plain function entry under ``functions``
-        * A callable key → delegates to :meth:`_update_structured` behaviour
-        """
-        methods = self.configs.setdefault("methods", {})
-        functions = self.configs.setdefault("functions", {})
-        for func_key, params in func_params.items():
-            if callable(func_key):
-                if hasattr(func_key, "__self__"):
-                    cls = func_key.__self__.__class__
-                    cls_name = cls.__name__
-                    func_name = func_key.__name__
-                    cls_bucket = methods.setdefault(cls_name, {})
-                    func_bucket = cls_bucket.setdefault(func_name, {})
-                    cls_init = params.pop("cls_init_params", None)
-                    method_params = params.pop("params", params)
-                    if cls_init is not None and isinstance(cls_init, dict):
-                        init_bucket = func_bucket.setdefault("cls_init_params", {})
-                        self._merge_params(init_bucket, cls_init, func_key)
-                    param_bucket = func_bucket.setdefault("params", {})
-                    self._merge_params(param_bucket, method_params, func_key)
-                else:
-                    func_name = func_key.__name__
-                    func_bucket = functions.setdefault(func_name, {})
-                    self._merge_params(func_bucket, params, func_key)
-                continue
-            if isinstance(func_key, str):
-                try:
-                    func = eval(func_key)
-                    if callable(func):
-                        if hasattr(func, "__self__"):
-                            cls = func.__self__.__class__
-                            cls_name = cls.__name__
-                            func_name = func.__name__
-                            cls_bucket = methods.setdefault(cls_name, {})
-                            func_bucket = cls_bucket.setdefault(func_name, {})
-                            cls_init = params.pop("cls_init_params", None)
-                            method_params = params.pop("params", params)
-                            if cls_init is not None and isinstance(cls_init, dict):
-                                init_bucket = func_bucket.setdefault("cls_init_params", {})
-                                self._merge_params(init_bucket, cls_init, func_key)
-                            param_bucket = func_bucket.setdefault("params", {})
-                            self._merge_params(param_bucket, method_params, func_key)
-                        else:
-                            func_name = func.__name__
-                            func_bucket = functions.setdefault(func_name, {})
-                            self._merge_params(func_bucket, params, func_key)
-                        continue
-                except (ValueError, NameError):
-                    pass
-                if "." in func_key:
-                    cls_name, method_name = func_key.split(".", 1)
-                    cls_bucket = methods.setdefault(cls_name, {})
-                    func_bucket = cls_bucket.setdefault(method_name, {})
-                    cls_init = params.pop("cls_init_params", None)
-                    method_params = params.pop("params", params)
-                    if cls_init is not None and isinstance(cls_init, dict):
-                        func_bucket.setdefault("cls_init_params", {}).update(cls_init)
-                    func_bucket.setdefault("params", {}).update(method_params)
-                else:
-                    functions.setdefault(func_key, {}).update(params)
-                continue
-            warnings.warn(f"Skipping invalid key '{func_key!r}' - expected a callable or a string name.")
+        current = self.configs
+        for part in parts[:-1]:
+            nxt = current.get(part)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                current[part] = nxt
+            current = nxt
+        current[parts[-1]] = value
 
     def delete(self,
                param_name: str | tuple[str, ...]) -> None:
@@ -1728,7 +1350,6 @@ class Configs():
                     f"'{func_key}' and the function does not accept "
                     f"**kwargs - ignoring."
                 )
-
     def set_method(self,
                    cls: type | str,
                    method_name: str,
@@ -1889,8 +1510,8 @@ class Configs():
             else:
                 func_bucket.update(params)
 
-
 class PipelineConfigurator(Configs):
+    # TODO Написать про кастомные функции «Загружайте конфигурационные файлы и кастомные функции только из доверенных источников, в коде есть слабости».
     def __init__(self,
                 configs_source: str | dict = {},
                 preprocess_function: Callable = preprocess_configuration_base,
@@ -1959,7 +1580,18 @@ class PipelineConfigurator(Configs):
                     self._explicit_params_map[key] = explicit_params
 
         # 2. Load params from YAML or dict and override with kwargs
-        self.update(configs_source, **kwargs)
+        if configs_source:
+            if isinstance(configs_source, str):
+                self.load_config(configs_source)
+            elif isinstance(configs_source, dict):
+                self.replace_config(configs_source)
+            else:
+                warnings.warn(
+                    f"configs_source must be a str (YAML path) or dict, "
+                    f"got {type(configs_source).__name__} - ignoring."
+                )
+        if kwargs:
+            self.update(kwargs)
 
     # ------------------------------------------------------------------ #
     #  Override set_method / set_function to keep _step_func_names in    #
@@ -2464,10 +2096,10 @@ class PipelineConfigurator(Configs):
     #  Full config replacement from YAML                                  #
     # ------------------------------------------------------------------ #
 
-    def _load(self, yaml_path: str) -> None:
+    def load_config(self, yaml_path: str) -> None:
         """Fully replace the current configuration from a YAML file.
 
-        Unlike :meth:`update`, this method **completely replaces**
+        Unlike :meth:`Configs.update`, this method **completely replaces**
         ``self.configs`` with the contents of the YAML file (no merging).
 
         If a companion ``.py`` file with the same base name exists next to
@@ -2500,10 +2132,8 @@ class PipelineConfigurator(Configs):
                 f"got {type(loaded).__name__}."
             )
 
-        self._validate_configs_structure(loaded)
-
-        # Fully replace configs (no merge)
-        self.configs = loaded
+        # Validate and fully replace configs (no merge)
+        self.replace_config(loaded)
 
         # Restore custom functions from companion .py (if any)
         funcs = self._load_functions_from_py(py_path)
@@ -2514,46 +2144,6 @@ class PipelineConfigurator(Configs):
             self._preprocess_function = preprocess_configuration_base
             self._process_function = process_spectra_base
             self._peakpick_function = peakpicking_base
-
-    # ------------------------------------------------------------------ #
-    #  Override update — YAML path triggers full replacement              #
-    # ------------------------------------------------------------------ #
-
-    def update(self,
-               params_source: str | dict[str, Any] | None = None,
-               **kwargs) -> None:
-        """Update or replace configuration parameters.
-
-        **Behaviour change from** :meth:`Configs.update`:
-
-        * If *params_source* is a **YAML file path** (``str``), the current
-          configuration is **fully replaced** (not merged) with a warning.
-        * For a ``dict`` or ``**kwargs``, delegates to the parent
-          :meth:`Configs.update` (partial update / merge).
-
-        Parameters
-        ----------
-        params_source : str or dict or None
-            YAML file path (triggers full replacement) or a dict with
-            parameter overrides (partial update).
-        **kwargs
-            Additional parameter overrides.
-        """
-        if isinstance(params_source, str):
-            warnings.warn(
-                f"Loading from YAML file '{params_source}' will "
-                f"**fully replace** the current configuration. "
-                f"Use a dict for partial updates instead.",
-                UserWarning,
-            )
-            self._load(params_source)
-            # Apply kwargs on top if provided
-            if kwargs:
-                super().update(kwargs)
-            return
-
-        # Delegate to parent for dict / None / kwargs
-        super().update(params_source, **kwargs)
 
     @staticmethod
     def _get_source(func: Callable) -> str | None:
@@ -2694,6 +2284,18 @@ class PipelineConfigurator(Configs):
                             and isinstance(rhs.slice, ast.Constant)
                             and isinstance(rhs.slice.value, str)):
                         var_to_config_key[target.id] = rhs.slice.value
+
+                    # --- var = configs.get('key')  or  configs.get('key', default) ---
+                    if (configs_param_name is not None
+                            and isinstance(rhs, ast.Call)
+                            and isinstance(rhs.func, ast.Attribute)
+                            and isinstance(rhs.func.value, ast.Name)
+                            and rhs.func.value.id == configs_param_name
+                            and rhs.func.attr == 'get'
+                            and rhs.args
+                            and isinstance(rhs.args[0], ast.Constant)
+                            and isinstance(rhs.args[0].value, str)):
+                        var_to_config_key[target.id] = rhs.args[0].value
 
                     # --- var = step_var['key']  (where step_var comes from get_step_configs) ---
                     if (isinstance(rhs, ast.Subscript)
@@ -2922,10 +2524,189 @@ class PipelineConfigurator(Configs):
 
         return resolved
 
-# --------------------------------------------------------------------------- #
-#  PreparedDataSource - per-ROI configuration manager linked to a DataSource       #
-# --------------------------------------------------------------------------- #
+class KDEConfigs(BaseModel):
+    """
+    WIP
+    Планы на класс:
+    1) Не конфигс как для пайплайна: здесь функция всего только одна для коррекции - такую сложность не делаем
+    2) Валидация конфигов для KDE
+    3) Методы загрузки/сохранения
+    4) Создание дефолтных конфигов простой инициацией
+    5) Быстрой настройки (работает скорее как dict)
 
+    Pydantic config for KDE-based m/z peak correction (Pgrouping_KD).
+`
+    Designed to be:
+    - Easy to instantiate with defaults: ``KDEConfigs()``
+    - Easy to override: ``KDEConfigs(CountF=5)``
+    - Easy to unpack into a function: ``func(**cfg.to_kwargs())``
+    - Easy to save/load: ``cfg.save_yaml("kde.yaml")``
+    - Easy to update from a dict: ``cfg.update(CountF=5)``
+    """
+     # --- Bandwidth ---
+    KD_bandwidth: str | float = Field("fwhm",
+                                      description="Bandwidth selection method or value."
+                                      "Options: 'fwhm', 'mz_discret', 'ISJ', 'silverman', 'scott', or a float.")
+    bwc: float = Field(
+        1.0,
+        ge=0.01, le=100.0,
+        description="Bandwidth coefficient (multiplier for the selected/computed bandwidth).")
+
+    # --- KDE algorithm ---
+    KD_kernel: str = Field(
+        "gaussian",
+        description="KDE kernel name. See KDEpy documentation for available kernels."
+    )
+    KDE_algo: str | None = Field(
+        None,
+        description="Explicit KDE algorithm (FFTKDE or TreeKDE). If None, auto-selected."
+        "Options: 'FFT', 'Tree', or None."
+    )
+
+    # # --- Peak filtering ---
+    # CountF: int = Field(
+    #     10, ge=0,
+    #     description="Minimum number of occurrences for a peak to be kept."
+    # )
+    # dupl_drop: bool = Field(
+    #     True,
+    #     description="Drop duplicate peaks from the result."
+    # )
+    # min_resolution_ppm: float = Field(
+    #     10.0, ge=0,
+    #     description="Minimum instrument resolution in ppm. "
+    #                 "Controls minimum bandwidth for 'mz_discret' method."
+    # )
+
+   # --- m/z splitting ---
+    split_mz_min: float = Field(
+        10.0, ge=0.0,
+        description="Minimum m/z gap to split into separate segments."
+    )
+    split_peaks_min: int = Field(
+        25, ge=1,
+        description="Minimum number of peaks per segment."
+    )
+
+ # --- m/z scale ---
+    account_mzscale: bool = Field(
+        True,
+        description="Account for m/z discretisation when computing bandwidth."
+    )
+
+# # --- Extra kwargs for mspeaks_KD ---
+#     params2mspeaks_KD: dict[str, Any] = Field(
+#         default_factory=dict,
+#         description="Additional keyword arguments passed to mspeaks_KD."
+#     )
+
+    @field_validator("KD_bandwidth")
+    @classmethod
+    def _validate_bandwidth(cls, v):
+        valid_strings = {"fwhm", "mz_discret", "isj", "silverman", "scott"}
+        if isinstance(v, str) and v.lower() not in valid_strings:
+            raise ValueError(
+                f"Unknown KD_bandwidth '{v}'. "
+                f"Valid strings: {valid_strings}. "
+                f"Or pass a float directly."
+            )
+        return v
+    @field_validator('KDE_algo')
+    @classmethod
+    def _validate_KDE_algo(cls, v):
+        valid_strings = {"fft", "tree"}
+        if isinstance(v, str) and v.lower() not in valid_strings:
+            raise ValueError(
+                f"Unknown KDE_algo '{v}'. "
+                f"Valid strings: {valid_strings}. "
+                f"Or pass a None."
+            )
+        return v
+    @property
+    def to_dict(self) -> dict[str, Any]:
+        """
+        Convert to a flat dict suitable for ``**unpacking`` into
+        :func:`Pgrouping_KD` or :meth:`DataSet.compute_KDE`.
+
+        Excludes ``params2mspeaks_KD`` (merged into the configs).
+        """
+        configs = self.model_dump(exclude={"params2mspeaks_KD"})
+        # configs.update(self.params2mspeaks_KD)
+        return configs
+    
+    def save_yaml(self, sample: str, dirpath: str) -> None:
+        """Save config to a YAML file.
+
+        Callable values (e.g. ``KDE_algo``) are serialised using the
+        ``!obj`` YAML tag — the same mechanism used by
+        :class:`PipelineConfigurator`.
+
+        Parameters
+        ----------
+        sample : str
+            Sample name used to construct the filename
+            ``<sample>_kde_recipe.yaml``.
+        dirpath : str
+            Directory to write the YAML file into.
+        """
+        path = os.path.join(dirpath, sample + "_kde_recipe.yaml")
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(self._serializable_dict(), f, default_flow_style=False)
+
+    @classmethod
+    def load_yaml(cls, path: str) -> "KDEConfigs":
+        """Load config from a YAML file.
+
+        Supports the ``!obj`` YAML tag for restoring callable values
+        (e.g. ``KDE_algo: !obj KDEpy.FFTKDE``) — the same mechanism used
+        by :class:`PipelineConfigurator`.
+
+        Parameters
+        ----------
+        path : str
+            Path to the ``*_kde_recipe.yaml`` file.
+
+        Returns
+        -------
+        KDEConfigs
+            A new instance populated from the YAML file.
+        """
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.load(f, Loader=yaml.FullLoader)
+        return cls(**data)
+
+    def update(self, **overrides: Any) -> None:
+        """
+        Update config fields in-place (dict-like convenience).
+
+        Example::
+
+            cfg = KDEConfigs()
+            cfg.update(CountF=5, draw=False)
+        """
+        for key, value in overrides.items():
+            setattr(self, key, value)
+
+    def with_overrides(self, **overrides: Any) -> "KDEConfigs":
+        """
+        Return a **copy** with the given fields overridden (immutable-style).
+
+        Example::
+
+            cfg = KDEConfigs()
+            cfg2 = cfg.with_overrides(CountF=5, draw=False)
+        """
+        return self.model_copy(update=overrides)
+
+    def _serializable_dict(self) -> dict:
+        """Return a YAML-safe dict."""
+        d = self.model_dump()
+        return d
+
+
+# --------------------------------------------------------------------------- #
+#  PreparedDataSource - per-ROI configuration manager linked to a DataSource  #
+# --------------------------------------------------------------------------- #
 
 class PreparedDataSource():
     """
@@ -2969,6 +2750,7 @@ class PreparedDataSource():
     def __init__(self,
                  datasource: DataSource | str | None = None,
                  configs_source: str | PipelineConfigurator | None = None,
+                 kde_configs: str | KDEConfigs | None = None,
                  **kwargs):
         #: Path to the source file that was used to load configs.
         self._configs_source_path: str | None = None
@@ -2976,13 +2758,18 @@ class PreparedDataSource():
         self._datasource: DataSource | None = None
         #: Per-ROI PipelineConfigurator instances.
         self.roi_configs: dict[str, PipelineConfigurator] = {}
+        #: Per-ROI KDEConfigs instances.
+        self.roi_kde_configs: dict[str, KDEConfigs] = {}
         #: Base config used as a template when new ROIs are added via set_link.
         self._base_configs: PipelineConfigurator | None = None
-
+        self._base_kde_configs: KDEConfigs | None = None
+        
+        kwargs_kde, kwargs = self._resolve_kwargs(kwargs)
+        # --- Resolve kde_configs_source ---
+        self._load_kde_configs(kde_configs, **kwargs_kde)
         # --- Resolve configs_source ---
         if configs_source is not None:
             self._load(configs_source, **kwargs)
-
         # --- Link datasource if provided ---
         if datasource is not None:
             self.set_link(datasource)
@@ -3020,13 +2807,15 @@ class PreparedDataSource():
         if top_keys & {"methods", "functions"}:
             return False
         # If at least one key looks like a ROI name, treat as per-ROI.
+        # Accept both string keys and integer keys (PyYAML loads "00" as int 0).
         Not_roi_nests_keys = ("methods", "functions")
         return any(
-            isinstance(k, str) and (k not in Not_roi_nests_keys)
+            (isinstance(k, str) and (k not in Not_roi_nests_keys))
+            or isinstance(k, int)
             for k in data
         )
 
-    def _load(self, source: str | PipelineConfigurator, **kwargs) -> None:
+    def _load(self, source: str | PipelineConfigurator | dict[str: PipelineConfigurator], **kwargs) -> None:
         """Load configuration from *source* into ``roi_configs`` or ``_base_configs``.
 
         * If *source* is a :class:`PipelineConfigurator` instance, it is used
@@ -3051,7 +2840,6 @@ class PreparedDataSource():
             if os.path.exists(path):
                 with open(path, "rb") as f:
                     loaded = yaml.load(f, Loader=yaml.FullLoader)
-
                 if not isinstance(loaded, dict):
                     raise ValueError(
                         f"YAML file '{path}' must contain a top-level mapping (dict), "
@@ -3075,6 +2863,7 @@ class PreparedDataSource():
                             )
                         if kwargs:
                             cc.update(kwargs)
+                            
                         self.roi_configs[roi_name] = cc
                     self._configs_source_path = path
                     return
@@ -3094,9 +2883,97 @@ class PreparedDataSource():
             self._base_configs = PipelineConfigurator(source, **kwargs)
             self._configs_source_path = source
             return
+        if isinstance(source, dict):
+            for roi, configs in source.items():
+                if roi in self.roi_configs:
+                    self.roi_configs[roi] = configs
 
         self._base_configs = PipelineConfigurator(source, **kwargs)
+    
+    def _load_kde_configs(self,
+                          source: str | KDEConfigs | dict[str, KDEConfigs] | None = None,
+                          **kwargs) -> None:
+        
+        if source is None:
+            return
+        if isinstance(source, KDEConfigs):
+            if self._datasource:
+                for roi_name in self.roi_kde_configs:
+                    self.roi_kde_configs[roi_name] = source
+                    self.roi_kde_configs[roi_name].update(**kwargs)
+            else:
+                self._base_kde_configs = source
+                self._base_kde_configs.update(**kwargs)
+        elif isinstance(source, str):
+            path = source
+            if not path.endswith(".yaml"):
+                path += ".yaml"
 
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    loaded = yaml.load(f, Loader=yaml.FullLoader)
+
+                if not isinstance(loaded, dict):
+                    raise ValueError(
+                        f"YAML file '{path}' must contain a top-level mapping (dict), "
+                        f"got {type(loaded).__name__}."
+                    )
+                if self._is_per_roi_kde_yaml(loaded):
+                    for roi_name, roi_data in loaded.items():
+                        # PyYAML loads unquoted keys like "00" as integer 0.
+                        # ROI names are always strings in the application.
+                        if isinstance(roi_name, int):
+                            roi_name = str(roi_name)
+                        if self._datasource:
+                            if roi_name in self.roi_kde_configs:
+                                self.roi_kde_configs[roi_name] = KDEConfigs(**roi_data)
+                                self.roi_kde_configs[roi_name].update(**kwargs)
+                            else:
+                                warnings.warn(
+                                    f"YAML file '{path}' contains per-ROI configs for ROI '{roi_name}', "
+                                    f"but sample doesn't have ROI '{roi_name}'. Skipping ROI '{roi_name}'."
+                                )
+                        else:
+                            self.roi_kde_configs[roi_name] = KDEConfigs(**roi_data)
+                
+                else:
+                    if self._datasource:
+                        for roi_name in self.roi_kde_configs:
+                            self.roi_kde_configs[roi_name] = KDEConfigs(**loaded)
+                            self.roi_kde_configs[roi_name].update(**kwargs)
+                    else:
+                        self._base_kde_configs = KDEConfigs(**loaded)
+                        self._base_kde_configs.update(**kwargs)
+            else:
+                raise FileNotFoundError(f"YAML file '{path}' not found.")
+
+        else:
+            for roi_name, roi_data in source.items():
+                if self._datasource:
+                    if roi_name in self.roi_kde_configs:
+                        self.roi_kde_configs[roi_name] = KDEConfigs(**roi_data)
+                        self.roi_kde_configs[roi_name].update(**kwargs)
+                    else:
+                        warnings.warn(
+                            f"YAML file '{path}' contains per-ROI configs for ROI '{roi_name}', "
+                            f"but sample doesn't have ROI '{roi_name}'. Skipping ROI '{roi_name}'."
+                        )
+                else:
+                    self.roi_kde_configs[roi_name] = KDEConfigs(**roi_data)
+                    self.roi_kde_configs[roi_name].update(**kwargs)
+                
+        
+    def _is_per_roi_kde_yaml(self, data: dict) -> bool:
+        """Heuristic: does *data* look like a per-ROI config dump?"""
+        if not isinstance(data, dict):
+            return False
+        # Per-ROI files have top-level keys like "roi_00", "roi_01", ...
+        for value in data.values():
+            if isinstance(value, dict):
+                if any(k in KDEConfigs().to_dict.keys() for k in value.keys()):
+                    return True
+            else:
+                return False
     # ------------------------------------------------------------------ #
     #  DataSource linking                                                #
     # ------------------------------------------------------------------ #
@@ -3118,7 +2995,7 @@ class PreparedDataSource():
         self._datasource = datasource
         # Get ROI names from the datasource metadata
         roi_names: list[str] = list(datasource.roi_metadata.index)
-
+        
         for roi in roi_names:
             if roi not in self.roi_configs:
                 # Create a fresh PipelineConfigurator for this ROI
@@ -3126,10 +3003,33 @@ class PreparedDataSource():
                     self.roi_configs[roi] = copy.deepcopy(self._base_configs)
                 else:
                     self.roi_configs[roi] = PipelineConfigurator()
+            if roi not in self.roi_kde_configs:
+                # Create a fresh KDEConfigs for this ROI
+                if self._base_kde_configs is not None:
+                    self.roi_kde_configs[roi] = copy.deepcopy(self._base_kde_configs)
+                else:
+                    self.roi_kde_configs[roi] = KDEConfigs()
+        for roi in list(self.roi_configs.keys()):
+            if roi not in roi_names:
+                del self.roi_configs[roi]
+        for roi in list(self.roi_kde_configs.keys()):
+            if roi not in roi_names:
+                del self.roi_kde_configs[roi]
 
+    def peaklists(self, roi):
+        return self._datasource.peaklists(roi)
+    def get_mean_spectrum(self, roi: str | None = None, 
+                          idxs: np.ndarray | None = None, 
+                          mz_range: tuple[float, float] | None = None):
+        return self._datasource.get_mean_spectrum(roi, idxs, mz_range)
+    def get_coords(self, 
+                   idxs: np.ndarray | SliceIndexator | Indexator | int | str | None = None, 
+                   extract: list[str] | None = None):
+        return self._datasource.get_coords(idxs, extract)
     # ------------------------------------------------------------------ #
     #  Properties                                                          #
     # ------------------------------------------------------------------ #
+    
     @property
     def roi_metadata(self) -> pd.DataFrame:
         """ROI metadata from the linked datasource."""
@@ -3139,7 +3039,8 @@ class PreparedDataSource():
     def file_path(self) -> str | None:
         """Path to the linked datasource file."""
         return self._datasource.file_path
-
+    
+    
     @property
     def sample_name(self) -> str | None:
         """Sample name derived from the linked datasource or source path."""
@@ -3151,11 +3052,28 @@ class PreparedDataSource():
                 name = name.replace("_processing_recipe", "")
             return name
         return None
-
+    @property
+    def peaklists_path(self) -> str | None:
+        """Path to the peaklist file."""
+        path = self._default_save_path('peaklists.hdf5')
+        return path
+    @property
+    def processed_spectra_path(self) -> str | None:
+        """Path to the peaklist file."""
+        path = self._default_save_path('processed_spectra.hdf5')
+        return path
+    @property
+    def peaks_density_path(self) -> str | None:
+        """Path to the peaklist file."""
+        path = self._default_save_path('peaks_density.hdf5')
+        return path
     @property
     def rois(self) -> list[str]:
         """List of ROI names currently managed."""
         return list(self.roi_configs.keys())
+    @property
+    def configs_path(self):
+        return self._datasource.configs_path
 
     # ------------------------------------------------------------------ #
     #  ROI-specific access                                                 #
@@ -3167,7 +3085,7 @@ class PreparedDataSource():
         Parameters
         ----------
         roi : str
-            ROI name (e.g. ``"00"``, ``"01"``).
+            ROI name (e.g. ``"R00"``, ``"R01"``).
 
         Returns
         -------
@@ -3231,6 +3149,37 @@ class PreparedDataSource():
         for roi in targets:
             if roi in self.roi_configs:
                 self.roi_configs[roi].update(params_source, **kwargs)
+    
+    def update_kde(self,
+                     params_source: str | None = None,
+                    rois: str | list[str] | None = None,
+                   **kwargs) -> None:            
+        """Update configuration parameters for specific ROI(s).
+
+        If *rois* is ``None``, the update is applied to **all** ROIs.
+
+        Parameters
+        ----------
+        params_source : str or dict or None
+            Path to a YAML file, or a dictionary with parameter overrides.
+            Same format as :meth:`KDEConfigs.update`.
+        rois : str or list of str or None
+            ROI(s) to update.  ``None`` means all ROIs.
+        **kwargs
+            Parameter overrides applied on top.
+        """
+        targets: list[str]
+        if rois is None:
+            targets = list(self.roi_kde_configs.keys())
+        elif isinstance(rois, str):
+            targets = [rois]
+        else:
+            targets = list(rois)
+        for roi in targets:
+            if roi in self.roi_kde_configs:
+                if params_source is not None:
+                    self.roi_kde_configs[roi].load_yaml(params_source)
+                self.roi_kde_configs[roi].update(**kwargs)
 
     def delete(self,
                param_name: str | tuple[str, ...],
@@ -3278,25 +3227,48 @@ class PreparedDataSource():
             else:
                 self.roi_configs[roi] = PipelineConfigurator()
         return self.roi_configs[roi]
-    
+    @staticmethod
+    def _resolve_kwargs(kwargs: dict) -> tuple[dict, dict]:
+        """Resolve keyword arguments to a KDEconfigs and Configs.
+
+        Parameters
+        ----------
+        kwargs : dict
+            Keyword arguments.
+
+        Returns
+        -------
+        KDEkwargs
+            Resolved kwargs for KDEconfigs.
+        Configkwargs
+            Resolved kwargs for Configs.
+        """
+        KDEkwargs = {}
+        Configkwargs = {}
+
+        KDEkwargs_list = list(KDEConfigs().to_dict.keys())
+        for key in kwargs:
+            if key in KDEkwargs_list:
+                KDEkwargs[key] = kwargs[key]
+            else:
+                Configkwargs[key] = kwargs[key]
+        return KDEkwargs, Configkwargs
+
     # ------------------------------------------------------------------ #
     #  Serialisation                                                     #
     # ------------------------------------------------------------------ #
 
-    def _default_save_path(self) -> str:
+    def _default_save_path(self, end) -> str:
         """Compute the default save path.
 
         Returns
         -------
         str
-            ``<datasource_dir>/processed_pelmesha/<sample_name>_processing_recipe.yaml``
+            ``<datasource_dir>/processed_pelmesha/<sample_name>_<end>``
         """
         if self._datasource is not None:
             base_dir = os.path.dirname(self._datasource.file_path)
             name = self._datasource.sample_name
-        # elif self._configs_source_path:
-        #     base_dir = os.path.dirname(os.path.dirname(self._configs_source_path))
-        #     name = self.sample_name or "unknown"
         else:
             base_dir = "."
             name = "unknown"
@@ -3304,9 +3276,8 @@ class PreparedDataSource():
         return os.path.join(
             base_dir,
             "processed_pelmesha",
-            f"{name}_processing_recipe.yaml",
+            f"{name}_{end}"
         )
-
     def dump(self, path: str | None = None) -> str:
         """Save all per-ROI configurations to a YAML file.
 
@@ -3335,7 +3306,7 @@ class PreparedDataSource():
             The path the file was saved to.
         """
         if path is None:
-            path = self._default_save_path()
+            path = self._default_save_path('processing_recipe.yaml')
 
         # Ensure the target directory exists
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -3346,7 +3317,9 @@ class PreparedDataSource():
         for idx, roi_name in enumerate(roi_names):
             config = self.roi_configs[roi_name]
             roi_yaml = config._yaml_with_comments()
-            lines.append(f"{roi_name}:")
+            # Always quote ROI name keys so that PyYAML does not interpret
+            # numeric-looking names (e.g. "00") as integers on re-load.
+            lines.append(f'"{roi_name}":')
             for line in roi_yaml.split("\n"):
                 if line.strip() == "" and not line:
                     lines.append("")
@@ -3368,7 +3341,27 @@ class PreparedDataSource():
         self._dump_roi_functions(py_path)
 
         return path
-
+    
+    def dump_kde_configs(self, path: str | None = None):
+        if path is None:
+            path = self._default_save_path('kde_recipe.yaml')
+        # Ensure the target directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Build per-ROI YAML with quoted keys (same approach as save())
+        lines = []
+        for roi_name in sorted(self.roi_kde_configs.keys()):
+            roi_data = self.roi_kde_configs[roi_name].to_dict
+            # Always quote ROI name keys so that PyYAML does not interpret
+            # numeric-looking names (e.g. "00") as integers on re-load.
+            lines.append(f'"{roi_name}":')
+            roi_yaml = yaml.dump(roi_data, default_flow_style=False).rstrip("\n")
+            for line in roi_yaml.split("\n"):
+                lines.append(f"  {line}")
+            lines.append("")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+            f.write("\n")
+        
     def _dump_roi_functions(self, py_path: str) -> None:
         """Save per-ROI custom pipeline functions to a companion .py file.
 
@@ -3456,22 +3449,3 @@ class PreparedDataSource():
         lines.append(")")
         return "\n".join(lines)
     
-    def audit_processing(self,
-                         roi: str | list | None = None,
-                         draw_mz_range: tuple[float, float] | None = None,
-                         draw_spectrum_idx: int | None = None,
-                         dtypeconv: np.dtype | None = None):
-        """Audit the processing of the data source.
-
-        Parameters
-        ----------
-        roi : str or list, optional
-            The ROI to audit. If None, all ROIs are audited.
-        draw_mz_range : tuple of float, optional
-            If not None, draw a spectrum within the given m/z range.
-        draw_spectrum_idx : int, optional
-            If not None, draw the spectrum at the given index.
-        dtypeconv : numpy.dtype, optional
-            If not None, convert the data to the given dtype.
-        """
-        Drawer(self).audit_processing(roi, draw_mz_range, draw_spectrum_idx, dtypeconv)

@@ -58,27 +58,6 @@ class DataSource:
                 attr = getattr(self.loader, attr_name)
                 if callable(attr):
                     setattr(self, attr_name, attr)
-
-
-        dirpath = os.path.split(path)[0]
-        processed_dirname = 'processed_pelmesha'
-        configs_name = f'{sample_name}_processing_recipe'
-        if os.path.exists(os.path.join(dirpath, processed_dirname, configs_name + '.yaml')):
-            self.configs_path = os.path.join(dirpath, processed_dirname, configs_name + '.yaml')
-        else:
-            self.configs_path = None
-
-        spectra_hdf5_name = sample_name + '_processed_spectra.hdf5'
-        if os.path.exists(os.path.join(dirpath, processed_dirname, spectra_hdf5_name)):
-            self.processed_spectra_path = os.path.join(dirpath, processed_dirname, spectra_hdf5_name)
-        else:
-            self.processed_spectra_path = None
-
-        peaklist_hdf5_name = sample_name + '_peaklists.hdf5'
-        if os.path.exists(os.path.join(dirpath, processed_dirname, peaklist_hdf5_name)):
-            self.peaklist_path = os.path.join(dirpath, processed_dirname, peaklist_hdf5_name)
-        else:
-            self.peaklist_path = None
     
         # Выгрузка метаданных
         self.meta_file_path = os.path.join(os.path.dirname(self.file_path),'raw_pelmesha',sample_name + '_ingredients.hdf5')
@@ -284,15 +263,19 @@ class DataSource:
         return "".join(table.get(c, c) for c in str(text))
 
     def _normalize_indices(self, idxs):
+
         if idxs is None:
             idxs = np.concatenate(self.roi_metadata['idxroi'].to_numpy())
         elif isinstance(idxs, (Indexator, SliceIndexator)):
             idxs = idxs.view(np.ndarray)
         elif isinstance(idxs, str):
-            idxs = self.roi_metadata.loc[idxs, 'idxroi'].to_numpy()
+            idxs = self.roi_metadata.loc[idxs, 'idxroi']
         elif isinstance(idxs,slice):
             idxs = np.array((idxs.start,idxs.stop))
-        elif isinstance(idxs,int):
+        elif isinstance(idxs, (int, np.integer)):
+            idxs = np.array([idxs,idxs+1])
+        elif isinstance(idxs, float):
+            idxs = int(idxs)
             idxs = np.array([idxs,idxs+1])
         elif isinstance(idxs,(list, tuple)):
             idxs = np.array(idxs)
@@ -344,7 +327,7 @@ class DataSource:
             roi_segments = roi_segments[np.newaxis, :]
 
         # --- Handle single int ----------------------------------------- #
-        if isinstance(idxs, (int, np.integer)):
+        if isinstance(idxs, (int, np.integer, float)):
             # Find which ROI segment this index belongs to
             for seg_i, (start, end) in enumerate(roi_segments):
                 if start <= idxs < end:
@@ -377,7 +360,119 @@ class DataSource:
 
         return local_segments
 
-    def get_coords(self, idxs = None, extract = None):
+    def _get_global_roi_idx(self, idxs, roi_name = None):
+        """
+        Convert local spectrum indices (within a ROI) back to global indices
+        for the file, accounting for gaps (discontinuous segments) in the ROI.
+
+        This is the inverse of :meth:`_get_local_roi_idx`. For a ROI with
+        segments ``[[0, 21158], [30000, 30100]]``, local index ``21158`` maps
+        back to global index ``30000`` (the cumulative offset of the first
+        segment is added back).
+
+        Parameters
+        ----------
+        idxs : int or np.ndarray
+            Local index or array of local index segments (shape ``(n, 2)``).
+            Accepts :class:`Indexator`, :class:`SliceIndexator`, ``int``,
+            ``list``, ``tuple``, or a raw :class:`np.ndarray`.
+        roi_name : str, optional
+            ROI name. If ``None``, the ROI is auto-detected from the
+            index range of *idxs*.
+
+        Returns
+        -------
+        int or np.ndarray
+            Global index (if *idxs* was an ``int``) or array of global index
+            segments with the same shape as the input.
+
+        Raises
+        ------
+        ValueError
+            If *roi_name* is ``None`` and the local index does not belong to
+            any ROI.
+        KeyError
+            If *roi_name* is not found in ``roi_metadata``.
+        """
+
+        # --- Resolve ROI name if not given ------------------------------ #
+        if roi_name is None:
+            roi_name = self._get_roi_local(idxs)
+
+        roi_segments = self.roi_metadata.loc[roi_name, 'idxroi']
+        # roi_segments is an Indexator (ndarray subclass) with shape (M, 2)
+        roi_segments = np.asarray(roi_segments, dtype=np.int64)
+        if roi_segments.ndim == 1:
+            roi_segments = roi_segments[np.newaxis, :]
+
+        # --- Compute cumulative local starts and offsets per segment --- #
+        sizes = np.diff(roi_segments, axis=1).ravel()                # (M,)
+        cum_sizes = np.zeros(len(roi_segments), dtype=np.int64)
+        cum_sizes[1:] = np.cumsum(sizes[:-1])                        # (M,) — local start of each segment
+        # offset = global_start - local_start
+        offsets = roi_segments[:, 0] - cum_sizes                     # (M,)
+
+        # --- Handle single int ----------------------------------------- #
+        if isinstance(idxs, (int, np.integer, float)):
+            for seg_i, (start, local_start) in enumerate(zip(roi_segments[:, 0], cum_sizes)):
+                if local_start <= idxs < local_start + sizes[seg_i]:
+                    return int(idxs + (start - local_start))
+            raise ValueError(
+                f"Local index {idxs} does not belong to ROI '{roi_name}' "
+                f"with segments {roi_segments.tolist()}"
+            )
+
+        # --- Normalise array input ------------------------------------- #
+        idxs = self._normalize_indices(idxs)  # -> (N, 2)
+
+        # --- Map each batch segment to its ROI segment ---------------- #
+        starts = idxs[:, 0, None]                                    # (N, 1)
+        mask = (starts >= cum_sizes[None, :]) & \
+               (starts <  cum_sizes[None, :] + sizes[None, :])       # (N, M)
+        seg_idx = np.argmax(mask, axis=1)                            # (N,)
+
+        # --- Add the corresponding offset ----------------------------- #
+        global_segments = idxs + offsets[seg_idx, None]
+
+        return global_segments
+
+    def _get_roi_local(self, idx):
+        """
+        Determine which ROI the given LOCAL spectrum index belongs to.
+
+        Scans ``roi_metadata`` and finds the first ROI whose local index range
+        covers *idx*. The local range of a ROI is the cumulative (gap-free)
+        offset of its global ``idxroi`` segments.
+
+        :param idx: Local index or array of local index segments.
+        :type idx: int or np.ndarray
+
+        :return: ROI name (string) matching the given local index.
+        :rtype: str
+
+        :raises ValueError: If no ROI matches the given local index.
+        """
+        idx = self._normalize_indices(idx)
+        for roi_name, roi_row in self.roi_metadata.iterrows():
+            segments = np.asarray(roi_row['idxroi'], dtype=np.int64)
+            if segments.ndim == 1:
+                segments = segments[np.newaxis, :]
+            sizes = np.diff(segments, axis=1).ravel()
+            cum_sizes = np.zeros(len(segments), dtype=np.int64)
+            cum_sizes[1:] = np.cumsum(sizes[:-1])
+            for rng in idx:
+                if any(
+                    local_start <= rng[0] and rng[1] <= local_start + size
+                    for local_start, size in zip(cum_sizes, sizes)
+                ):
+                    return roi_name
+        raise ValueError(
+            f"ROI with local index/indexes {idx} not found in {self.roi_metadata.index.tolist()}"
+        )
+
+    def get_coords(self,
+                   idxs: np.ndarray | SliceIndexator | Indexator | int | None,
+                   extract = None):
         idxs = self._normalize_indices(idxs)
 
         with File(self.meta_file_path,"r") as hdf5:
@@ -407,7 +502,6 @@ class DataSource:
         :raises ValueError: If no ROI matches the given index.
         """ # TODO Доработать для использования в объединённых датасетах (с мультиинексом, где ещё и sample)
         # in_bool = np.zeros(len(self.roi_metadata), dtype = bool) # TODO: Оставить до момента решения судьбы функции на вопрос её усложнения и возвращения нескольких roi
-        
         for roi_num, indexes in enumerate(self.roi_metadata['idxroi'].values):
             if isinstance(idx, np.ndarray):
                 for rng in idx:
@@ -421,7 +515,7 @@ class DataSource:
                 # if range_bool.any(): 
                 #     in_bool[roi_num] = True
                 #     continue
-            if isinstance(idx, int):
+            if isinstance(idx, (int, np.integer)):
                 if indexes.ndim ==1:
                     indexes = indexes[np.newaxis, :]
                 if any(start <= idx < end for start, end in indexes):
@@ -429,7 +523,10 @@ class DataSource:
 
         raise ValueError(f"ROI with index/indexes {idx} not found in {self.roi_metadata['idxroi'].values}")
 
-    def get_mean_spectrum(self, idxs = None, mz_range = None):
+    def get_mean_spectrum(self,
+                          roi = None,
+                          idxs = None, 
+                          mz_range = None) -> tuple: #TODO Добавить сохранение если обрабатывается весь рои по всему диапазону. Всё равно он неизменен
         """
         Compute the mean (average) mass spectrum over the specified indices.
 
@@ -444,15 +541,16 @@ class DataSource:
         :return: Tuple ``(mz_scale, mean_intensity)`` where both are 1-D numpy arrays.
         :rtype: tuple
         """
-        if isinstance(idxs, str):
-            idxs = self.roi_metadata.loc[idxs, 'idxroi'] # TODO: Проверить работоспособность
-        elif idxs is None:
+
+        if roi is not None:
+            idxs = self.roi_metadata.loc[roi, 'idxroi']
+        if idxs is None:
             if len(self.roi_metadata) == 1:
                 idxs = self.roi_metadata['idxroi'].iloc[0]
             else:
                 raise ValueError(
-                    f"Multiple regions (ROIs) found: {self.roi_metadata.index.tolist()}. In this case 'idxs' must be a ROI name (str) "
-                    f"or an np.ndarray of continuous segments with shape (n, 2)"
+                    f"Multiple regions (ROIs) found: {self.roi_metadata.index.tolist()}. Set a ROI name (str) to argument `roi`"
+                    f"or set `idxs` to an np.ndarray of continuous segments with shape (n, 2)"
                 )
         if mz_range is not None:
             mz_min, mz_max = mz_range
@@ -462,7 +560,7 @@ class DataSource:
             d = 2
 
         if self.dcont:
-            mz = self.mz_scale_cont
+            mz = self.loader.mz_scale_cont
 
             if mz_range is not None:
                 start_idx = np.searchsorted(mz, mz_min, side='left')
@@ -477,7 +575,7 @@ class DataSource:
 
             for intens in self.get_intensities_stream(indexes):
                 stats_sum += intens[mz_range_slice]
-            stats_count = indexes.count()
+            stats_count = indexes.count
             # plt.plot(mz, stats_sum/stats_count)
             # plt.show()
             return mz, stats_sum/stats_count
@@ -556,7 +654,7 @@ class DataSource:
                         batch_intens.append(intens)
                     stats = stats.add(pd.DataFrame(np.vstack([np.concatenate(batch_mz, axis=0), np.concatenate(batch_intens, axis=0)]).T, columns=['mz','intensities']).groupby('mz')['intensities'].agg(['sum', 'count']), fill_value=0)
                 return stats.index, stats['sum']/stats['count']
-            
+       
     def split_idxs(self, idxs = None, d = None, cpu_count = 1, Ramcap_GB = None, size_per_spec = None):
         """
         Split spectrum indices into batches based on RAM cap configs.
@@ -661,14 +759,55 @@ class DataSource:
                     idxs_batches.append(np.array([idx_start, idx + 1]))
 
         return idxs_batches
+
+    def _default_save_path(self, end) -> str:
+        """Compute the default save path.
+
+        Returns
+        -------
+        str
+            ``<datasource_dir>/processed_pelmesha/<sample_name>_<end>``
+        """
+        base_dir = os.path.dirname(self.file_path)
+        name = self.sample_name
+
+        return os.path.join(
+            base_dir,
+            "processed_pelmesha",
+            f"{name}_{end}"
+        )
+    
+    def peaklists(self, roi):
+        with File(self.peaklists_path, "r") as f:
+            peaklists = f[roi][:]
+            headers = f[roi].attrs['Column headers']
+        return pd.DataFrame(peaklists, columns= headers).astype({"spectra_ind": int})
     @property
-    def config_path(self):
-        path = os.path.join(os.path.dirname(self.file_path), 'processed_pelmesha', 'processing_recipe.yaml')
+    def configs_path(self):
+        path = self._default_save_path('processing_recipe.yaml')
         return path if os.path.exists(path) else None
     @property
     def dcont(self):
         """get dcont from loader"""
         return self.loader.dcont
+    @property
+    def peaklists_path(self) -> str | None:
+        """Path to the peaklist file."""
+        path = self._default_save_path('peaklists.hdf5')
+        return path
+    @property
+    def processed_spectra_path(self) -> str | None:
+        """Path to the peaklist file."""
+        path = self._default_save_path('processed_spectra.hdf5')
+        return path
+    @property
+    def peaks_density_path(self) -> str | None:
+        """Path to the peaklist file."""
+        path = self._default_save_path('peaks_density.hdf5')
+        return path
+    @property
+    def rois(self) -> list[str]:
+        return list(self.roi_metadata.index)
     @property
     def close(self):
         """
@@ -1090,7 +1229,7 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
         source = ImzMLParser(file_path)
         # Назначение функции подгрузки в зависимости от континуальности данных 
         mzoffsets = source.mzOffsets
-        if mzoffsets[0] == mzoffsets[1]:
+        if mzoffsets[0] == mzoffsets[-1]:
             self.dcont = True
             self.mz_scale_cont = source.getspectrum(0)[0]
         #     self.get_batch = self._get_batch_cont
@@ -1160,7 +1299,7 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
         roi_list = []
         current_roi = None
         poslog_specdata = [None]*specnum
-        roi_pattern = re.compile(r'R(.+?)X')
+        roi_pattern = re.compile(r'(R.+?)X')
 
         with open(poslog_path) as f:
             data = f.readlines()[2:]
@@ -1242,7 +1381,7 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
             specdata["z"] = poslog_specdata[:,2]
         else: # If there is no poslog file in the folder, take coordinates from imzml
             #Get base info and coordinates
-            roi = "00" # Only one roi
+            roi = "R00" # Only one roi
             roi_list = [roi]
             roi_idx = {}
             roi_idx[roi] = Indexator((0,specnum))
@@ -1283,7 +1422,7 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
                 for idxs_slice in idxs:
                     mz_lengths.extend(self.source.mzLengths[idxs_slice])
                 return mz_lengths
-            elif isinstance(idxs, int):
+            elif isinstance(idxs, (int, np.integer)):
                 return [self.source.mzLengths[idxs]]
             else:
                 raise ValueError("Invalid index type")
@@ -1325,46 +1464,46 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
     def __setstate__(self, state):
         self.__dict__.update(state)
 
-    def get_spectrum(self, idx):
+    def _dots_slice(self, idx):
         """собираем один спектр по его индексу"""
 
         start_idx = self.source['scan_index'][idx].item()
         end_idx = self.source['point_count'][idx].item() + start_idx
-        dot_selection = slice(start_idx, end_idx,1)
-        mz_single = self.source['mass_values'][dot_selection].values
-        intens_single = self.source['intensity_values'][dot_selection].values
+        dots_slice = slice(start_idx, end_idx,1)
 
-        return mz_single, intens_single
-
+        return dots_slice
+    
     def get_spectra_stream(self, idxs = None):
+        if idxs is None:
+            idxs = range(len(self.source['scan_index']))
         for idx in idxs:
-            yield self.get_spectrum(idx)
-
-    def get_mz(self, idx):
-        start_idx = self.source['scan_index'][idx].item()
-        end_idx = self.source['point_count'][idx].item() + start_idx
-        dot_selection = slice(start_idx, end_idx, 1)
-        mz_single = self.source['mass_values'][dot_selection].values
-        return mz_single
+            dots_slice = self._dots_slice(idx)
+            mz_single = self.source['mass_values'][dots_slice].values
+            intens_single = self.source['intensity_values'][dots_slice].values
+            yield mz_single, intens_single
 
     def get_mz_stream(self, idxs = None):
         for idx in idxs:
-            yield self.get_mz(idx)
-
-    def get_intensity(self, idx):
-        start_idx = self.source['scan_index'][idx].item()
-        end_idx = self.source['point_count'][idx].item() + start_idx
-        dot_selection = slice(start_idx, end_idx, 1)
-        intens_single = self.source['intensity_values'][dot_selection].values
-        return intens_single
+            dots_slice = self._dots_slice(idx)
+            yield self.source['mass_values'][dots_slice].values
 
     def get_intensities_stream(self, idxs = None):
         for idx in idxs:
-            yield self.get_intensity(idx)
+            dots_slice = self._dots_slice(idx)
+            yield self.source['intensity_values'][dots_slice].values
+
+    def get_spectrum(self, idx):
+        return next(self.get_spectra_stream([idx]))
+
+    def get_mz(self, idx):
+        return next(self.get_mz_stream([idx]))
+
+    def get_intensity(self, idx):
+        return next(self.get_intensities_stream([idx]))
 
     def get_batch(self, idxs):
-        """заглушка"""
-        pass
+        """заглушка""" # TODO Проверить использую ли я по итогу этот метод
+        yield from self.get_spectra_stream(idxs)
 
     def get_metadata(self, draw=True):
         metadata = {}
@@ -1455,7 +1594,7 @@ class DataManager():
         file_ext = os.path.splitext(file_path)[1][1:]
         loader = self._loaders.get(file_ext.lower(), None)
         if not loader:
-            raise ValueError(f'Format {file_ext} is not supported')
+            raise ValueError(f'File extension {file_ext} is not supported')
         return loader
 
 ############### Utility functions

@@ -1,13 +1,22 @@
 import numpy as np
-
-import math 
+import math
+import os
+import warnings
+from KDEpy import FFTKDE, TreeKDE
 from pybaselines import Baseline
-from pelmesha.dough import AdaptiveParameter, DatasetHeaders, Indexator
+from pelmesha.utensils import split_pdtable_by_peaks_gap, _set_KDE_X_plot
 from scipy.signal import savgol_filter
-from typing import TYPE_CHECKING
+from multiprocessing import Pool, cpu_count
+from tqdm.auto import tqdm
+from functools import partial
+import pandas as pd
+import matplotlib.pyplot as plt
+from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
-    from pelmesha import Configs, PipelineConfigurator, DataSource
+    from pelmesha import PipelineConfigurator, DataSource
+    from pelmesha.cookbook import Configs
 
+FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2))  # Фактор пересчета FWHM в sigma
 ###########################################
 #   Base pipeline functions               #
 ###########################################
@@ -52,7 +61,7 @@ def preprocess_configuration_base(
     else: 
         headers_list = ["spectra_ind", "mz", "Intensity",  
                         "PextL", "PextR", "FWHML", "FWHMR"]
-    configs.update({"headers": DatasetHeaders(headers_list)})
+    configs.update({"headers": headers_list})
     return resampled_mz, headers_list, internal_configs
 
 
@@ -86,7 +95,7 @@ def process_spectra_base(
     if baseline_algo is not None: 
         if isinstance(baseline_algo, str):
             if baseline_algo == 'asls': #Hack just for setting default params
-                intensity = intensity - Baseline(mz, assume_sorted = True  **configs['Baseline']).asls(intensity, **configs['asls'])[0]
+                intensity = intensity - Baseline(mz, assume_sorted = True, **configs['Baseline']).asls(intensity, **configs['asls'])[0]
             else:
                 intensity = intensity - getattr(Baseline(mz, assume_sorted = True,**configs['Baseline']), baseline_algo)(intensity, **configs[baseline_algo])[0]
         else:
@@ -113,6 +122,7 @@ def peakpicking_base(
     mzsize = mz.size
     configs = configs['peakpicker'] #Получаем непосредственно словарь конфигов для функции peakpicker
     return peakpicker(mz, intensity, mzsize, idx, **configs)
+
 
 ###########################################
 #   Base processing functions             #
@@ -496,7 +506,9 @@ def modify_raw_spectrum(mz,
         mz, ints = add_zero_points_to_peaks(mz, ints, mz_discret_coeffs)
     return mz, ints
 
-def add_zero_points_to_peaks(mz, ints, mz_discret_coeffs):
+def add_zero_points_to_peaks(mz: np.ndarray,
+                             ints: np.ndarray, 
+                             mz_discret_coeffs: list) -> tuple[np.ndarray, np.ndarray]:
     """
     Add zero points to peaks
     """
@@ -528,7 +540,9 @@ def add_zero_points_to_peaks(mz, ints, mz_discret_coeffs):
 
     return new_loc_mz, new_loc_ints
 
-def reduce_signal_to_zero(mz, ints, mz_segments_to_zero):
+def reduce_signal_to_zero(mz: np.ndarray,
+                          ints: np.ndarray,
+                          mz_segments_to_zero: list[tuple[float, float]]) -> tuple[np.ndarray, np.ndarray]:
     """
     Reduce signal to zero
     """
@@ -537,3 +551,90 @@ def reduce_signal_to_zero(mz, ints, mz_segments_to_zero):
         artefacts_bool = artefacts_bool | ((mz > distortion[0]) & (mz < distortion[1]))
         ints[artefacts_bool] = 0
     return mz, ints
+
+def _compute_KDE(peaklist: pd.DataFrame,
+                discret_coeffs: np.ndarray,
+                cpu_num: int = 1,
+                KD_bandwidth: str | float = 'fwhm',
+                bwc: float = 1.0,
+                KD_kernel: str = 'gaussian',
+                KDE_algo: str| None = None,
+                split_mz_min: float = 10.0,
+                split_peaks_min: int = 25,
+                account_mzscale: bool = True):
+    
+    FWHM2sigma = FWHM_TO_SIGMA_FACTOR/5
+    mz_model = np.poly1d(discret_coeffs)
+    
+    if KD_bandwidth == "fwhm":
+        peaklist.loc[:,'KD_bandwidth'] = (peaklist['FWHMR'] - peaklist['FWHML'])*FWHM2sigma*bwc
+        if account_mzscale:
+            mz_discret = mz_model(peaklist['mz'])
+            
+            low_band_bool = peaklist['KD_bandwidth'] < mz_discret
+            peaklist.loc[low_band_bool,'KD_bandwidth'] = (mz_discret[low_band_bool]*bwc).astype(peaklist['KD_bandwidth'].dtype)
+    elif KD_bandwidth == "mz_discret":
+        peaklist.loc[:,'KD_bandwidth'] = mz_model(peaklist['mz'])*bwc
+    else:
+        peaklist.loc[:,'KD_bandwidth'] = KD_bandwidth*bwc
+
+    KD_data = split_pdtable_by_peaks_gap(peaklist, split_mz_min = split_mz_min, split_peaks_min = split_peaks_min)
+    n_segments = len(KD_data) 
+    assert peaklist['mz'].count() == sum( len(t[0]) for t in KD_data)
+    X_plot = [None] * n_segments
+    Y_plot = [None] * n_segments
+    
+    KDE_algo = KDE_algo or 'fft'
+    if KDE_algo.lower() == 'fft':# or (len(mz_discret_coeffs) == 1):
+        KDE_func = FFTKDE
+    elif KDE_algo.lower() == 'tree':
+        KDE_func = TreeKDE
+    else:
+        raise ValueError('Unknown KDE function')
+    partial_worker = partial(segment_probability_distribution, KDE_func, KD_kernel, discret_coeffs)
+    with Pool(cpu_num) as p:
+        Last_segment_max_mz = 0
+        for n, (X_plot_segment, Y_plot_segment) in enumerate(tqdm(p.imap_unordered(partial_worker,KD_data), total = len(KD_data), unit = 'segment', desc = 'Peaks probability distribution calculation')):
+            assert Last_segment_max_mz < X_plot_segment.min() #TODO удалить при выкладывании
+            X_plot[n] = X_plot_segment
+            Y_plot[n] = Y_plot_segment
+            # Y_plot[plot_slice] += result
+    X_plot = np.hstack(X_plot)
+    Y_plot = np.hstack(Y_plot)
+    idx_sort = np.argsort(X_plot)
+    X_plot = X_plot[idx_sort] 
+    Y_plot = Y_plot[idx_sort]
+    return X_plot, Y_plot
+
+def segment_probability_distribution(KDE_func, KD_kernel, mz_discret_coeffs, KD_data): # Пока медленно
+    mz, KD_bandwidth = KD_data
+    segment_min = mz[0] - KD_bandwidth[0]*6
+    segment_max = mz[-1] + KD_bandwidth[-1]*6
+    min_dist = np.poly1d(mz_discret_coeffs)(mz).min()
+    if KDE_func.__name__ == 'FFTKDE':
+        KD_bandwidth = np.median(KD_bandwidth)
+    X_plot_segment = _set_KDE_X_plot(segment_min, segment_max, min_dist = min_dist)
+    Y_plot_segment = KDE_func(kernel = KD_kernel, bw = KD_bandwidth).fit(mz)(X_plot_segment)*len(mz)
+    return X_plot_segment, Y_plot_segment
+
+def _peaklist_stats(peaklist: pd.DataFrame,
+                         sample: str,
+                         roi: str,
+                         draw_results: bool = True):
+    temp_pivo = pd.pivot_table(peaklist,index=["spectra_ind","Peak"],values="mz",aggfunc=["count"])
+    ms_num = peaklist.loc[:,'spectra_ind'].nunique()
+
+    temp_pivo = temp_pivo.iloc[(temp_pivo["count"]>1)["mz"].values]
+
+    if not temp_pivo.empty:
+        duplicated_num=len(temp_pivo.index.value(level="Peak"))
+        num_of_uniq_spectras = len(temp_pivo.droplevel('Peak').index.unique()) #Определяем кол-во спектров, где обнаружены дубликаты чисто для справки
+        textw=f"At the specified peak grouping settings, {temp_pivo['count']['mz'].sum()-temp_pivo.shape[0]} duplicates were identified, of which {duplicated_num} were unique peaks in {num_of_uniq_spectras} of mass spectra ({num_of_uniq_spectras*100/(ms_num):.2f}% of the total spectra)."
+        warnings.warn(textw)
+        if temp_pivo['count']["mz"].value_counts().index.max() > 2 and draw_results:
+            plt.figure(figsize=(3, 2))
+            plt.bar(temp_pivo['count']["mz"].value_counts().index.astype(str),temp_pivo['count']["mz"].value_counts().astype(int))
+            plt.xlabel('Quantity')
+            plt.ylabel('Num of duplicates')
+            plt.gca().set_title(f"Peaks occurence in one group in mass spectrum. Sample: {sample} {roi}")        
+            plt.grid(visible=True,which="both",axis="y")
