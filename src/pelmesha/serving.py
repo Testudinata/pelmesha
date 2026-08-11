@@ -167,7 +167,7 @@ class DataSet:
 
     def get_reference_peaks(self,
                             roi: str | list[str] | None = None,
-                            step: int = 100,
+                            step: int = 500,
                             num_peaks_per_step: int = 5,
                             min_occurence: float = 0.1,
                             return_weight: bool = True,
@@ -186,7 +186,7 @@ class DataSet:
         roi : str | list[str] | None, optional
             ROI name or list of ROI names (default ``None`` - all ROIs).
         step : int, optional
-            Width of the m/z window used to collect candidate peaks (default ``100``).
+            Width of the m/z window used to collect candidate peaks (default ``500``).
         num_peaks_per_step : int, optional
             Number of most common peaks kept per m/z step (default ``5``).
         min_occurence : float, optional
