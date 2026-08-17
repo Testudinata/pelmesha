@@ -1513,7 +1513,7 @@ class Configs():
 class PipelineConfigurator(Configs):
     # TODO Написать про кастомные функции «Загружайте конфигурационные файлы и кастомные функции только из доверенных источников, в коде есть слабости».
     def __init__(self,
-                configs_source: str | dict = {},
+                configs_source: str | dict | None = None,
                 preprocess_function: Callable = preprocess_configuration_base,
                 process_pipeline: Callable = process_spectra_base,
                 peakpick_function: Callable = peakpicking_base,
@@ -2751,6 +2751,7 @@ class PreparedDataSource():
                  datasource: DataSource | str | None = None,
                  configs_source: str | PipelineConfigurator | None = None,
                  kde_configs: str | KDEConfigs | None = None,
+                 rebuild_metadata: bool = False,
                  **kwargs):
         #: Path to the source file that was used to load configs.
         self._configs_source_path: str | None = None
@@ -2772,7 +2773,7 @@ class PreparedDataSource():
             self._load(configs_source, **kwargs)
         # --- Link datasource if provided ---
         if datasource is not None:
-            self.set_link(datasource)
+            self.set_link(datasource, rebuild_metadata=rebuild_metadata)
         
         # for compatability with Pipeline methods
 
@@ -2978,7 +2979,9 @@ class PreparedDataSource():
     #  DataSource linking                                                #
     # ------------------------------------------------------------------ #
 
-    def set_link(self, datasource: DataSource | str) -> None:
+    def set_link(self, 
+                 datasource: DataSource | str, 
+                 rebuild_metadata: bool = False) -> None:
         """Link this :class:`PreparedDataSource` to a :class:`DataSource`.
 
         Creates per-ROI :class:`PipelineConfigurator` for every ROI found in the
@@ -2990,9 +2993,10 @@ class PreparedDataSource():
             :class:`DataSource` instance or path to a data-source file.
         """
         if isinstance(datasource, str):
-            datasource = DataSource(datasource)
+            datasource = DataSource(datasource,rebuild_metadata)
 
         self._datasource = datasource
+        datasource.create_metafile(rebuild_metadata = rebuild_metadata)
         # Get ROI names from the datasource metadata
         roi_names: list[str] = list(datasource.roi_metadata.index)
         
@@ -3258,26 +3262,28 @@ class PreparedDataSource():
     #  Serialisation                                                     #
     # ------------------------------------------------------------------ #
 
-    def _default_save_path(self, end) -> str:
-        """Compute the default save path.
+    def _default_save_path(self, suffix = "", prefix = "") -> str:
+        """Compute the default save path by delegating to the linked
+        :class:`DataSource`.
+
+        Parameters
+        ----------
+        suffix : str, optional
+            File suffix / extension (e.g. ``"peaklists.hdf5"``).  An empty
+            string results in no trailing underscore.
+        prefix : str, optional
+            Optional name prefix prepended as ``<prefix>_`` to ``<sample_name>``.
+            Default ``""`` (no prefix).
 
         Returns
         -------
         str
-            ``<datasource_dir>/processed_pelmesha/<sample_name>_<end>``
+            ``<datasource_dir>/processed_pelmesha/<prefix>_<sample_name>_<suffix>``
         """
         if self._datasource is not None:
-            base_dir = os.path.dirname(self._datasource.file_path)
-            name = self._datasource.sample_name
+            return self._datasource._default_save_path(suffix, prefix)
         else:
-            base_dir = "."
-            name = "unknown"
-
-        return os.path.join(
-            base_dir,
-            "processed_pelmesha",
-            f"{name}_{end}"
-        )
+            raise ValueError("No datasource linked to object `PreparedDatasource`")
     def dump(self, path: str | None = None) -> str:
         """Save all per-ROI configurations to a YAML file.
 

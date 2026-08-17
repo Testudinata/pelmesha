@@ -9,9 +9,10 @@ import pandas as pd
 import xarray as xr
 from pyteomics import mzxml
 from pyimzml.ImzMLParser import ImzMLParser
-from msi_parse import ImzMLParser as rust_ImzMLParser
+# from msi_parse import ImzMLParser as rust_ImzMLParser
 import matplotlib.pyplot as plt
 from scipy.signal import medfilt
+from scipy import stats
 import math
 from abc import ABC, abstractmethod
 from itertools import  pairwise
@@ -30,17 +31,17 @@ class DataSource:
     WIP Отработать подгрузку континуальных и неконтинуальных данных.
     """
 
-    def __init__(self, path, respec = False, RamGb_limit_usage = 2):
+    def __init__(self, path, rebuild_metadata = False, RamGb_limit_usage = 2):
         """
         Инициализация источника данных.
 
         :param path: путь к файлу данных
-        :param respec: If ``True``, force re-creation of metadata. Default ``False``.
+        :param rebuild_metadata: If ``True``, force re-creation of metadata. Default ``False``.
         :param RamGb_limit_usage: RAM limit in GB for batch processing. Default ``2``.
         :param config: Processing config dict for this source. If ``None``,
             defaults to ``{}`` (will be resolved later by DataSet).
         :type path: str
-        :type respec: bool
+        :type rebuild_metadata: bool
         :type RamGb_limit_usage: int or float
         :type config: dict or None
         """
@@ -52,7 +53,7 @@ class DataSource:
         if folder_name != sample_name:
             sample_name = folder_name + "_" + sample_name
         self.sample_name = sample_name
-        self.loader = DataManager().get_loader(path)(path, respec = respec) # Composition pattern
+        self.loader = DataManager().get_loader(path)(path, rebuild_metadata = rebuild_metadata) # Composition pattern
         for attr_name in dir(self.loader):
             if not attr_name.startswith('_'): # Игнорируем приватные методы
                 attr = getattr(self.loader, attr_name)
@@ -521,7 +522,7 @@ class DataSource:
                 if any(start <= idx < end for start, end in indexes):
                     return self.roi_metadata.index[roi_num]
 
-        raise ValueError(f"ROI with index/indexes {idx} not found in {self.roi_metadata['idxroi'].values}")
+        raise ValueError(f"ROI with index/indexes {idx} not found in:\n{self.roi_metadata['idxroi']}")
 
     def get_mean_spectrum(self,
                           roi = None,
@@ -583,8 +584,9 @@ class DataSource:
             idxs_batches = self.split_idxs(idxs = idxs, cpu_count = 1, d = d)
             mz_range_slice = slice(None)
             pilot_batch = idxs_batches.pop()
-            if np.diff(pilot_batch) < 5: # Проверка на то, что pilot_batch содержит мало масс спектров, на основе которых невозможно будет оценить надёжно орбитрепные это данные или нет. 5 спектров минимум - эмпирическое
-                pilot_batch = np.array([idxs_batches.pop()[0], pilot_batch[1]])
+            
+            if Indexator(pilot_batch).count < 5: # Проверка на то, что pilot_batch содержит мало масс спектров, на основе которых невозможно будет оценить надёжно орбитрепные это данные или нет. 5 спектров минимум - эмпирическое
+                pilot_batch = np.vstack([idxs_batches.pop(), pilot_batch])
 
             batch_mz = []
             batch_intens = []
@@ -702,15 +704,15 @@ class DataSource:
             remainder_count = 0
             
             for idx in idxs:
-                
-                segment_size = np.diff(idx)
+                assert idx.size == 2
+                segment_size = idx[1]-idx[0]
                 if remainder:
                     if remainder_count+segment_size >= chunk_size:
                         idx_rem_stop = idx[0] + chunk_size - remainder_count
-                        idxs_batches.append(np.vstack(remainder.append([idx[0], idx_rem_stop])))
+                        remainder.append([idx[0], idx_rem_stop])
+                        idxs_batches.append(np.vstack(remainder))
                         idx = np.array([idx_rem_stop, idx[1]])
                         segment_size = remainder_count+segment_size - chunk_size
-                        assert segment_size == np.diff(idx)
                         remainder_count = 0
                         remainder = []
                     else:
@@ -757,25 +759,67 @@ class DataSource:
                     remainder = []
                 else:
                     idxs_batches.append(np.array([idx_start, idx + 1]))
-
+        n_spec = len(spectrum_sizes)
+        if len(idxs_batches) < cpu_count and n_spec > cpu_count*3:
+            batch_size = max(1, int(n_spec/(cpu_count*3)))
+            target = cpu_count * 3
+            idxs_batches = [np.asarray(b, dtype=np.int64).reshape(-1, 2)
+                            for b in idxs_batches]
+            while len(idxs_batches) < target:
+                # Ищем самый крупный батч для нарезки.
+                best_i, best_dots = -1, 0
+                for i, batch in enumerate(idxs_batches):
+                    dots = int(np.sum(batch[:, 1] - batch[:, 0]))
+                    if dots > best_dots:
+                        best_dots, best_i = dots, i
+                if best_i < 0 or best_dots < 2:
+                    break
+                batch = idxs_batches[best_i]
+                if len(batch) >= 2:
+                    # Несколько сегментов: режем по границе между ними.
+                    cut = (len(batch) + 1) // 2
+                    idxs_batches[best_i] = batch[:cut]
+                    idxs_batches.insert(best_i + 1, batch[cut:])
+                else:
+                    # Один сплошной сегмент: нарезаем кусками по batch_size.
+                    s, e = int(batch[0, 0]), int(batch[0, 1])
+                    need = target - len(idxs_batches)
+                    pieces = [[st, min(st + batch_size, e)]
+                              for st in range(s, e, batch_size)]
+                    if len(pieces) < 2:
+                        mid = (s + e) // 2
+                        pieces = [[s, mid], [mid, e]]
+                    idxs_batches[best_i] = np.array(pieces[:1], dtype=np.int64)
+                    idxs_batches[best_i + 1:best_i + 1] = [
+                        np.array(p, dtype=np.int64).reshape(1, 2)
+                        for p in pieces[1:need + 1]]
         return idxs_batches
 
-    def _default_save_path(self, end) -> str:
+    def _default_save_path(self, suffix = "", prefix = "") -> str:
         """Compute the default save path.
+
+        Parameters
+        ----------
+        suffix : str, optional
+            File suffix / extension (e.g. ``"peaklists.hdf5"``).  An empty
+            string results in no trailing underscore.
+        prefix : str, optional
+            Optional name prefix prepended as ``<prefix>_`` to ``<sample_name>``.
+            Default ``""`` (no prefix).
 
         Returns
         -------
         str
-            ``<datasource_dir>/processed_pelmesha/<sample_name>_<end>``
+            ``<datasource_dir>/processed_pelmesha/<prefix>_<sample_name>_<suffix>``
         """
         base_dir = os.path.dirname(self.file_path)
         name = self.sample_name
+        prefix = f"{prefix}_" if prefix else ""
+        suffix = f"_{suffix}" if suffix else ""
 
-        return os.path.join(
-            base_dir,
-            "processed_pelmesha",
-            f"{name}_{end}"
-        )
+        dir_path = os.path.join(base_dir, "processed_pelmesha")
+
+        return os.path.join(dir_path, f"{prefix}{name}{suffix}")
     
     def peaklists(self, roi):
         with File(self.peaklists_path, "r") as f:
@@ -822,7 +866,7 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
     Базовый класс для всех подгрузчиков данных с абстрактными и общими методами.
     Ни один конкретный подгрузчик не запустится, если в нем не будут определены ряд абстрактных методов, индивидуальные для них.
     """
-    def create_metafile(self, draw = True, respec = False, chunk_Mbsize = 10):
+    def create_metafile(self, draw = True, rebuild_metadata = False, chunk_Mbsize = 10):
         """
         Create or update the metadata HDF5 file (``<sample_name>_ingredients.hdf5``) for the data source.
 
@@ -830,11 +874,11 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
         HDF5 file under the ``raw_pelmesha`` subdirectory.
 
         :param draw: If ``True``, display diagnostic plots during metadata extraction. Default ``True``.
-        :param respec: If ``True``, force re-creation of the metadata file even if it exists. Default ``False``.
+        :param rebuild_metadata: If ``True``, force re-creation of the metadata file even if it exists. Default ``False``.
         :param chunk_Mbsize: Chunk size in MB for HDF5 dataset storage. Default ``10``.
 
         :type draw: bool
-        :type respec: bool
+        :type rebuild_metadata: bool
         :type chunk_Mbsize: int
         """ 
         file_path = self.file_path                                             
@@ -850,7 +894,7 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
         meta_file_exist = os.path.exists(meta_file_path)
         if not os.path.exists(meta_file_folder):
             os.makedirs(meta_file_folder)
-        if (not meta_file_exist) or respec:
+        if (not meta_file_exist) or rebuild_metadata:
 
             chunk_Mbsize = chunk_Mbsize * (1024**2)
             metadata, roi_metadata, coords = self.get_metadata(draw) # TODO @задачка: Создать в новом классе выгрузки данных из cdf метод get_metadata, чтобы сработал этот метод. 
@@ -864,7 +908,6 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
                     f['metadata'].attrs[key] = value
 
                 for roi in roi_metadata.keys():
-                    print(roi)#TODO
                     f['metadata'].create_group(roi)
                     for key, value in roi_metadata[roi].items():
                         f[f'metadata/{roi}'].attrs[key] = value
@@ -920,6 +963,7 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
         :return: Polynomial coefficients (highest degree first).
         :rtype: np.ndarray
         """
+        n_med = 7
         nsize_matrix = degree + 1
         sum_XTX = np.zeros((nsize_matrix, nsize_matrix))
         sum_XTy = np.zeros(nsize_matrix)
@@ -933,23 +977,31 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
         for mz in self.get_mz_stream(idxs):
             mz_vander = np.vander(mz[:-1], nsize_matrix)
             sum_XTX += mz_vander.T @ mz_vander
-            sum_XTy += mz_vander.T @ medfilt(np.diff(mz),5)
+            sum_XTy += mz_vander.T @ medfilt(np.diff(mz),n_med)
         discret_coeffs = np.linalg.solve(sum_XTX, sum_XTy)
 
         #перепроверка на равномерность дискретизации шкалы
         mz_discret = np.poly1d(discret_coeffs)(np.linspace(mz_min, mz_max, 100000))
         discret_mean = np.mean(mz_discret)
         discret_std = np.std(mz_discret,ddof=1)
-        if discret_std/discret_mean < 0.025: #равномерная дискретизация
+        if discret_std/discret_mean < 0.10: # Коэффициент ковариации
             discret_coeffs = np.linalg.solve(sum_XTX[degree:,:1], sum_XTy[:1])
 
         if draw:
             plt.figure(figsize = (25,4))
-            plt.plot(mz[:-1], medfilt(np.diff(mz),5))
+            plt.plot(mz[:-1], medfilt(np.diff(mz),n_med))
             plt.plot(mz[:-1], np.poly1d(discret_coeffs)(mz[:-1]))
-            plt.legend(["median filtered m/z discretization example", "m/z discretization regression"])
-            plt.xlabel('m/z')
             plt.ylabel('m/z discretion')
+            difference = medfilt(np.diff(mz),n_med) - np.poly1d(discret_coeffs)(mz[:-1]) 
+            difference_plus = difference.copy()
+            difference_minus = difference.copy()
+            difference_plus[difference < 0] = 0
+            difference_minus[difference > 0] = 0
+            plt.fill_between(mz[:-1], np.poly1d(discret_coeffs)(mz[:-1]), np.poly1d(discret_coeffs)(mz[:-1]) + difference_plus, color='orange', alpha=0.15)
+            plt.fill_between(mz[:-1], np.poly1d(discret_coeffs)(mz[:-1]), np.poly1d(discret_coeffs)(mz[:-1]) + difference_minus, where=(difference <= 0), color='blue', alpha=0.15)
+            
+            plt.legend(["median filtered m/z discretization example", "m/z discretization regression", 'Filter > Fit' , 'Filter < Fit'])
+            plt.xlabel('m/z')
         return discret_coeffs
 
     @abstractmethod
@@ -998,7 +1050,7 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
 ###################### IMZML
 
 class loader_imzml_rust(BaseLoader):
-    def __init__(self, file_path, respec=False):
+    def __init__(self, file_path, rebuild_metadata=False):
         self.file_path = file_path
         source = rust_ImzMLParser(file_path)
         # Назначение функции подгрузки в зависимости от континуальности данных
@@ -1010,7 +1062,7 @@ class loader_imzml_rust(BaseLoader):
         else:
             self.dcont = False
         #     self.get_batch = self._get_batch_discont
-        self.create_metafile(respec=respec)
+        self.create_metafile(rebuild_metadata=rebuild_metadata)
 
     @cached_property
     def source(self):
@@ -1224,7 +1276,7 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
     Automatically detects whether the data is continuous (TOF) or discontinuous (Orbitrap)
     and selects the appropriate batch-loading strategy.
     """
-    def __init__(self, file_path, respec = False):
+    def __init__(self, file_path, rebuild_metadata = False):
         self.file_path = file_path
         source = ImzMLParser(file_path)
         # Назначение функции подгрузки в зависимости от континуальности данных 
@@ -1236,7 +1288,7 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
         else:
             self.dcont = False
         #     self.get_batch = self._get_batch_discont
-        self.create_metafile(respec = respec)
+        self.create_metafile(rebuild_metadata = rebuild_metadata)
     @cached_property
     def source(self):
         return ImzMLParser(self.file_path)
@@ -1384,7 +1436,7 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
             roi = "R00" # Only one roi
             roi_list = [roi]
             roi_idx = {}
-            roi_idx[roi] = Indexator((0,specnum))
+            roi_idx[roi] =  ((0,specnum))
             specdata = {}
             try:
                 coords = np.vstack(list(self._get_physical_coordinates(range(specnum)))) 
@@ -1445,13 +1497,13 @@ class loader_mzxml(BaseLoader): # TODO дописать.
 
 
 class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: Собственно сам класс, который надо написать
-    def __init__(self, file_path, respec = False):
+    def __init__(self, file_path, rebuild_metadata = False):
         self.file_path = file_path
         source = xr.open_dataset(self.file_path)
         # фактически данные изначально всегда неконтинуальные
         self.dcont = False
 
-        self.create_metafile(respec=respec)  # фактически метаданные находятся в самом cdf
+        self.create_metafile(rebuild_metadata=rebuild_metadata)  # фактически метаданные находятся в самом cdf
     @cached_property
     def source(self):
         return xr.open_dataset(self.file_path)
@@ -1597,81 +1649,6 @@ class DataManager():
             raise ValueError(f'File extension {file_ext} is not supported')
         return loader
 
-############### Utility functions
-
-def get_mz_discretion_coeffs_legacy(mz, min_discret = None, draw = True):
-    """
-    Legacy function to estimate m/z discretisation coefficients from a single m/z array.
-
-    :param mz: 1-D array of m/z values.
-    :param min_discret: Optional minimum discretisation threshold for filtering.
-    :param draw: If ``True``, display a diagnostic plot. Default ``True``.
-
-    :type mz: np.ndarray
-    :type min_discret: float or None
-    :type draw: bool
-
-    :return: Polynomial coefficients describing the m/z step size.
-    :rtype: np.ndarray
-    """
-    dots_distance = np.diff(mz)
-    
-    if min_discret:
-        float_error_bool = dots_distance >= min_discret - math.sqrt(np.finfo(float).eps)
-        if not float_error_bool[0]:
-            first_mz = True
-        else:
-            first_mz = False
-        float_error_bool = np.append(first_mz,float_error_bool)
-        mz = mz[float_error_bool]
-        dots_distance = np.diff(mz)
-    distance_diff = np.diff(dots_distance)
-    std_diff = np.std(dots_distance, ddof=1) / np.sqrt(len(dots_distance))
-    dots_distance_bool = np.abs(distance_diff) <= std_diff
-    start_diff = (dots_distance[0] - dots_distance[1:][dots_distance_bool][0])
-    if abs(start_diff) <= std_diff:
-        dots_distance_bool = np.append(True, dots_distance_bool)
-    else:
-        dots_distance_bool = np.append(False, dots_distance_bool)
-    
-    mz_discret = np.array(medfilt(dots_distance[dots_distance_bool],5))
-    mz = mz[:-1][dots_distance_bool]
-
-    discret_mean = np.mean(mz_discret)
-    discret_std = np.std(mz_discret,ddof=1)
-    if discret_std/discret_mean < 0.025:
-        discret_coeffs = np.polyfit(mz, mz_discret, deg = 0)
-    else:
-        discret_coeffs = np.polyfit(mz, mz_discret, deg = 3)
-        if draw:
-            plt.figure(figsize = (25,4))
-            plt.plot(mz, mz_discret)
-            plt.plot(mz, np.poly1d(discret_coeffs)(mz))
-            plt.legend(["m/z discretization", "m/z discretization regression"])
-            plt.xlabel('m/z')
-            plt.ylabel('m/z discretion')
-    return discret_coeffs
-def _batch_mz_discret_props_legacy(source, idxs):
-    """
-    Legacy function to collect unique m/z values and minimum discretisation step from a batch of spectra.
-
-    :param source: Data loader with a ``get_mz_stream`` method.
-    :param idxs: Index segment ``(start, end)`` to scan.
-
-    :type source: BaseLoader
-    :type idxs: tuple
-
-    :return: Tuple ``(unique_mz_array, min_discret_step)``.
-    :rtype: tuple
-    """
-    mzs = []
-    min_discret_batch = np.inf
-    for mz in source.get_mz_stream(range(*idxs)):
-        mzs.append(mz)
-        min_discret_batch = min(min_discret_batch, np.diff(mz).min())
-    mz_batch = np.unique(np.hstack(mzs))
-    return mz_batch, min_discret_batch
-
 def _to_index(arr):
     ranges = []
     for _, group in itertools.groupby(enumerate(arr), lambda pair: pair[1] - pair[0]):
@@ -1679,4 +1656,5 @@ def _to_index(arr):
         start = group_list[0][1]
         end = group_list[-1][1] + 1
         ranges.append((start, end))
+    # return np.asarray(ranges, dtype=np.int64)
     return ranges

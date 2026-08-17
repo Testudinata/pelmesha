@@ -362,36 +362,6 @@ def _set_KDE_X_plot(plot_start, plot_end, min_dist):
     return X_plot
 #NEW 08072026
 
-### Utility functions for multiprocessing
-class Sentinel: 
-    """Утилитный класс-заглушка для прекращения цикла while в функции printer и настройки атрибутов"""
-    pass
-def printer(print_queue):
-    '''
-    Вспомогательная функция используется для отображения сообщений в дочерних процессах, включая отображение прогресса с помощью tqdm.
-    Еcли с помощью put на входе str, то печатает сообщение, если на входе число первый раз, то создаёт tqdm объект и отображает прогресс, если повторно число - то удаляет tqdm объект, если True, то отображает продвижение процесса.
-    :param print_queue: is a multiproccesing.Manager.Queue() proxy object
-    :type print_queue: multiproccesing.Manager.Queue() proxy object
-    '''
-    while True:
-        msg = print_queue.get()
-        if isinstance(msg, Sentinel):
-            try:
-                pbar.close()
-            except:
-                pass
-            break
-        elif isinstance(msg,str):
-            print(msg, flush=True)
-        elif msg is True:
-            pbar.update(1)
-        else:
-            try:
-                pbar.close()
-                del pbar
-            except:
-                pbar = tqdm(total = msg,desc="Batches progress",smoothing = 0.005)
-
 def del_hdf5(hdf5_path):
     """
     Delete an HDF5 file from disk if it exists.
@@ -588,7 +558,7 @@ def _consesusing_peaks(peaklists: pd.DataFrame):
     
     return result.set_index(base_index)
 
-def _consensus_peaks_summary(feature_matrix: pd.DataFrame) -> pd.DataFrame:
+def _consensus_peaks_summary(feature_series: pd.Series) -> pd.DataFrame:
     """Summarise consensus peaks per (sample, roi, mz) multiplicity.
 
     Counts how many times each (index combo, mz) group occurs, keeps only
@@ -610,44 +580,53 @@ def _consensus_peaks_summary(feature_matrix: pd.DataFrame) -> pd.DataFrame:
         'mz multiplicity'. Empty frame if there are no consensus peaks.
     """
     # Derive index names dynamically so nothing depends on a fixed level count.
-    index_names = [name for name in feature_matrix.index.names if name is not None]
-
+    index_names = [name for name in feature_series.index.names if name is not None]
     peak_counts = (
-        feature_matrix
-        .groupby([*index_names, "mz"], observed=True)
-        .size()
+        feature_series
+        .groupby([*index_names], observed=True)
+        .value_counts()
         .rename("count")
-        .reset_index()
     )
+    col_name = feature_series.name    
     # Proper boolean filter on the 'count' column (fixes the old [..., "mz"] mis-filter).
-    consesused = peak_counts[peak_counts["count"] > 1].copy()
-
+    consesused = peak_counts[peak_counts> 1]
     # Global row: collapse (sample, roi) into a single "all samples" bucket.
-    total_summary = consesused.assign(
-        sample="Total",
-        roi="",
+    n_consesused = len(consesused)
+ 
+    consesused = consesused.reset_index()
+    total_summary = consesused.copy()
+    total_summary.loc[:,index_names[0]] = ["Total"] * n_consesused
+    total_summary.loc[:,index_names[1]] = [''] * n_consesused 
+     
+    # return pd.concat([consesused, total_summary], ignore_index=True).pivot_table(
+    #     index=["sample", "roi"],
+    #     columns="count",
+    #     values="mz",
+    #     aggfunc="nunique",
+    # ).add_suffix(" subs").fillna(0).astype('int')
+    return (
+    pd.concat([consesused, total_summary], ignore_index=True)
+    .groupby(["sample", "roi",'count'])[col_name]
+    .nunique()
+    .unstack(level="count", fill_value=0)
+    .add_suffix(" subs")
     )
-    
-    return pd.concat([consesused, total_summary], ignore_index=True).pivot_table(
-        index=["sample", "roi"],
-        columns="count",
-        values="mz",
-        aggfunc="nunique",
-    ).add_suffix(" subs").fillna(0).astype('int')
 
-def _nunique_summary(feature_matrix: pd.DataFrame,
-                     column_name: str | None = None) -> pd.DataFrame:
-    sample_roi_nunique = feature_matrix.groupby(["sample", "roi"])["mz"].nunique()
+def _nunique_summary(feature_series: pd.Series,
+                     column_name: str | None = None) -> pd.Series:
+    levels = feature_series.index.names
     
-    total_index = pd.MultiIndex.from_tuples([("Total", "")], names=["sample", "roi"])
-    total_nunique = pd.Series([feature_matrix["mz"].nunique()], index=total_index)
-    resulted = pd.concat([sample_roi_nunique, total_nunique])
+    multi_level_nunique = feature_series.groupby(level=levels).nunique()
+    
+    total_index = pd.MultiIndex.from_tuples([["Total"]+ [""] * (len(levels)-1)], names=levels)
+    total_nunique = pd.Series([feature_series.nunique()], index=total_index)
+    resulted = pd.concat([multi_level_nunique, total_nunique])
     if column_name:
-        resulted.rename(column_name, inplace= True)
+        resulted.name = column_name
     return resulted
-def _peaks_filtration(peaklist: pd.DataFrame,
-                      countf: int | float | None = 10,
-                      countf_rel: float | None = None) -> pd.DataFrame:
+def _frequency_filtration(series: pd.Series,
+                            countf: int | float | None = 10,
+                            countf_rel: float | None = None) -> pd.Series:
     """Filter peaks that occur with a minimum multiplicity.
 
     Keeps only the rows whose ``mz`` value appears at least ``countf`` times in
@@ -676,29 +655,35 @@ def _peaks_filtration(peaklist: pd.DataFrame,
         If ``countf`` is negative, if ``countf_rel`` is not within ``(0, 1]``,
         or if ``peaklist`` has no ``mz`` column.
     """
-    if "mz" not in peaklist.columns:
-        raise ValueError("peaklist must contain an 'mz' column")
     if countf is not None and countf < 0:
         raise ValueError(f"countf must be >= 0, got {countf!r}")
     if countf_rel is not None and not 0 < countf_rel <= 1:
         raise ValueError(f"countf_rel must be in (0, 1], got {countf_rel!r}")
 
     if countf is None and countf_rel is None:
-        return peaklist
+        return pd.Series(True, index=series.index)
 
-    total_rows = len(peaklist)
-    rel_threshold = countf_rel * total_rows if countf_rel is not None else None
-
-    # Effective threshold: the stricter (larger) of the absolute and relative.
     threshold = countf
-    if rel_threshold is not None:
-        threshold = rel_threshold if threshold is None else max(threshold, rel_threshold)
+    if countf_rel is not None:
+        rel_threshold = countf_rel * series.size
+        threshold = (
+            rel_threshold
+            if threshold is None
+            else max(threshold, rel_threshold)
+        )
+    
+    target_col = series.name if series.name is not None else "value"
+    working_series = series if series.name is not None else series.rename(target_col)
     # Count occurrences of each m/z and keep rows meeting the threshold. When counting unqiue peaks - ignoring duplicates
-    counts = peaklist[["mz"]].reset_index().drop_duplicates()['mz'].value_counts().rename("count")
-    peaklist_with_counts = peaklist.merge(counts, left_on="mz", right_index=True)
-    return peaklist_with_counts.loc[
-        peaklist_with_counts["count"] >= threshold, peaklist.columns
-    ]
+    counts = (
+        working_series.reset_index()
+        .drop_duplicates()[target_col]
+        .value_counts())
+    
+    peaklist_counts = series.map(counts)
+    # return peaklist.loc[
+    #     peaklist_with_counts["count"] >= threshold]
+    return peaklist_counts >= threshold
 
 def show_df(dataframe, title=""):
     try:

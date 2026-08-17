@@ -84,7 +84,7 @@ def process_spectra_base(
     modify_raw_spectrum_configs = configs.get('modify_raw_spectrum', {})
 
     #premodifying spectrum
-    if modify_raw_spectrum_configs.get('add_zero_points_to_peaks') or modify_raw_spectrum_configs.get('mz_segments_to_zero'):
+    if modify_raw_spectrum_configs.get('zero_points_to_peaks_ext') or modify_raw_spectrum_configs.get('mz_segments_to_zero'):
         mz, intensity = modify_raw_spectrum(mz, intensity, mz_discrete_coeffs, **modify_raw_spectrum_configs) 
 
     #Smoothing step
@@ -495,14 +495,14 @@ def peakpicker(mz,
 def modify_raw_spectrum(mz, 
                         ints, 
                         mz_discret_coeffs,
-                        add_zero_points_to_peaks = False,
+                        zero_points_to_peaks_ext = False,
                         mz_segments_to_zero = None):
     """
     Modify raw spectrum data. Reduce to zero segemnts and add zero points to peaks if their peaks are cropped (especially if peaks consists from 1-2 points)
     """
     if mz_segments_to_zero and mz_discret_coeffs is not None:
-        mz, ints = mz_segments_to_zero(mz, ints, mz_discret_coeffs)
-    if add_zero_points_to_peaks:
+        mz, ints = reduce_signal_to_zero(mz, ints, mz_segments_to_zero)
+    if zero_points_to_peaks_ext:
         mz, ints = add_zero_points_to_peaks(mz, ints, mz_discret_coeffs)
     return mz, ints
 
@@ -516,8 +516,8 @@ def add_zero_points_to_peaks(mz: np.ndarray,
 
     diff_mz = np.diff(mz)
     mz_discr = mz_discretion_model(mz[:-1])
-    big_gap_bool = diff_mz > 3.5*mz_discr
-    small_gap_bool = (diff_mz > 1.75*mz_discr) ^ big_gap_bool
+    big_gap_bool = diff_mz > 2.5*mz_discr
+    small_gap_bool = (diff_mz > 1.25*mz_discr) ^ big_gap_bool
     new_val = {}
     if np.any(big_gap_bool):
         new_val['left'] = mz[np.append(big_gap_bool, [False])] + mz_discr[big_gap_bool]
@@ -594,7 +594,7 @@ def _compute_KDE(peaklist: pd.DataFrame,
     partial_worker = partial(segment_probability_distribution, KDE_func, KD_kernel, discret_coeffs)
     with Pool(cpu_num) as p:
         Last_segment_max_mz = 0
-        for n, (X_plot_segment, Y_plot_segment) in enumerate(tqdm(p.imap_unordered(partial_worker,KD_data), total = len(KD_data), unit = 'segment', desc = 'Peaks probability distribution calculation')):
+        for n, (X_plot_segment, Y_plot_segment) in enumerate(tqdm(p.imap_unordered(partial_worker,KD_data), total = len(KD_data), unit = 'segment', desc = 'Peak PDF calculation')):
             assert Last_segment_max_mz < X_plot_segment.min() #TODO удалить при выкладывании
             X_plot[n] = X_plot_segment
             Y_plot[n] = Y_plot_segment
