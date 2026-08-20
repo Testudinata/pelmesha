@@ -1367,6 +1367,35 @@ class Drawer():
         self.peaks_density_path = self.datasource.peaks_density_path
         self.processed_spectra_path = self.datasource.processed_spectra_path
         self.peaklists_path = self.datasource.peaklists_path
+
+    def _draw_raw(self,
+                  roi: str | None = None,
+                  mz_range: tuple[float, float] | None = None,
+                  spectrum_idx: int | None = None,
+                  axes: plt.Axes | None = None):
+        datasource = self.datasource
+        if axes is None:    
+            plt.figure().set_figwidth(25)
+            plt.gcf().set_figheight(5)
+            axes = plt.gca()
+            plt.xlabel("m/z")
+            plt.ylabel("Intensity")
+            plt.minorticks_on()
+            plt.grid(visible=True,which="both")
+            if roi is None:
+                roi = datasource._get_roi(spectrum_idx)
+            plt.title(f"Sample: {datasource.sample_name}, roi: {roi}")
+        else:
+            plt.sca(axes)
+        diapcalc = lambda mz, plot_mz_range: (np.array(mz>plot_mz_range[0]) & np.array(mz<plot_mz_range[1])) if plot_mz_range is not None else range(len(mz))
+
+        # Draw raw
+        mz_raw, intens_raw = datasource.get_spectrum(spectrum_idx)
+
+        diap_raw = diapcalc(mz_raw, mz_range)
+        plt.plot(mz_raw[diap_raw], intens_raw[diap_raw],alpha=0.75, label = f"Raw mass spectrum N{spectrum_idx}")
+        plt.legend()
+        plt.xlim(mz_range)
         
     def _draw(self,
               mz: np.ndarray,
@@ -1376,7 +1405,8 @@ class Drawer():
               roi: str | None = None,
               mz_range: tuple[float, float] | None = None,
               spectrum_idx: int | None = None,
-              axes: plt.Axes | None = None):
+              axes: plt.Axes | None = None,
+              draw_raw: bool = True):
         """
         Draw raw and processed mass spectra on a single figure.
 
@@ -1416,21 +1446,21 @@ class Drawer():
             plt.ylabel("Intensity")
             plt.minorticks_on()
             plt.grid(visible=True,which="both")
-            plt.title(f"Sample: {datasource.sample_name}, roi: {roi}, spectrum idx: {spectrum_idx}")
+            plt.title(f"Sample: {datasource.sample_name}, roi: {roi}")
         else:
             plt.sca(axes)
         diapcalc = lambda mz, plot_mz_range: (np.array(mz>plot_mz_range[0]) & np.array(mz<plot_mz_range[1])) if plot_mz_range is not None else range(len(mz))
 
         # Draw raw
-        mz_raw, intens_raw = datasource.get_spectrum(spectrum_idx)
+        if draw_raw:
+            self._draw_raw(roi = roi, spectrum_idx = spectrum_idx, axes = axes, mz_range = mz_range)
+        
+        mz_raw, _ = datasource.get_spectrum(spectrum_idx)
 
         if mz is None:
             mz = mz_raw
         if mz_range is None:
             mz_range = (mz[0], mz[-1])
-
-        diap_raw = diapcalc(mz_raw, mz_range)
-        plt.plot(mz_raw[diap_raw], intens_raw[diap_raw],alpha=0.75, label = f"Raw mass spectrum N{spectrum_idx}")
 
         # Draw processed
         diap = diapcalc(mz, mz_range)
@@ -1472,7 +1502,8 @@ class Drawer():
                          draw_spectrum_idx: int | None = None,
                          dtypeconv: np.dtype | None = None,
                          axes: plt.Axes | None = None,
-                         configs_path: str | None = None):
+                         configs_path: str | None = None,
+                         draw_raw: bool = True):
         """
         Audit the processing of the data source by re-running the pipeline.
 
@@ -1522,7 +1553,7 @@ class Drawer():
             mz, headers = next(processing_stream)
             mz_dict, intensity_dict, peaklist = next(processing_stream)
             
-            self._draw(mz_dict[spectrum_idx], intensity_dict[spectrum_idx].squeeze(), peaklist, headers, r, draw_mz_range, spectrum_idx, axes)
+            self._draw(mz_dict[spectrum_idx], intensity_dict[spectrum_idx].squeeze(), peaklist, headers, r, draw_mz_range, spectrum_idx, axes, draw_raw)
 
     def draw_processed_data(self,
                             roi: str | list | None = None,
@@ -1684,7 +1715,8 @@ class Drawer():
                             countf: int | None = None,
                             filter_mz_mask: np.ndarray[bool] = None,
                             draw_mz_borders = None,
-                            flipped_kde_density: bool = False) -> plt.Axes:
+                            flipped_kde_density: bool = False,
+                            axes: plt.Axes | None = None) -> plt.Axes:
         
         formatter = AbsoluteFormatter(useMathText=True)
         formatter.set_scientific(True)
@@ -1699,8 +1731,11 @@ class Drawer():
             local_kde_mz = kde_mz[kde_borders_mask]
             local_kde_density = kde_density[kde_borders_mask]
         # Создаём объект рисунка
-        plt.figure(figsize=(25, 6), dpi=600)
-        plt.xlim(draw_mz_borders)
+        if axes is None:    
+            plt.figure(figsize=(25, 6), dpi=600)
+            plt.xlim(draw_mz_borders)
+        else:
+            plt.sca(axes)
 
         # Отрисуем график KDE
         kde_line, = plt.plot(local_kde_mz, local_kde_density*(-1 if flipped_kde_density else 1), color="k",alpha=0.85)
@@ -1752,9 +1787,10 @@ class Drawer():
         plt.grid(visible=True,which="both")
         axes_prob = plt.gca()
         axes_prob.yaxis.set_major_formatter(formatter)
-        ylim_min, ylim_max = axes_prob.get_ylim()
-        limit = max(abs(ylim_min), abs(ylim_max))
-        axes_prob.set_ylim((-limit, limit))
+        if flipped_kde_density:
+            ylim_min, ylim_max = axes_prob.get_ylim()
+            limit = max(abs(ylim_min), abs(ylim_max))
+            axes_prob.set_ylim((-limit, limit))
         axes_prob.legend(graphs, leg, loc = 'upper left')
         return axes_prob
 
@@ -2079,6 +2115,7 @@ class Pipeline:
         hdf5_save_path = self._default_save_path("peaklists.hdf5")
         if os.path.exists(hdf5_save_path):
             os.remove(hdf5_save_path)
+        os.makedirs(os.path.dirname(hdf5_save_path), exist_ok=True)
         peaks_density_path = self._default_save_path("peaks_density.hdf5")
         if os.path.exists(peaks_density_path):
             os.remove(peaks_density_path)

@@ -2557,10 +2557,10 @@ class KDEConfigs(BaseModel):
         "gaussian",
         description="KDE kernel name. See KDEpy documentation for available kernels."
     )
-    KDE_algo: str | None = Field(
-        None,
-        description="Explicit KDE algorithm (FFTKDE or TreeKDE). If None, auto-selected."
-        "Options: 'FFT', 'Tree', or None."
+    KDE_algo: str = Field(
+        "Tree",
+        description="Explicit KDE algorithm (FFTKDE or TreeKDE). Default: 'Tree'"
+        "Options: 'FFT', 'Tree'."
     )
 
     # # --- Peak filtering ---
@@ -2619,7 +2619,6 @@ class KDEConfigs(BaseModel):
             raise ValueError(
                 f"Unknown KDE_algo '{v}'. "
                 f"Valid strings: {valid_strings}. "
-                f"Or pass a None."
             )
         return v
     @property

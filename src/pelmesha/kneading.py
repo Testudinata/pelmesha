@@ -584,7 +584,7 @@ def _compute_KDE(peaklist: pd.DataFrame,
     X_plot = [None] * n_segments
     Y_plot = [None] * n_segments
     
-    KDE_algo = KDE_algo or 'fft'
+    KDE_algo = KDE_algo or 'tree'
     if KDE_algo.lower() == 'fft':# or (len(mz_discret_coeffs) == 1):
         KDE_func = FFTKDE
     elif KDE_algo.lower() == 'tree':

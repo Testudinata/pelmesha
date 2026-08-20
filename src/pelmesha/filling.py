@@ -7,7 +7,6 @@ import numpy as np
 from h5py import File
 import pandas as pd 
 import xarray as xr
-from pyteomics import mzxml
 from pyimzml.ImzMLParser import ImzMLParser
 # from msi_parse import ImzMLParser as rust_ImzMLParser
 import matplotlib.pyplot as plt
@@ -1436,7 +1435,7 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
             roi = "R00" # Only one roi
             roi_list = [roi]
             roi_idx = {}
-            roi_idx[roi] =  ((0,specnum))
+            roi_idx[roi] =  Indexator((0,specnum))
             specdata = {}
             try:
                 coords = np.vstack(list(self._get_physical_coordinates(range(specnum)))) 
