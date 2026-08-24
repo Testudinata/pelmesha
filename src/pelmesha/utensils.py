@@ -296,7 +296,6 @@ def split_pdtable_by_peaks_gap(pd_table, split_peaks_min = 25, split_mz_min = 10
     pd_table.sort_values(by = "mz", inplace = True, ignore_index = True)
     mz = pd_table['mz'].to_numpy()
     KD_bandwidth = pd_table['KD_bandwidth'].to_numpy()
-
     mz_distance_bool = np.diff(mz) > np.max( np.vstack((KD_bandwidth[1:], KD_bandwidth[:-1])), axis = 0)*12
     mz_distance_bool[-1] = True
     borders_idx = np.where(np.concatenate(([True], mz_distance_bool)))[0]
@@ -346,6 +345,16 @@ def split_pdtable_by_peaks_gap(pd_table, split_peaks_min = 25, split_mz_min = 10
     return batched_pd_table
 
 def _set_KDE_X_plot(plot_start, plot_end, min_dist):
+    """
+    Set the X_plot for KDE function.
+
+    :param plot_start: Start of the plot.
+    :type plot_start: float
+    :param plot_end: End of the plot.
+    :type plot_end: float
+    :return: X_plot.
+    :rtype: np.ndarray
+    """
     mz_range = plot_end - plot_start
     num_of_dots = int((mz_range)*5/min_dist)+1
 
@@ -360,7 +369,6 @@ def _set_KDE_X_plot(plot_start, plot_end, min_dist):
         if num_of_dots<=1:
             raise AssertionError("Cannot get uniform data for KDE. See logs for info")
     return X_plot
-#NEW 08072026
 
 def del_hdf5(hdf5_path):
     """
@@ -455,37 +463,91 @@ def mspeaks_KD(X, Y,oversegmentationfilter=None,peaklocation=1, return_pkY = Fal
     return np.array((pkX, X[left_min], X[right_min]))
 
 def Peak_assignment(peakstable_batch,Xp_batch):
-    """    
-    Описание
-    ----
-    Вспомогательная функция к основной `Pgrouping_KD`. Определяет принадлежность значений mz к определённому значению пика  
+    """Assign the corrected m/z value of each detected KDE peak to the peaks of a batch.
+
+    For every peak found in the KDE density (defined by its centre and left/
+    right boundaries), all the rows of ``peakstable_batch`` whose ``mz`` falls
+    within that peak's ``[left, right]`` window are reassigned to the peak
+    centre. When the KDE peak data include a fourth row (the density value),
+    it is written into a ``Density`` column as well.
+
+    Parameters
+    ----------
+    peakstable_batch : pd.DataFrame
+        A batch of the peak table containing an ``mz`` column.
+    Xp_batch : np.ndarray
+        Array of shape ``(3, n_peaks)`` or ``(4, n_peaks)`` with the KDE
+        peaks, where the rows are ``[peak_center, left, right]`` and,
+        optionally, ``density``.
+
+    Returns
+    -------
+    pd.DataFrame
+        The same table with the ``mz`` values reassigned to the peak centres
+        (and the ``Density`` column populated when available).
     """
     if not peakstable_batch.empty:
+        mz_col_dtype = peakstable_batch["mz"].dtype.type
         if len(Xp_batch) == 3:
             
             for peak, xl, xr in Xp_batch.T:
                 bool_mask = (peakstable_batch['mz']>=xl) & (peakstable_batch['mz']<=xr)
-                peakstable_batch.loc[bool_mask,"mz"] = peak
+                
+                peakstable_batch.loc[bool_mask, "mz"] = mz_col_dtype(peak)
         else:
-
+            density_col_dtype = peakstable_batch["Density"].dtype.type
             for peak, xl, xr, density in Xp_batch.T:
                 bool_mask = (peakstable_batch['mz']>=xl) & (peakstable_batch['mz']<=xr)
-                peakstable_batch.loc[bool_mask,"mz"] = peak
-                peakstable_batch.loc[bool_mask,"Density"] = density
+                peakstable_batch.loc[bool_mask,"mz"] = mz_col_dtype(peak)
+                peakstable_batch.loc[bool_mask,"Density"] = density_col_dtype(density)
     return peakstable_batch
 
 def _align_kde_mz_grids(kde_mz_list: list[np.ndarray]) -> np.ndarray:
-    """Построить общую mz-сетку для суммирования KDE от разных источников."""
+    """Build a common m/z grid for summing KDE results from several sources.
+
+    Parameters
+    ----------
+    kde_mz_list : list of np.ndarray
+        A list of m/z grids, one per source.
+
+    Returns
+    -------
+    np.ndarray
+        A uniform m/z grid spanning the union of all the input ranges. The
+        step is chosen as the finest (smallest 25th percentile step) among
+        all the input grids.
+    """
     mz_min = min(kmz[0] for kmz in kde_mz_list)
     mz_max = max(kmz[-1] for kmz in kde_mz_list)
-    # Использовать самую мелкую дискретизацию
+    # Use the finest discretisation among all grids.
     min_step = min(np.quantile(np.diff(kmz), q= 0.25) for kmz in kde_mz_list)
     num_points = int((mz_max - mz_min) / min_step) + 1
     return np.linspace(mz_min, mz_max, num_points)
 
 def _summerize_kde_mz(kde_mz_list: list[np.ndarray],
-                      kde_density_list: list[np.ndarray], 
+                      kde_density_list: list[np.ndarray],
                       normalize_bool: bool = True) -> tuple[np.ndarray, np.ndarray]:
+    """Sum the KDE densities of several sources on a common m/z grid.
+
+    Interpolates every source density onto a shared m/z grid (built by
+    :func:`_align_kde_mz_grids`) and sums them. Optionally normalises the
+    resulting total density with an L1 norm.
+
+    Parameters
+    ----------
+    kde_mz_list : list of np.ndarray
+        A list of m/z grids, one per source.
+    kde_density_list : list of np.ndarray
+        A list of density values aligned with ``kde_mz_list``.
+    normalize_bool : bool, optional
+        Whether to L1-normalise the summed density. Default ``True``.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        ``(common_kde_mz, total_density)`` — the shared m/z grid and the
+        summed (optionally normalised) density.
+    """
     common_kde_mz = _align_kde_mz_grids(kde_mz_list)
     total_density = np.zeros_like(common_kde_mz)
     for kmz, kden in zip(kde_mz_list, kde_density_list):
@@ -494,11 +556,34 @@ def _summerize_kde_mz(kde_mz_list: list[np.ndarray],
         total_density = normalize( total_density.reshape(1, -1), norm='l1' ).squeeze()
     return common_kde_mz, total_density
 
-def apply_kde_mzcorrection(peaklist: pd.DataFrame, 
-                           kde_mz: np.ndarray, 
+def apply_kde_mzcorrection(peaklist: pd.DataFrame,
+                           kde_mz: np.ndarray,
                            kde_density: np.ndarray,
                            cpu_num: int = 1) -> pd.DataFrame:
-    """Применить коррекцию mz для пиков"""
+    """Correct the m/z values of the peaks using a KDE density.
+
+    Detects peaks in the combined kernel density estimate with
+    :func:`mspeaks_KD` and reassigns every peak of *peaklist* to the centre
+    of the KDE peak whose ``[left, right]`` window contains it. The work is
+    parallelised across the sorted unique m/z values.
+
+    Parameters
+    ----------
+    peaklist : pd.DataFrame
+        Peak table that must contain an ``mz`` column.
+    kde_mz : np.ndarray
+        The m/z grid of the combined density.
+    kde_density : np.ndarray
+        The density values aligned with ``kde_mz``.
+    cpu_num : int, optional
+        Number of processes used for the correction. Default ``1``.
+
+    Returns
+    -------
+    pd.DataFrame
+        A new peak table with the corrected ``mz`` values (and a ``Density``
+        column when the KDE data include density values).
+    """
     Xp_data = mspeaks_KD(kde_mz,kde_density)
     Xp = Xp_data[0]
     Xl = Xp_data[1]
@@ -527,16 +612,31 @@ def apply_kde_mzcorrection(peaklist: pd.DataFrame,
     return grftable
 
 def _consesusing_peaks(peaklists: pd.DataFrame):
-    """Удалить дублирующиеся пики после корректировки mz 
-    с помощью плотности вероятности соследующими правилами:
-    SNR - максимальное
-    Intensity - максимальное
-    Area - сумма
-    PextL - минимальное
-    PextR - максимальное
-    FWHML - минимальное
-    FWHMR - максимальное
-    Остальные столбцы - первый встречающийся"""
+    """Merge duplicated peaks into single consensus peaks after m/z correction.
+
+    Groups rows by their corrected ``mz`` value (per sample/ROI and spectrum)
+    and aggregates the peak properties according to the following rules:
+
+    * ``SNR`` — keep the maximum value.
+    * ``Intensity`` — keep the maximum value.
+    * ``Area`` — keep the sum.
+    * ``PextL`` — keep the minimum value.
+    * ``PextR`` — keep the maximum value.
+    * ``FWHML`` — keep the minimum value.
+    * ``FWHMR`` — keep the maximum value.
+    * All other columns — keep the first encountered value.
+
+    Parameters
+    ----------
+    peaklists : pd.DataFrame
+        Peak table with an ``mz`` column and, typically, a (sample, roi)
+        index.
+
+    Returns
+    -------
+    pd.DataFrame
+        A new table with the duplicated peaks merged into consensus peaks.
+    """
 
     column_headers = peaklists.columns
     preset_rules = {
@@ -550,7 +650,7 @@ def _consesusing_peaks(peaklists: pd.DataFrame):
     for col in oth_cols:
         dict4drop[col] = 'first'
     
-    # Если у индекса есть имя (MultiIndex или именованный SingleIndex), сохраняем его
+    # If the index has a name (MultiIndex or a named SingleIndex), keep it.
     base_index = [name for name in peaklists.index.names if name is not None]
     group_keys = base_index + ['spectra_ind', 'mz']
 
@@ -614,6 +714,21 @@ def _consensus_peaks_summary(feature_series: pd.Series) -> pd.DataFrame:
 
 def _nunique_summary(feature_series: pd.Series,
                      column_name: str | None = None) -> pd.Series:
+    """Summarise the number of unique values per level.
+
+    Parameters
+    ----------
+    feature_series : pd.Series
+        Series whose index is a MultiIndex.
+    column_name : str | None, default None
+        Name of the column to use for the index.
+
+    Returns
+    -------
+    pd.Series
+        A series with the number of unique values per level.
+        The series is indexed by the levels of the MultiIndex.
+    """
     levels = feature_series.index.names
     
     multi_level_nunique = feature_series.groupby(level=levels).nunique()
@@ -686,14 +801,27 @@ def _frequency_filtration(series: pd.Series,
     return peaklist_counts >= threshold
 
 def show_df(dataframe, title=""):
+    """Display a DataFrame, with an optional title, in any environment.
+
+    In a Jupyter notebook the table is rendered as HTML with a bold header.
+    In a plain terminal the DataFrame is printed as text, with the title
+    shown between ``===`` markers.
+
+    Parameters
+    ----------
+    dataframe : pd.DataFrame
+        The table to display.
+    title : str, optional
+        An optional heading to show above the table. Default ``""``.
+    """
     try:
         from IPython.display import HTML
-        # В Jupyter выводим красивый жирный заголовок HTML и саму таблицу
+        # In Jupyter render a bold HTML title together with the table.
         if title:
             display(HTML(f"<h3>{title}</h3>"))
         display(dataframe)
     except (ImportError, NameError):
-        # В обычном терминале выводим текст и dataframe
+        # In a plain terminal print the title as text and the DataFrame.
         if title:
             print(f"=== {title} ===")
         print(dataframe)

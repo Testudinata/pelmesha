@@ -200,7 +200,7 @@ class Aligner:
 
     @property
     def grid_steps(self):
-        """Total number of iterations - increase to improve accuracy."""
+        """Number of steps used in the multi-resolution grid search."""
         return self._grid_steps
 
     @grid_steps.setter
@@ -211,7 +211,7 @@ class Aligner:
 
     @property
     def shift_range(self):
-        """Total number of iterations - increase to improve accuracy."""
+        """Maximum allowed shift values as a ``(min, max)`` pair."""
         return self._shift_range
 
     @shift_range.setter
@@ -226,7 +226,7 @@ class Aligner:
 
     @property
     def weights(self):
-        """Total number of iterations - increase to improve accuracy."""
+        """Weights associated with each reference peak."""
         return self._weights
 
     @weights.setter

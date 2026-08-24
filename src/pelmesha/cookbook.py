@@ -23,7 +23,7 @@ from typing import Any, Callable
 import numpy as np
 import yaml
 import importlib
-from pybaselines import Baseline #Необходимо для set_method PipelineConfigurator
+from pybaselines import Baseline  # Required by PipelineConfigurator.set_method.
 from pelmesha.filling import DataSource
 from pelmesha.dough import SliceIndexator, Indexator
 from pelmesha.kneading import preprocess_configuration_base, process_spectra_base, peakpicking_base
@@ -110,7 +110,8 @@ def _inspect_defaults(
         except (ValueError, TypeError):
             continue
 
-        # Получаем дефолтные параметры методов класса, функции и параметры инициализации класса
+        # Get the default parameters of class methods, plain functions, and
+        # the class-initialisation parameters.
         if hasattr(func, "__self__"): # Bound methods
             cls = func.__self__.__class__
             cls_name = cls.__name__
@@ -121,7 +122,7 @@ def _inspect_defaults(
             method = methods_defaults[cls_name][storage_key]
             method["cls_init_params"] = {}
 
-            for param in inspect.signature(cls).parameters.values(): # Получаем параметры инициализации класса
+            for param in inspect.signature(cls).parameters.values():  # Get the class initialisation parameters.
                 if (param.default is not inspect.Parameter.empty
                         and param.name not in explicit_params):
                     method["cls_init_params"][param.name] = param.default
@@ -288,6 +289,9 @@ yaml.add_constructor("!obj", _yaml_to_callable, Loader=yaml.Loader)
 
 
 class Configs():
+    """
+    Base configuration class for managing pipeline parameters.
+    """
     def __init__(self,
                  configs_source: str | dict | None = None,
                  **kwargs):
@@ -1511,7 +1515,12 @@ class Configs():
                 func_bucket.update(params)
 
 class PipelineConfigurator(Configs):
-    # TODO Написать про кастомные функции «Загружайте конфигурационные файлы и кастомные функции только из доверенных источников, в коде есть слабости».
+    """
+    A class that builds pipeline configurations based on the provided functions for the Configs class.
+    """
+    # TODO: document custom functions. Note that config files and custom
+    # functions should only be loaded from trusted sources — the code has
+    # known weaknesses here.
     def __init__(self,
                 configs_source: str | dict | None = None,
                 preprocess_function: Callable = preprocess_configuration_base,
@@ -2526,22 +2535,27 @@ class PipelineConfigurator(Configs):
 
 class KDEConfigs(BaseModel):
     """
-    WIP
-    Планы на класс:
-    1) Не конфигс как для пайплайна: здесь функция всего только одна для коррекции - такую сложность не делаем
-    2) Валидация конфигов для KDE
-    3) Методы загрузки/сохранения
-    4) Создание дефолтных конфигов простой инициацией
-    5) Быстрой настройки (работает скорее как dict)
+    Pydantic configuration for KDE-based m/z peak correction.
 
-    Pydantic config for KDE-based m/z peak correction (Pgrouping_KD).
-`
-    Designed to be:
+    Unlike the pipeline configuration system, this class configures only the
+    single KDE-correction step, so it stays lightweight. It validates the
+    parameters via Pydantic and groups them into logical blocks:
+
+    * **Bandwidth** — ``KD_bandwidth`` (selection method or fixed value) and
+      ``bwc`` (a multiplier applied to the selected/computed bandwidth).
+    * **KDE algorithm** — ``KD_kernel`` (kernel name) and ``KDE_algo``
+      (``'fft'`` or ``'tree'``).
+    * **m/z splitting** — ``split_mz_min`` (minimum gap between segments) and
+      ``split_peaks_min`` (minimum number of peaks per segment).
+    * **m/z scale** — ``account_mzscale``, which clamps the bandwidth to the
+      local m/z discretisation step.
+
+    The config is designed to be:
     - Easy to instantiate with defaults: ``KDEConfigs()``
-    - Easy to override: ``KDEConfigs(CountF=5)``
-    - Easy to unpack into a function: ``func(**cfg.to_kwargs())``
-    - Easy to save/load: ``cfg.save_yaml("kde.yaml")``
-    - Easy to update from a dict: ``cfg.update(CountF=5)``
+    - Easy to override: ``KDEConfigs(bwc=2.0)``
+    - Easy to unpack into a function: ``func(**cfg.to_dict)``
+    - Easy to save/load: ``cfg.save_yaml("kde.yaml")`` / ``KDEConfigs.load_yaml``
+    - Easy to update like a dict: ``cfg.update(bwc=2.0)``
     """
      # --- Bandwidth ---
     KD_bandwidth: str | float = Field("fwhm",
@@ -2563,21 +2577,6 @@ class KDEConfigs(BaseModel):
         "Options: 'FFT', 'Tree'."
     )
 
-    # # --- Peak filtering ---
-    # CountF: int = Field(
-    #     10, ge=0,
-    #     description="Minimum number of occurrences for a peak to be kept."
-    # )
-    # dupl_drop: bool = Field(
-    #     True,
-    #     description="Drop duplicate peaks from the result."
-    # )
-    # min_resolution_ppm: float = Field(
-    #     10.0, ge=0,
-    #     description="Minimum instrument resolution in ppm. "
-    #                 "Controls minimum bandwidth for 'mz_discret' method."
-    # )
-
    # --- m/z splitting ---
     split_mz_min: float = Field(
         10.0, ge=0.0,
@@ -2593,12 +2592,6 @@ class KDEConfigs(BaseModel):
         True,
         description="Account for m/z discretisation when computing bandwidth."
     )
-
-# # --- Extra kwargs for mspeaks_KD ---
-#     params2mspeaks_KD: dict[str, Any] = Field(
-#         default_factory=dict,
-#         description="Additional keyword arguments passed to mspeaks_KD."
-#     )
 
     @field_validator("KD_bandwidth")
     @classmethod
@@ -2685,7 +2678,10 @@ class KDEConfigs(BaseModel):
         """
         for key, value in overrides.items():
             setattr(self, key, value)
-
+    def __setitem__(self, key: str | tuple[str, ...], value: Any):
+        """Set a config field in-place (dict-like convenience)."""
+        setattr(self, key, value)
+        
     def with_overrides(self, **overrides: Any) -> "KDEConfigs":
         """
         Return a **copy** with the given fields overridden (immutable-style).

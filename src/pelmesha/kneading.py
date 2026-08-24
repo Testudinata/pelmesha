@@ -16,15 +16,34 @@ if TYPE_CHECKING:
     from pelmesha import PipelineConfigurator, DataSource
     from pelmesha.cookbook import Configs
 
-FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2))  # Фактор пересчета FWHM в sigma
+FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2))  # Conversion factor from FWHM to sigma.
 ###########################################
 #   Base pipeline functions               #
 ###########################################
+
 def preprocess_configuration_base(
     datasource: "DataSource",
     roi,
     rmeta,
     configs: "Configs | PipelineConfigurator"):
+    """Preprocess the configuration for a given ROI.
+
+    Parameters
+    ----------
+    datasource : DataSource
+        The data source.
+    roi : int
+        The ROI index.
+    rmeta : dict
+        The ROI metadata.
+    configs : Configs or PipelineConfigurator
+        Configuration object holding the per-step parameters.
+
+    Returns
+    -------
+    tuple of np.ndarray, list, dict
+        The resampled m/z scale, headers list, and internal configuration.
+    """
     
     preprocess_configs = configs.get_step_configs("preprocess")
     mz_range = datasource.roi_metadata.loc[roi,'mz_range']
@@ -70,10 +89,27 @@ def process_spectra_base(
     intensity: np.ndarray,
     configs: "Configs | PipelineConfigurator",
     **internal_configs) -> np.ndarray:
-    """Полный цикл предобработки масс-спектра:
-    сглаживание → коррекция базовой линии → ресемпл →  выравнивание.
-    mz - всегда вектор
-    intensity - Если данные континуальны - матрица, если нет - вектор
+    """Run the full pre-processing cycle of a mass spectrum.
+
+    The pipeline order is: smoothing → baseline correction → resampling →
+    alignment.
+
+    Parameters
+    ----------
+    mz : np.ndarray
+        The m/z scale. Always a 1-D vector.
+    intensity : np.ndarray
+        The intensities. A matrix for continuous data and a vector for
+        discontinuous data.
+    configs : Configs or PipelineConfigurator
+        Configuration object holding the per-step parameters.
+    **internal_configs
+        Internal per-step parameters (resampled m/z, baseliner, etc.).
+
+    Returns
+    -------
+    tuple of np.ndarray
+        The processed ``(mz, intensity)`` pair.
     """
     resampled_mz = internal_configs.get('resampled_mz', None)
     baseline_algo = internal_configs.get('Baseliner', None)
@@ -118,9 +154,27 @@ def peakpicking_base(
         idx: int,
         configs: "Configs | PipelineConfigurator",
         **internal_configs) -> np.ndarray:
+    """Base peak picking function used as adapter for the peakpicker function.
+
+    Parameters
+    ----------
+    mz : np.ndarray
+        The m/z values of the spectrum.
+    intensity : np.ndarray
+        The intensity values of the spectrum.
+    idx : int
+        The index of the spectrum in the data set.
+    configs : Configs | PipelineConfigurator
+        The configuration dictionary.
+    
+    Returns
+    -------
+    np.ndarray
+        The peak picking result.
+    """
 
     mzsize = mz.size
-    configs = configs['peakpicker'] #Получаем непосредственно словарь конфигов для функции peakpicker
+    configs = configs['peakpicker']  # Directly get the config dict for the peakpicker function.
     return peakpicker(mz, intensity, mzsize, idx, **configs)
 
 
@@ -228,12 +282,40 @@ def msalign(
 
 msalign.__doc__ = Aligner.__doc__
 
-def resample_mz_scale(mz_min: float, 
+def resample_mz_scale(mz_min: float,
                       mz_max: float,
                       resample_mz_step: float = None,
                       resample_num_points: int = None):
+    """Build a uniform m/z scale between ``mz_min`` and ``mz_max``.
+
+    Exactly one of ``resample_mz_step`` or ``resample_num_points`` must be
+    provided to define the resulting grid.
+
+    Parameters
+    ----------
+    mz_min : float
+        Lower bound of the m/z range.
+    mz_max : float
+        Upper bound of the m/z range.
+    resample_mz_step : float, optional
+        Step size between consecutive m/z points. When given,
+        ``resample_num_points`` is computed from it. Default ``None``.
+    resample_num_points : int, optional
+        Total number of points in the resulting scale. Default ``None``.
+
+    Returns
+    -------
+    np.ndarray or None
+        A uniformly spaced m/z scale, or ``None`` if neither parameter is
+        provided.
+
+    Raises
+    ------
+    ValueError
+        If both ``resample_mz_step`` and ``resample_num_points`` are given.
+    """
     if resample_mz_step is not None and resample_num_points is not None:
-        raise ValueError("Укажите что-то одно: либо resample_mz_step, либо resample_num_points.")
+        raise ValueError("Provide exactly one of 'resample_mz_step' or 'resample_num_points'.")
     if resample_mz_step is not None:
         resample_num_points = int(np.round((mz_max - mz_min)/resample_mz_step)) + 1
     if resample_num_points is not None:
@@ -312,38 +394,85 @@ def peakpicker(mz,
               headers = ["spectra_ind", "mz", "Intensity", "Area", "SNR", "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"]
               ) -> np.ndarray:
     """
-    Общее описание
-    ----
-    Функция для получения характеристик пиков спектра. Если в каком-то параметре стоит `None`, то функция не будет производить фильтрацию или расчёты и не будет добавлять свойство пиков на выходе, что может экономить время и память.
-    :param mz: mz
-    :param intens: Intensity
-    :param valley_dots: numpy array того какие точки спектра явлюятся наклонными. На входе подаётся как `np.where(np.diff(intens) != 0)[0]` или как строка этого результата, если intens матрица. Этот параметр нужен скорее для универсальности функции и оптимизации кол-ва расчётов/обращений. 
-    :param oversegmentationfilter: фильтр для близких друг к другу пиков. Default `None`
-    :param fwhhfilter: Фильтр пиков по ширине на полувысоте пиков больше указанного значения. Default is `None`
-    :param heightfilter: Фильтр пиков по абсолютному значению интенсивности ниже указанного значения. Default is `None`
-    :param peaklocation: Параметр фильтрации пиков с oversegmentationfilter. Default is `1`
-    :param rel_heightfilter: Фильтр пиков по относительному значению интенсивности. Default is `None`
-    :param SNR_threshold: Фильтр пиков по их SNR. Default is `None`
-    :param noise_func: функция оценки шума. Пока только `std` и `mad` и для ускорения рассчётов, подсчёт идёт сразу по всему спектру в несколько итераций, где после каждой итерации определяются какие точки относятся к шуму, а какие к сигналу. Default is `np.std`
-    :param noise_est_iterations: количество итераций определения шума. Оптимально более 3 итераций. Default is `3`
-    
-    :type mz: `np.array`
-    :type intens: `np.array`
-    :type valley_dots: `np.array`
-    :type oversegmentationfilter: `float`
-    :type fwhhfilter: `float`
-    :type heightfilter: `float`
-    :type peaklocation: `float` and =<1
-    :type rel_heightfilter: `float`
-    :type SNR_threshold: `float`
-    :type noise_func: function
-    :type noise_est_iterations: `int`
+    Detect peaks in a mass spectrum and compute their characteristics.
 
-    :return: peaklist with peak properties
-    :rtype: `np.array`
+    The function locates every peak in the spectrum and characterises it,
+    producing a feature-rich peak list. Beyond the peak position and apex
+    intensity, it computes and stores the following properties for each
+    detected peak:
+
+    * **m/z and intensity** of the peak apex.
+    * **Peak area** — computed by trapezoidal integration between the left
+      and right peak-base boundaries.
+    * **FWHM points** (``FWHML`` / ``FWHMR``) — the left and right m/z
+      positions at which the peak intensity drops to half its maximum.
+    * **Peak base points** (``PextL`` / ``PextR``) — the m/z of the valleys
+      (local minima) delimiting the peak on both sides.
+    * **Signal-to-noise ratio** (``SNR``) and the estimated **noise level**
+      together with the **mean noise** intensity, when an ``SNR_threshold``
+      is supplied. Note: The current SNR filtering implementation only 
+      supports the fast mode. It estimates noise across the entire mass 
+      spectrum, excluding only those regions already identified as peaks.
+
+    All of these characteristics can be refined or filtered with the
+    corresponding parameters. If a filtering or calculation parameter is
+    ``None``, the corresponding step is skipped and the related peak
+    property is not added to the output, which saves time and memory.
+
+    Parameters
+    ----------
+    mz : np.ndarray
+        The m/z scale.
+    intens : np.ndarray
+        The intensity values.
+    xsize : int
+        Number of data points of the spectrum.
+    spectra_ind : int
+        Index of the current spectrum, written into the output peak list.
+    fwhhfilter : float or tuple or None, optional
+        Peak-width filter based on the full width at half height (FWHH).
+        A scalar keeps peaks wider than it; a ``(min, max)`` tuple keeps
+        peaks within that range. Default ``None``.
+    oversegmentationfilter : float or str or None, optional
+        Filter for peaks that are too close to each other (merges
+        oversegmented peaks). If a string is given, the median FWHH is used
+        as the threshold. Default ``None``.
+    heightfilter : float or None, optional
+        Removes peaks whose absolute apex intensity is below this value.
+        Default ``None``.
+    rel_heightfilter : float or None, optional
+        Removes peaks whose apex intensity relative to the spectrum maximum
+        is below this value. Default ``None``.
+    peaklocation : float, optional
+        Fraction of the peak height used to compute a barycentric peak
+        centre and the thresholds for the oversegmentation filter.
+        Default ``1``.
+    noise_func : callable, optional
+        Function used to estimate the noise level (e.g. ``np.std``). The
+        whole spectrum is processed over several iterations; after each
+        iteration the noise vs signal points are re-classified.
+        Default ``np.std``.
+    noise_est_iterations : int, optional
+        Number of iterations used to estimate the noise. More than three
+        iterations is recommended. Default ``3``.
+    SNR_threshold : float or None, optional
+        Removes peaks whose signal-to-noise ratio is below this threshold.
+        Default ``3``.
+    Calc_peak_area : bool, optional
+        Whether to compute the peak area. Default ``True``.
+    headers : list of str, optional
+        Column headers used to order the returned peak properties.
+
+    Returns
+    -------
+    np.ndarray
+        The peak list, one row per detected peak, with the requested peak
+        properties as columns (ordered according to *headers*).
     """
-    #TODO: сделать гибридфильтра по SNR быстрого и медленного варианта: последний или послдние два цикла - шум определяется по окну вокруг пика, 
-    # возможно окно - это std точек справа и слева, которые чисто шумовые (точки пика исключены), а кол-во точек и есть размер окна (не по m/z). Постараться сделать с numba
+    # TODO: implement a hybrid fast/slow SNR filter. In the last one or two cycles,
+    # estimate noise within a window around each peak, where the window is the std
+    # of purely-noise points left and right of the peak (peak points excluded) and
+    # its size is measured in points (not m/z). Consider using numba.
     props={}
     # Robust valley finding
     valley_dots = np.where(np.diff(intens) !=0)[0] 
@@ -385,7 +514,7 @@ def peakpicker(mz,
         noise_points = np.array([True]*xsize) # Zero iteration
 
         for it in range(noise_est_iterations):
-            for idx in np.where(((val_max-np.mean(intens[noise_points]))/noise_func(intens[noise_points])>=SNR_threshold))[0]: #По сути тут расчёт z-score в чистом виде TODO: оценить скорость рассчётов моего варианта и scipy.stats.zscore
+            for idx in np.where(((val_max-np.mean(intens[noise_points]))/noise_func(intens[noise_points])>=SNR_threshold))[0]: # Essentially a plain z-score. TODO: compare the speed of this implementation with scipy.stats.zscore.
                 sl = slice(left_min[idx],right_min[idx]+1)
                 noise_points[sl] = False
         
@@ -492,13 +621,35 @@ def peakpicker(mz,
     return np.column_stack(([spectra_ind]*signal_num,pkmz, val_max, *(props[key] for key in headers[3:])))
 
 
-def modify_raw_spectrum(mz, 
-                        ints, 
+def modify_raw_spectrum(mz,
+                        ints,
                         mz_discret_coeffs,
                         zero_points_to_peaks_ext = False,
                         mz_segments_to_zero = None):
-    """
-    Modify raw spectrum data. Reduce to zero segemnts and add zero points to peaks if their peaks are cropped (especially if peaks consists from 1-2 points)
+    """Modify raw spectrum data before further processing.
+
+    Optionally zeroes out the signal in specified m/z segments and/or adds
+    zero-value points around peak edges when peaks are cropped (e.g. when a
+    peak consists of only one or two points).
+
+    Parameters
+    ----------
+    mz : np.ndarray
+        The m/z scale.
+    ints : np.ndarray
+        The intensity values.
+    mz_discret_coeffs : array_like
+        Polynomial coefficients describing the m/z discretisation step.
+    zero_points_to_peaks_ext : bool, optional
+        If ``True``, add zero points to peak extensions. Default ``False``.
+    mz_segments_to_zero : list of tuple, optional
+        A list of ``(mz_min, mz_max)`` segments whose signal is set to zero.
+        Default ``None``.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        The modified ``(mz, ints)`` pair.
     """
     if mz_segments_to_zero and mz_discret_coeffs is not None:
         mz, ints = reduce_signal_to_zero(mz, ints, mz_segments_to_zero)
@@ -562,10 +713,57 @@ def _compute_KDE(peaklist: pd.DataFrame,
                 split_mz_min: float = 10.0,
                 split_peaks_min: int = 25,
                 account_mzscale: bool = True):
-    
+    """Compute a kernel density estimate over the peaks of a peak list.
+
+    The peak list is first split into segments separated by large m/z gaps.
+    For every segment, the probability density of the peaks is estimated
+    with a KDE (FFT or tree based) using a bandwidth selected per peak
+    (e.g. derived from its FWHM). When ``account_mzscale`` is enabled, the
+    bandwidth is clamped so that it never falls below the local m/z
+    discretisation step (i.e. the smallest meaningful separation between two
+    neighbouring m/z points is respected). The per-segment densities are
+    then merged into a single m/z vs density grid.
+
+    Parameters
+    ----------
+    peaklist : pd.DataFrame
+        Peak list that must contain ``mz`` and ``FWHML`` / ``FWHMR`` columns.
+    discret_coeffs : np.ndarray
+        Polynomial coefficients describing the m/z discretisation step.
+    cpu_num : int, optional
+        Number of processes used for the per-segment density estimation.
+        Default ``1``.
+    KD_bandwidth : str or float, optional
+        Bandwidth selection method (``'fwhm'``, ``'mz_discret'``) or a fixed
+        float value. Default ``'fwhm'``.
+    bwc : float, optional
+        Multiplier applied to the selected/computed bandwidth.
+        Default ``1.0``.
+    KD_kernel : str, optional
+        KDE kernel name. Default ``'gaussian'``.
+    KDE_algo : str or None, optional
+        KDE algorithm: ``'fft'`` or ``'tree'``. If ``None``, ``'tree'`` is
+        used. Default ``None``.
+    split_mz_min : float, optional
+        Minimum m/z gap used to split peaks into separate segments.
+        Default ``10.0``.
+    split_peaks_min : int, optional
+        Minimum number of peaks required per segment. Default ``25``.
+    account_mzscale : bool, optional
+        Whether to account for the m/z discretisation when computing the
+        bandwidth. Default ``True``.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        ``(X_plot, Y_plot)`` — the common m/z grid and the corresponding
+        summed peak-density values.
+    """
     FWHM2sigma = FWHM_TO_SIGMA_FACTOR/5
     mz_model = np.poly1d(discret_coeffs)
-    
+    if peaklist.empty:
+        warnings.warn("Peak list is empty, returning empty arrays for peaks PDF")
+        return np.array([]), np.array([])
     if KD_bandwidth == "fwhm":
         peaklist.loc[:,'KD_bandwidth'] = (peaklist['FWHMR'] - peaklist['FWHML'])*FWHM2sigma*bwc
         if account_mzscale:
@@ -577,7 +775,6 @@ def _compute_KDE(peaklist: pd.DataFrame,
         peaklist.loc[:,'KD_bandwidth'] = mz_model(peaklist['mz'])*bwc
     else:
         peaklist.loc[:,'KD_bandwidth'] = KD_bandwidth*bwc
-
     KD_data = split_pdtable_by_peaks_gap(peaklist, split_mz_min = split_mz_min, split_peaks_min = split_peaks_min)
     n_segments = len(KD_data) 
     assert peaklist['mz'].count() == sum( len(t[0]) for t in KD_data)
@@ -606,7 +803,30 @@ def _compute_KDE(peaklist: pd.DataFrame,
     Y_plot = Y_plot[idx_sort]
     return X_plot, Y_plot
 
-def segment_probability_distribution(KDE_func, KD_kernel, mz_discret_coeffs, KD_data): # Пока медленно
+def segment_probability_distribution(KDE_func, KD_kernel, mz_discret_coeffs, KD_data):
+    """Estimate the probability distribution of the peaks of one segment.
+
+    Builds a uniform m/z grid around the segment (padded by six bandwidths
+    on each side), then evaluates the KDE of the segment's peaks on it.
+
+    Parameters
+    ----------
+    KDE_func : type
+        KDE class to use (``FFTKDE`` or ``TreeKDE`` from KDEpy).
+    KD_kernel : str
+        KDE kernel name.
+    mz_discret_coeffs : array_like
+        Polynomial coefficients describing the m/z discretisation step.
+    KD_data : tuple of np.ndarray
+        ``(mz, KD_bandwidth)`` — the m/z values and per-peak bandwidths of
+        the segment.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        ``(X_plot_segment, Y_plot_segment)`` — the m/z grid and the
+        corresponding estimated density values.
+    """
     mz, KD_bandwidth = KD_data
     segment_min = mz[0] - KD_bandwidth[0]*6
     segment_max = mz[-1] + KD_bandwidth[-1]*6
@@ -616,25 +836,3 @@ def segment_probability_distribution(KDE_func, KD_kernel, mz_discret_coeffs, KD_
     X_plot_segment = _set_KDE_X_plot(segment_min, segment_max, min_dist = min_dist)
     Y_plot_segment = KDE_func(kernel = KD_kernel, bw = KD_bandwidth).fit(mz)(X_plot_segment)*len(mz)
     return X_plot_segment, Y_plot_segment
-
-def _peaklist_stats(peaklist: pd.DataFrame,
-                         sample: str,
-                         roi: str,
-                         draw_results: bool = True):
-    temp_pivo = pd.pivot_table(peaklist,index=["spectra_ind","Peak"],values="mz",aggfunc=["count"])
-    ms_num = peaklist.loc[:,'spectra_ind'].nunique()
-
-    temp_pivo = temp_pivo.iloc[(temp_pivo["count"]>1)["mz"].values]
-
-    if not temp_pivo.empty:
-        duplicated_num=len(temp_pivo.index.value(level="Peak"))
-        num_of_uniq_spectras = len(temp_pivo.droplevel('Peak').index.unique()) #Определяем кол-во спектров, где обнаружены дубликаты чисто для справки
-        textw=f"At the specified peak grouping settings, {temp_pivo['count']['mz'].sum()-temp_pivo.shape[0]} duplicates were identified, of which {duplicated_num} were unique peaks in {num_of_uniq_spectras} of mass spectra ({num_of_uniq_spectras*100/(ms_num):.2f}% of the total spectra)."
-        warnings.warn(textw)
-        if temp_pivo['count']["mz"].value_counts().index.max() > 2 and draw_results:
-            plt.figure(figsize=(3, 2))
-            plt.bar(temp_pivo['count']["mz"].value_counts().index.astype(str),temp_pivo['count']["mz"].value_counts().astype(int))
-            plt.xlabel('Quantity')
-            plt.ylabel('Num of duplicates')
-            plt.gca().set_title(f"Peaks occurence in one group in mass spectrum. Sample: {sample} {roi}")        
-            plt.grid(visible=True,which="both",axis="y")

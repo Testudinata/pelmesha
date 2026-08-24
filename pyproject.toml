@@ -6,9 +6,16 @@ authors = [
 ]
 description = "A package for proccesing and aligning peaklist Mass-spectrometry imaging data from .imzml files"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
+
+keywords = ["mass spectrometry", "imaging", "data processing", "alignment", "feature extraction", "pelmeni", "LC-MS"]
+
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
@@ -29,6 +36,8 @@ dependencies = [
   "pyyaml",
   "pyarrow>=17.0.0",
   "xarray>=2023.1.0",
+  "netcdf4>=1.7.2",
+  "h5netcdf>=1.1.0",
 ]
 
 license = "Apache-2.0"

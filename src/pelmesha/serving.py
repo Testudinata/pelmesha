@@ -22,37 +22,48 @@ from urllib.parse import quote
 import sys
 
 class DataSet:
-    #New TODO:
-    # 1. Добавить вместе с отображением ds, также какие-то данные о референсном/рефернсных датасетах.
-    # 2. Добавить возможность разом удалить все уже обарботанные данные датасетов, добавленных в экземпляр DataSet. Обязательно наличие yes/no подтверждения (лучший вариант, не требующих новых зависимостей)
-    #New TODO:
-    # 1. Обдумать и добавить отображение для результата Коррекции m/z в сочетании с какими датасетами он формировался. Вероятно сделать возможность загрузки родных
-    # паркет данных с возможностью полностью восстановить, что же тут происходило
+    # TODO:
+    # 1. Add a way to delete all already-processed data of the datasets added
+    #    to a DataSet instance at once, with a yes/no confirmation prompt
+    #    (ideally without requiring new dependencies).
+    # 2. Consider showing, for an m/z-correction result, which datasets were
+    #    used to build it, likely by loading the native Parquet data so the
+    #    processing that happened can be fully reconstructed.
  
     """
     Central class for managing multiple mass spectrometry data sources.
 
-    Combines datasets from multiple files into unified tables with metadata,
-    coordinates, and processing pipeline support. Handles config management,
-    duplicate detection, reference peaks, and batch processing.
+    Each registered source is wrapped in a :class:`PreparedDataSource` and
+    stored in ``self.sources`` keyed by its sample name. The class provides
+    source discovery and addition, per-source processing and peak picking,
+    KDE-based peak-density estimation, aggregation of several sources into a
+    unified feature matrix, reference-peak handling, and coordinate
+    collection.
 
-    Основные возможности:
-    1. Объединяет датасеты для группировки фич в одну таблицу, с сохранением всех метаданных и ссылок на них.
-    2. При этом освобождает RAM от индивидуальных подгрузок.
-    3. Ищет источники по списку путей, если найденный файл не имеет обработанного рядом результата - просит конфиг для обработки. Если есть обработанный, то сравнивает конфиги, если он передан в аргумент.
-       И если они не совпадают производит новую обработку по новому конфигу.
-    4. Должен исключать конфликты в названиях sample.
-    5. По "призыву" функции по мердженгу: создаёт и мерджит в единый DF все датасеты внутри.
-    6. На выходе функции по смёрдживанию датасетов (пункт 5) не только основная датасет таблица, но и метадаты с координатами.
+    Key capabilities:
+    1. Discovers and registers data sources from a list of paths or
+       directories.
+    2. Prevents sample-name conflicts and duplicate file additions.
+    3. Manages processing and KDE configurations for every source, saving
+       them next to each source file.
+    4. Runs the processing/peak-picking pipeline for selected samples and
+       ROIs.
+    5. Aggregates the peak lists of all requested samples/ROIs into a single
+       feature matrix, with optional m/z correction, filtering, pivoting,
+       and coordinate merging.
+    6. Supports generating a reference peak list from a reference source and
+       using it to align the remaining samples.
 
-    :param sources: Optional initial sources. Can be:
-        - A list of file paths (configs loaded from disk if available)
-        - A dict ``{path: config_or_None}`` where config is a  or path to a YAML file
-        - ``None`` (empty DataSet, add sources later)
-    :param RamGb_limit_usage: RAM limit in GB for batch processing. Default ``2``.
-
-    :type sources: list or dict or None
-    :type RamGb_limit_usage: int or float
+    Parameters
+    ----------
+    sources : list, dict, or None, optional
+        Optional initial sources. Can be:
+        - A list of file paths (configs are loaded from disk if available).
+        - A dict ``{path: config_or_None}`` where ``config`` is a config or
+          a path to a YAML file.
+        - ``None`` (empty DataSet; add sources later).
+    RamGb_limit_usage : int or float, optional
+        RAM limit in GB used for batch processing. Default ``2``.
     """
     _EXCLUDED_EXTENSIONS = {'ingredients.hdf5', 'specdata.hdf5', 'peaklists.hdf5',"peaks_density.hdf5"}
 
@@ -274,11 +285,18 @@ class DataSet:
                 cpu_num,
                 **ref_source.roi_kde_configs[r].to_dict,
             )
+            if X_plot.size == 0:
+                continue
             # Normalize the probability distribution.
             Y_plot = normalize(Y_plot.reshape(1, -1), norm="l1").squeeze()
             kde_mz_list.append(X_plot)
             kde_density_list.append(Y_plot)
-
+        if len(kde_mz_list) == 0:
+            warnings.warn(
+                f"No peaks PDF produced for sample '{sample}'."
+                f"Reference peaklist are not generated"
+            )
+            return
         kde_mz, kde_density = _summerize_kde_mz(kde_mz_list, kde_density_list)
 
         if len(sample_peaks) > 1:
@@ -478,7 +496,7 @@ class DataSet:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Source path does not exist: {path}")
         sample_name = os.path.splitext(os.path.basename(path))[0]
-        folder_name = os.path.basename(os.path.dirname(path))
+        folder_name = os.path.basename(os.path.dirname(os.path.abspath(path)))
         if folder_name != sample_name:
             sample_name = folder_name + "_" + sample_name
 
@@ -823,6 +841,23 @@ class DataSet:
                                  samples: list[str],
                                  rois: str | list[str],
                                  sample_rois_map: dict[str, list[str]] | None = None) -> dict[str, list[str]]:
+        '''
+        Resolve sample_rois_map from samples and rois.
+        
+        Parameters
+        ----------
+        samples : list[str]
+            List of samples.
+        rois : str | list[str]
+            ROI or list of ROIs.
+        sample_rois_map : dict[str, list[str]]
+            Sample-ROI map.
+        
+        Returns
+        -------
+        dict[str, list[str]]
+            Sample-ROI map.
+        '''
         if isinstance(rois, str):
             rois = [rois]
         if sample_rois_map is None:
@@ -1191,8 +1226,8 @@ class DataSet:
 
         - Inline CSS for borders, padding, and a dark header.
         - Zebra-stripe alternating row colours.
-        - Monospace font for the numeric "кол-во спектров" column.
-        - Hyperlinks for the "Путь" and "Конфиги" columns.
+        - Monospace font for the numeric "Mass spectra number" column.
+        - Hyperlinks for the "Directory" and "Previous configs" columns.
 
         Returns
         -------
@@ -1394,7 +1429,7 @@ class Drawer():
 
         diap_raw = diapcalc(mz_raw, mz_range)
         plt.plot(mz_raw[diap_raw], intens_raw[diap_raw],alpha=0.75, label = f"Raw mass spectrum N{spectrum_idx}")
-        plt.legend()
+        # plt.legend()
         plt.xlim(mz_range)
         
     def _draw(self,
@@ -1647,7 +1682,7 @@ class Drawer():
             roi = self.prepdata.rois
         if isinstance(roi, str):
             roi = [roi]
-
+        sample_name = self.datasource.sample_name
         formatter = AbsoluteFormatter(useMathText=True)
         formatter.set_scientific(True)
         formatter.set_powerlimits((-3, 3))
@@ -1655,6 +1690,8 @@ class Drawer():
             with File(self.peaks_density_path, "r") as hdf5:
                 kde_mz = hdf5[r]["mz"][:]
                 kde_density = hdf5[r]["peaks_density"][:]
+                if kde_density.size == 0:
+                    continue
                 kde_density = normalize( kde_density.reshape(1, -1), norm='l1' ).squeeze()
             peaklists = self.datasource.peaklists(r)
             rand_num = np.random.randint(0,peaklists.shape[0])
@@ -1687,7 +1724,7 @@ class Drawer():
                 plt.plot(temp_query['uncor_mz'], [0]*temp_query.shape[0],'|', markersize=6,alpha=0.33, color = color)
             plt.xlabel('m/z')
             plt.ylabel("Probability Density")
-            plt.gca().set_title(f"Probability density by KDE around {peak_mz:.3f} m/z. Sample: {self.datasource.sample_name}. roi: {r}.")
+            plt.gca().set_title(f"Probability density by KDE around {peak_mz:.3f} m/z. Sample: {sample_name}. roi: {r}.")
             plt.minorticks_on()
             plt.grid(visible=True,which="both")
             axes_prob = plt.gca()
@@ -1697,7 +1734,7 @@ class Drawer():
             axes = plt.gca().twinx()
             legend1 = axes.legend(graphs, leg, loc = 'upper left',framealpha=0.95)
             axes.plot(*self.datasource.get_mean_spectrum(roi = r, mz_range = mz_borders), color="r",alpha=0.85)
-            leg_twin=[f'Mean spectrum']
+            leg_twin=[f'Mean spectrum. Sample: {sample_name}, ROI: {r}']
             axes.set_ylabel("Intensity")
             axes.add_artist(legend1)
             axes.legend(leg_twin, loc = 'upper right')
@@ -1705,6 +1742,7 @@ class Drawer():
             ylim_min, ylim_max = axes.get_ylim() 
             limit = max(abs(ylim_min), abs(ylim_max))
             axes.set_ylim( (-limit, limit) )
+            
             plt.show()
 
     @staticmethod
@@ -1730,14 +1768,14 @@ class Drawer():
             kde_borders_mask = (kde_mz >= draw_mz_borders[0]) & (kde_mz <= draw_mz_borders[1])
             local_kde_mz = kde_mz[kde_borders_mask]
             local_kde_density = kde_density[kde_borders_mask]
-        # Создаём объект рисунка
+        # Create the figure.
         if axes is None:    
             plt.figure(figsize=(25, 6), dpi=600)
             plt.xlim(draw_mz_borders)
         else:
             plt.sca(axes)
 
-        # Отрисуем график KDE
+        # Draw the KDE curve.
         kde_line, = plt.plot(local_kde_mz, local_kde_density*(-1 if flipped_kde_density else 1), color="k",alpha=0.85)
         graphs = [kde_line]
         leg = ["Probability density function"]
@@ -1748,15 +1786,16 @@ class Drawer():
             else:
                 filter_mz_mask = np.ones(len(feature_matrix['mz']), dtype=bool)
         
-        # Определим колонки с неоткорректированными пиками, которые содержат 'mz', но не равны ему
+        # Identify the columns holding the uncorrected peaks: those that
+        # contain 'mz' but are not the corrected 'mz' column itself.
         probably_uncor_cols = [col for col in feature_matrix.columns if 'mz' in col and col != 'mz']
         if len(probably_uncor_cols) > 0:
-            # Вытаскиваем первый столбец - как костыльная защита
+            # Use the first such column as a simple safeguard.
             uncor_col = probably_uncor_cols[0]
         # feature_matrix.loc[filter_mz_mask, ["mz",uncor_col]]
         
-        # Точки пиков на по шкале m/z  
-        uncor_legend, = plt.plot([], [], '|', markersize=6, alpha=0.55, color = 'grey') # пустой график для отображения общей легенды
+        # Markers for the peak positions on the m/z axis.
+        uncor_legend, = plt.plot([], [], '|', markersize=6, alpha=0.55, color = 'grey')  # Empty plot used only for the legend.
         graphs.append(uncor_legend)
         leg += [uncor_col] 
 
@@ -1807,7 +1846,13 @@ class Drawer():
                                     countf: int | None = None,
                                     duplicates_drop: bool = True,
                                     cpu_num: int = 1):
-        """Метод для постройки проверочного графика коррекции m/z пиков от одного случайного источника, после получении общей фиче-матрицы источников/сэмплов класса DataSet"""
+        """Build a verification plot of the m/z correction for one random source.
+
+        Uses a randomly chosen source and ROI from the dataset to visualise
+        the m/z correction applied during feature-matrix construction: the
+        KDE probability density, the corrected and original peak positions,
+        the excluded peaks, and the raw/processed mean spectrum.
+        """
         formatter = AbsoluteFormatter(useMathText=True)
         formatter.set_scientific(True)
         formatter.set_powerlimits((-3, 3))
@@ -1953,7 +1998,7 @@ class AbsoluteFormatter(ticker.ScalarFormatter):
 
         Called internally by matplotlib when configuring the formatter.
         """
-        # Этот метод вызывается внутренне для настройки формата
+        # This method is called internally to set up the format.
         super()._set_format()
         
     def __call__(self, x, pos=None):
@@ -1972,7 +2017,7 @@ class AbsoluteFormatter(ticker.ScalarFormatter):
         str
             Formatted string for the absolute value of *x*.
         """
-        # Главный метод: берем abs(x) и отдаем стандартному родителю
+        # Main method: take abs(x) and pass it to the standard parent.
         return super().__call__(abs(x), pos)
 
 class Pipeline:
@@ -1986,17 +2031,25 @@ class Pipeline:
     """
     def __init__(self,
                  prepdata: "PreparedDataSource"):
-        '''WIP
-        Unified interface for running MSI data processing.
+        """
+        Initialize a Pipeline for a prepared data source.
 
-        Pipeline is a thin orchestrator that accepts a PreparedDataSource 
-        and runs processing methods using the pipeline functions stored in the configs object.
+        Pipeline is a thin orchestrator that accepts a
+        :class:`PreparedDataSource` and runs the processing, peak-picking,
+        and KDE density-estimation steps using the per-ROI pipeline functions
+        stored in the configuration object.
 
         Parameters
         ----------
-        configs : PreparedDataSource
-            Configuration object with datasource and pipeline functions.
-        '''
+        prepdata : PreparedDataSource
+            The prepared data source with its datasource and pipeline
+            functions.
+
+        Raises
+        ------
+        ValueError
+            If *prepdata* is not a :class:`PreparedDataSource`.
+        """
         if isinstance(prepdata, PreparedDataSource):
             self.prepdata = prepdata
             self.roi_configs = prepdata.roi_configs
@@ -2015,24 +2068,33 @@ class Pipeline:
                 Ram_GB_limit: float = 2,
                 h5chunk_size_MB: int = 10,
                 dtypeconv: np.dtype | str | None = None):
-        '''
+        """
+        Process the spectra of every ROI and write them to an HDF5 file.
+
+        Streams the raw spectra through the processing pipeline and writes
+        the processed intensities into ``<sample>_processed_spectra.hdf5``,
+        one dataset per ROI. Continuous data are written as a common m/z
+        scale plus an intensity matrix; discontinuous data require resampling
+        before they can be written and are skipped with a warning. Finally,
+        the per-ROI configs are saved to disk.
+
         Parameters
         ----------
         free_cpus : int, optional
             Number of CPUs to leave free (default 1).
         draw : bool, optional
-            Whether to draw processing results (default False).
+            Whether to draw the processed spectra (default False).
         draw_mz_range : tuple[float, float] | None, optional
-            m/z range for drawing (default None).
+            m/z range used for drawing (default None).
         draw_spectrum_idx : int | None, optional
-            Spectrum index for drawing (default None).
+            Spectrum index used for drawing (default None).
         Ram_GB_limit : float, optional
-            RAM limit in GB (default 2).
+            RAM limit in GB for batch processing (default 2).
         h5chunk_size_MB : int, optional
             HDF5 chunk size in MB (default 10).
         dtypeconv : np.dtype | str | None, optional
             Data type conversion (default None).
-        '''
+        """
         datasource = self._datasource
         
         hdf5_save_path = self._default_save_path("processed_spectra.hdf5")
@@ -2273,7 +2335,7 @@ class Pipeline:
             If peaklists or peaks-density files are missing; run
             :meth:`peakpick` and :meth:`estimate_peak_density_kde` first.
         """
-        # Получим общую плотность вероятности пиков
+        # Get the combined probability density of the peaks.
         kde_mz_list = []
         kde_density_list = []
         cpu_num = cpu_count() - free_cpus
@@ -2286,7 +2348,10 @@ class Pipeline:
 
                 with File(datasource.peaks_density_path, 'r') as f:
                     for roi in rois: 
-                        kde_mz_list.append(f[roi]['mz'][:])
+                        roi_kde_mz = f[roi]['mz'][:]
+                        if roi_kde_mz.size == 0:
+                            continue
+                        kde_mz_list.append(roi_kde_mz)
                         kde_density_list.append( normalize( f[roi]['peaks_density'][:].reshape(1, -1), norm='l1').squeeze() )
             else:
                 raise FileNotFoundError(f"Peaks density file {datasource.peaks_density_path} does not exist.\nPlease run `estimate_peak_density_kde` method first")
@@ -2339,7 +2404,8 @@ class Pipeline:
                 # Randomizer: pick a random sample and ROI first, then a random peak that
                 # is guaranteed to exist within that ROI's filtered data, so the later mz
                 # query can never run empty (fixes ValueError: high <= 0 from randint(0, 0)).
-                rand_ds_name = np.random.choice(list(sample_rois_map.keys()))
+                rand_ds_name_list = set(feature_matrix[filter_bool].index.get_level_values(0)) & set(sample_rois_map.keys())
+                rand_ds_name = np.random.choice(list(rand_ds_name_list))
                 rand_ds = datasources[rand_ds_name]
 
                 sample_rois = sample_rois_map[rand_ds_name]
@@ -2396,7 +2462,7 @@ class Pipeline:
 
         nunique_stats = pd.concat(nunique_stats, axis=1)
         nunique_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique peaks', c, '') for c in nunique_stats.columns] )
-        dupl_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique consensus peaks before filtration', *c) for c in dupl_stats.columns] )
+        dupl_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique consensus peaks', *c) for c in dupl_stats.columns] )
         show_df(pd.concat([nunique_stats, dupl_stats], axis=1), 'Peaks statistics')
         # if draw:
         #     rand_num = np.random.randint(0,feature_matrix[filter_bool].shape[0])
@@ -2451,11 +2517,41 @@ class Pipeline:
     def _multistream_pipeline(self,
                               process_wrapper: Callable,
                               roi: str,
-                              cpu_num: int = 1, 
+                              cpu_num: int = 1,
                               Ram_GB_limit: int = 2,
                               dtypeconv:  np.dtype | str | None = None,
                               idxs: Indexator | SliceIndexator | int | None = None):
-        """Основная функция генератор результатов мультипроцессинга"""
+        """Generator that runs a processing step over a ROI using multiprocessing.
+
+        First resolves the per-ROI pipeline functions from the configuration
+        and yields the common m/z scale together with the peak-list column
+        headers. It then splits the requested spectrum indices into batches
+        that fit within the RAM budget and yields the result of
+        ``process_wrapper`` for every batch, processed in parallel.
+
+        Parameters
+        ----------
+        process_wrapper : Callable
+            One of ``_procfunc_wrapper``, ``_peakpick_wrapper``, or
+            ``_alldata_wrapper``, defining which step to run.
+        roi : str
+            The ROI to process.
+        cpu_num : int, optional
+            Number of processes to use. Default ``1``.
+        Ram_GB_limit : int, optional
+            RAM limit in GB for batch sizing. Default ``2``.
+        dtypeconv : numpy.dtype or str or None, optional
+            Data type conversion for processing. Default ``None``.
+        idxs : Indexator | SliceIndexator | int | None, optional
+            Spectrum indices to process. If ``None``, all the indices of the
+            ROI are used. Default ``None``.
+
+        Yields
+        ------
+        object
+            The first yielded value is ``(mz, headers_list)``; subsequent
+            values are the per-batch results returned by ``process_wrapper``.
+        """
         datasource = self._datasource
         if dtypeconv is None:
             dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]

@@ -169,6 +169,14 @@ class LinkedList(np.ndarray):
         return split_self
     
 class AdaptiveParameter():
+    """A parameter whose value is resolved dynamically by an adaptation rule.
+
+    Holds a base *parameter* and an *adaptation_rule*. When the instance is
+    called, the rule is applied to produce the resolved ``implicit`` value;
+    until then the object behaves as the base *parameter*. Arithmetic,
+    comparison, and array operations are proxied to the current ``implicit``
+    value.
+    """
     def __init__(self, parameter, adaptation_rule):
         self.parameter = parameter
         self.adaptation_rule = adaptation_rule
@@ -194,7 +202,7 @@ class AdaptiveParameter():
         return len(self.implicit)
     def __array__(self):
         return np.array(self.implicit)
-    # Методы для работы с арифметическими операциями
+    # Arithmetic operations
     def __add__(self, other):
         return self.implicit + other
     def __sub__(self, other):
@@ -209,7 +217,7 @@ class AdaptiveParameter():
         return self.implicit % other
     def __pow__(self, other):
         return self.implicit ** other
-    # Методы для сравнения
+    # Comparison operations
     def __eq__(self, other):
         return self.implicit == other
     def __ne__(self, other):
@@ -223,7 +231,7 @@ class AdaptiveParameter():
     def __ge__(self, other):
         return self.implicit >= other
     
-# Индексаторы
+# Indexers
 class Indexator(np.ndarray):
     """
     A numpy ndarray subclass that represents a collection of index segments ``(start, end)``
@@ -245,11 +253,11 @@ class Indexator(np.ndarray):
     def __getitem__(self, index):
         res = super().__getitem__(index)
         
-        # Если результат — двумерная матрица, то возвращаем её как Indexator
+        # If the result is a 2-D matrix, return it as an Indexator.
         if isinstance(res, np.ndarray) and len(res.shape) == 2:
             return res.view(Indexator)
             
-        # Если это строка, столбец или скаляр (число), возвращаем как обычный NumPy-объект
+        # For a row, column, or scalar, return a plain NumPy object.
         return res.view(np.ndarray) if isinstance(res, np.ndarray) else res
     
     @property

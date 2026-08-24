@@ -11,44 +11,45 @@ from pyimzml.ImzMLParser import ImzMLParser
 # from msi_parse import ImzMLParser as rust_ImzMLParser
 import matplotlib.pyplot as plt
 from scipy.signal import medfilt
-from scipy import stats
-import math
 from abc import ABC, abstractmethod
 from itertools import  pairwise
 from functools import cached_property
 from pelmesha.dough import Indexator, SliceIndexator
 from pelmesha.utensils import del_hdf5
-import importlib.util
+import warnings
 
-class DataSource: 
+class DataSource:
     """
-    WIP
-    Класс основного управления обработкой данных от ОДНОГО файла. Использует класс DataManager для получения источника данных с унифицированным интерфейсом подгрузки.
-    СОдержит в себе метаданные источника данных. Сохранные метаданные и конфиги данных.
-    Сохраняет всю обработку рядом с источником данных. (может даже для удобства в одной папке с файлом источника данных)
-    Подаёдтся непосредственное обращение к источнику данных.
-    WIP Отработать подгрузку континуальных и неконтинуальных данных.
+    Manages the processing of data from a single source file.
+
+    Uses a :class:`DataManager` loader to obtain data through a unified
+    interface, holds the source metadata, and keeps the saved metadata and
+    data configurations. All processing outputs are stored next to the
+    source file (in a dedicated sub-folder of the source directory). Direct
+    access to the underlying data source is also provided.
+
+    Both continuous and discontinuous data are supported.
     """
 
     def __init__(self, path, rebuild_metadata = False, RamGb_limit_usage = 2):
         """
-        Инициализация источника данных.
+        Initialize a data source.
 
-        :param path: путь к файлу данных
-        :param rebuild_metadata: If ``True``, force re-creation of metadata. Default ``False``.
-        :param RamGb_limit_usage: RAM limit in GB for batch processing. Default ``2``.
-        :param config: Processing config dict for this source. If ``None``,
-            defaults to ``{}`` (will be resolved later by DataSet).
-        :type path: str
-        :type rebuild_metadata: bool
-        :type RamGb_limit_usage: int or float
-        :type config: dict or None
+        Parameters
+        ----------
+        path : str
+            Path to the data file.
+        rebuild_metadata : bool, optional
+            If ``True``, force re-creation of the metadata file even if it
+            already exists. Default ``False``.
+        RamGb_limit_usage : int or float, optional
+            RAM limit in GB used for batch processing. Default ``2``.
         """
 
         self.Ramcap = RamGb_limit_usage * (1024**3)
         self.file_path = path
         sample_name = os.path.splitext(os.path.basename(path))[0]
-        folder_name = os.path.basename(os.path.dirname(path))
+        folder_name = os.path.basename(os.path.dirname(os.path.abspath(path)))
         if folder_name != sample_name:
             sample_name = folder_name + "_" + sample_name
         self.sample_name = sample_name
@@ -487,19 +488,28 @@ class DataSource:
         
         return coords.set_index('spectra_ind')
 
-    def _get_roi(self, idx): 
+    def _get_roi(self, idx):
         """
-        WIP
-        Метод возвращает первый roi, относящийся индексу или точь-в-точь тому полного сегмента/отрезка (пока не умеет определять нахождение в промежутке). 
-        Функция сильно упрощённая для решения простой задачи - определить принадлежность к ПЕРВОМУ roi
+        Return the first ROI that the given index (or index segment) belongs to.
 
-        :param idx: Spectrum index or array of index segments.
-        :type idx: int or np.ndarray or Indexator
+        This is a simplified helper used to resolve the ownership of an index
+        by the first matching ROI. It does not yet determine whether an index
+        lies in the gap between two segments of the same ROI.
 
-        :return: ROI name (string) matching the given index.
-        :rtype: str
+        Parameters
+        ----------
+        idx : int or np.ndarray or Indexator
+            Spectrum index or array of index segments.
 
-        :raises ValueError: If no ROI matches the given index.
+        Returns
+        -------
+        str
+            The name of the ROI matching the given index.
+
+        Raises
+        ------
+        ValueError
+            If no ROI matches the given index.
         """ # TODO Доработать для использования в объединённых датасетах (с мультиинексом, где ещё и sample)
         # in_bool = np.zeros(len(self.roi_metadata), dtype = bool) # TODO: Оставить до момента решения судьбы функции на вопрос её усложнения и возвращения нескольких roi
         for roi_num, indexes in enumerate(self.roi_metadata['idxroi'].values):
@@ -541,19 +551,35 @@ class DataSource:
         :return: Tuple ``(mz_scale, mean_intensity)`` where both are 1-D numpy arrays.
         :rtype: tuple
         """
-
-        if roi is not None:
-            idxs = self.roi_metadata.loc[roi, 'idxroi']
-        if idxs is None:
-            if len(self.roi_metadata) == 1:
-                idxs = self.roi_metadata['idxroi'].iloc[0]
-            else:
-                raise ValueError(
-                    f"Multiple regions (ROIs) found: {self.roi_metadata.index.tolist()}. Set a ROI name (str) to argument `roi`"
-                    f"or set `idxs` to an np.ndarray of continuous segments with shape (n, 2)"
-                )
+        full_roi = False
         if mz_range is not None:
             mz_min, mz_max = mz_range
+        if roi is not None:
+            idxs = self.roi_metadata.loc[roi, 'idxroi']
+            full_roi = True
+        if idxs is None:
+            rois = self.roi_metadata.index.tolist()
+            if len(rois) == 1:
+                roi = rois[0]
+                idxs = self.roi_metadata['idxroi'].iloc[0]
+                full_roi = True
+            else:
+                raise ValueError(
+                    f"Multiple regions (ROIs) found: {rois}. Set a ROI name (str) to argument `roi`"
+                    f"or set `idxs` to an np.ndarray of continuous segments with shape (n, 2)"
+                )
+        if full_roi:
+            with File(self.meta_file_path, mode= "r") as hdf5:
+                if f"mean_spectrum/{roi}" in hdf5:
+                    mz_scale, mean_intensity = hdf5[f'mean_spectrum/{roi}'][:]
+                    if mz_range is not None:
+                        start_idx = np.searchsorted(mz_scale, mz_min, side='left')
+                        stop_idx = np.searchsorted(mz_scale, mz_max, side='right')
+                        mz_range_slice = slice(start_idx, stop_idx)
+                        mz_scale = mz_scale[mz_range_slice]
+                        mean_intensity = mean_intensity[mz_range_slice]
+                    return mz_scale, mean_intensity
+
         if self.dcont:
             d = 1
         else:
@@ -578,18 +604,28 @@ class DataSource:
             stats_count = indexes.count
             # plt.plot(mz, stats_sum/stats_count)
             # plt.show()
-            return mz, stats_sum/stats_count
+            mz_scale = mz
+            mean_intensity = stats_sum/stats_count
+            # return mz, stats_sum/stats_count
         else:
             idxs_batches = self.split_idxs(idxs = idxs, cpu_count = 1, d = d)
             mz_range_slice = slice(None)
             pilot_batch = idxs_batches.pop()
-            
-            if Indexator(pilot_batch).count < 5: # Проверка на то, что pilot_batch содержит мало масс спектров, на основе которых невозможно будет оценить надёжно орбитрепные это данные или нет. 5 спектров минимум - эмпирическое
-                pilot_batch = np.vstack([idxs_batches.pop(), pilot_batch])
+            while Indexator(pilot_batch).count < 5: # Проверка на то, что pilot_batch содержит мало масс спектров, на основе которых невозможно будет оценить надёжно орбитрепные это данные или нет. 5 спектров минимум - эмпирическое
+                try:
+                    pilot_batch = np.vstack([idxs_batches.pop(), pilot_batch])
+                except IndexError:
+                    spectra_count  = Indexator(pilot_batch).count
+                    warning_message = (
+                        "Too few spectra to determine the average mass spectrum. "
+                        f"Found: {spectra_count }."
+                    )
+                    warnings.warn(warning_message, UserWarning, stacklevel=2)
+
 
             batch_mz = []
             batch_intens = []
-            for mz, intens in self.get_batch(Indexator(pilot_batch)):
+            for mz, intens in self.get_spectra_stream(Indexator(pilot_batch)):
                 if mz_range is not None:
                     start_idx = np.searchsorted(mz, mz_min, side='left')
                     stop_idx = np.searchsorted(mz, mz_max, side='right')
@@ -600,8 +636,10 @@ class DataSource:
                 batch_intens.append(intens)
 
             values, counts = np.unique(np.concatenate(batch_mz, axis=0), return_counts=True)
-            if len(values[counts > 1])/len(values) < 0.33: # Если общих точек дискретизации m/z, которые совпадают хотя бы раз со всех масс спектров пробного батча, менее 33%, то считаем, что полученные данные с орбитрепа.
-                roi = self._get_roi(pilot_batch)
+            if len(values[counts > 1])/len(values) < 0.33: # TODO Понять бы зачем это написано, есть ли в этом смысл и не является ли чем-то потенциальным для ошибок  
+                # Если общих точек дискретизации m/z, которые совпадают хотя бы раз со всех масс спектров пробного батча,
+                #  менее 33%, то считаем, что полученные данные с орбитрепа.
+                roi = self._get_roi(self._normalize_indices(pilot_batch))
                 if mz_range is None:
                     mz_min, mz_max = self.roi_metadata['mz_range'][roi]
                 discret_coeffs = self.roi_metadata.loc[roi, 'discret_coeffs']
@@ -623,7 +661,7 @@ class DataSource:
                 del batch_mz, batch_intens
 
                 for idxs_batch in idxs_batches:
-                    for mz_loc, intens_loc in self.get_batch(Indexator(idxs_batch)):
+                    for mz_loc, intens_loc in self.get_spectra_stream(Indexator(idxs_batch)):
                         if mz_range is not None:
                             start_idx = np.searchsorted(mz_loc, mz_min, side='left')
                             stop_idx = np.searchsorted(mz_loc, mz_max, side='right')
@@ -637,14 +675,15 @@ class DataSource:
                 nonzero_count_bool = stats_count != 0
                 mean_intensity = np.zeros(len(mz_scale))
                 mean_intensity[nonzero_count_bool] = stats_sum[nonzero_count_bool]/stats_count[nonzero_count_bool]
-                return mz_scale, mean_intensity
+
+                # return mz_scale, mean_intensity
 
             else:
                 stats = pd.DataFrame(np.vstack([np.concatenate(batch_mz, axis=0), np.concatenate(batch_intens, axis=0)]).T, columns=['mz','intensities']).groupby('mz')['intensities'].agg(['sum', 'count'])
                 batch_mz = []
                 batch_intens = []
                 for idxs_batch in idxs_batches:
-                    for mz, intens in self.get_batch(Indexator(idxs_batch)):
+                    for mz, intens in self.get_spectra_stream(Indexator(idxs_batch)):
                         if mz_range is not None:
                             start_idx = np.searchsorted(mz, mz_min, side='left')
                             stop_idx = np.searchsorted(mz, mz_max, side='right')
@@ -654,28 +693,45 @@ class DataSource:
                         batch_mz.append(mz)
                         batch_intens.append(intens)
                     stats = stats.add(pd.DataFrame(np.vstack([np.concatenate(batch_mz, axis=0), np.concatenate(batch_intens, axis=0)]).T, columns=['mz','intensities']).groupby('mz')['intensities'].agg(['sum', 'count']), fill_value=0)
-                return stats.index, stats['sum']/stats['count']
+                mz_scale = stats.index
+                mean_intensity = stats['sum']/stats['count']
+                # return stats.index, stats['sum']/stats['count']
+
+        if mz_range_slice == slice(None):
+            with File(self.meta_file_path, mode= "a") as hdf5:
+                hdf5.create_dataset(f'mean_spectrum/{roi}', data = np.vstack((mz_scale, mean_intensity)))
+        return mz_scale, mean_intensity
        
     def split_idxs(self, idxs = None, d = None, cpu_count = 1, Ramcap_GB = None, size_per_spec = None):
         """
-        Split spectrum indices into batches based on RAM cap configs.
+        Split spectrum indices into batches that fit within the RAM budget.
 
-        :param idxs: Index segments to split. If ``None``, uses all available spectra.
-        :param d: Data dimensionality factor (1 for continuous, 2 for discontinuous), обозначает количество используемых в батчах векторов. 
-        Для континуальных данных d = 1, так как достаточно обрабатывать один вектор 'y' (интенсивность), а mz у всех общее и под него выделить память - единожды, 
-        но для неконтинуальных данных необходимо выделить память для mz и y, так как для каждого спектра свой mz. Default ``None`` - функция выберет автоматически.
-        :param cpu_count: Number of CPU cores to account for in RAM budgeting. Default ``1``.
-        :param Ramcap_GB: RAM capacity in gigabytes. Default ``None`` - uses ``self.Ramcap``.
-        :param size_per_spec: Size of each spectrum in dots. Used for batching processing with resampling spectra. Default ``None`` - uses ``self.spectrum_sizes``.
-        
-        :type idxs: np.ndarray or None
-        :type d: int
-        :type cpu_count: int
-        :type Ramcap_GB: float
-        :type size_per_spec: int
+        Parameters
+        ----------
+        idxs : np.ndarray or None, optional
+            Index segments to split. If ``None``, uses all available spectra.
+        d : int, optional
+            Data dimensionality factor: 1 for continuous data and 2 for
+            discontinuous data. For continuous data it is enough to hold a
+            single intensity vector ``y`` because all spectra share one ``mz``
+            scale, which is allocated once. For discontinuous data, memory
+            must be reserved for both ``mz`` and ``y`` since every spectrum
+            has its own m/z values. If ``None``, it is chosen automatically
+            from the data type.
+        cpu_count : int, optional
+            Number of CPU cores to account for in the RAM budget.
+            Default ``1``.
+        Ramcap_GB : float, optional
+            RAM capacity in gigabytes. If ``None``, uses ``self.Ramcap``.
+        size_per_spec : int, optional
+            Size of each spectrum in dots. Used when batching processing with
+            resampled spectra. If ``None``, uses the stored spectrum sizes.
 
-        :return: List of index segment arrays, each fitting within the RAM budget.
-        :rtype: list
+        Returns
+        -------
+        list
+            A list of index-segment arrays, each fitting within the RAM
+            budget.
         """
         spectrum_sizes = self.get_spectrum_sizes(idxs)
         idxs_batches = []
@@ -860,10 +916,13 @@ class DataSource:
 
 SUPPORTED_FILE_EXTENSIONS = ['.imzml', '.cdf']
 
-class BaseLoader(ABC): #TODO @задачка: Базовый абстрактный класс
+class BaseLoader(ABC): 
     """
-    Базовый класс для всех подгрузчиков данных с абстрактными и общими методами.
-    Ни один конкретный подгрузчик не запустится, если в нем не будут определены ряд абстрактных методов, индивидуальные для них.
+    Abstract base class for all data loaders.
+
+    Provides the common methods shared by every concrete loader. A concrete
+    subclass cannot be instantiated unless it implements all the abstract
+    methods that are specific to its underlying data format.
     """
     def create_metafile(self, draw = True, rebuild_metadata = False, chunk_Mbsize = 10):
         """
@@ -884,7 +943,7 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
         base_folder_path = os.path.dirname(file_path)
         meta_file_folder = os.path.join(base_folder_path,'raw_pelmesha')
         sample_name = os.path.splitext(os.path.basename(file_path))[0]
-        folder_name = os.path.basename(os.path.dirname(file_path))
+        folder_name = os.path.basename(os.path.dirname(os.path.abspath(file_path)))
         if folder_name != sample_name:
             sample_name = folder_name + "_" + sample_name
 
@@ -896,8 +955,7 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
         if (not meta_file_exist) or rebuild_metadata:
 
             chunk_Mbsize = chunk_Mbsize * (1024**2)
-            metadata, roi_metadata, coords = self.get_metadata(draw) # TODO @задачка: Создать в новом классе выгрузки данных из cdf метод get_metadata, чтобы сработал этот метод. 
-                                                                        #             Отмечу: coords в cdf - это RT, а roi - это по планам каналы 0-3 (где разные масс анализаторы и моды) 
+            metadata, roi_metadata, coords = self.get_metadata(draw)
 
             del_hdf5(meta_file_path) # del hdf5 if it exists
             
@@ -1005,45 +1063,48 @@ class BaseLoader(ABC): #TODO @задачка: Базовый абстрактн�
 
     @abstractmethod
     def get_spectrum(self, idx):
-        """Обязательный метод для загрузки одного масс спектра"""
+        """Load a single mass spectrum (m/z and intensity) by index."""
         pass
 
     @abstractmethod
     def get_metadata(self):
-        """Обязательный метод для извлечения метаданных"""
-        pass 
+        """Extract the metadata of the data source."""
+        pass
     
     @abstractmethod
     def get_mz(self, idx):
-        """Обязательный метод для извлечения mz шкалы масс спектра"""
+        """Extract the m/z scale of a single mass spectrum."""
         pass
 
     @abstractmethod
     def get_intensity(self, idx):
-        """Обязательный метод для извлечения интенсивности масс спектра"""
+        """Extract the intensity of a single mass spectrum."""
         pass
-
-    @abstractmethod
-    def get_batch(self, idxs): # TODO Возможно нужно просто удалить и заменить там где используется на get_spectra_stream, так как попытки написать универсальную работу как матрицей спектров, так и индивидиульаных - слишком усложняет код, что 1) ломает гибкость 2) усложняет написание и сам код 3) не факт что сильно эффективнее выходит
-        """Обязательный метод для загрузки пачки масс спектров либо в ленивом формате, если данные неконтинуальные, либо матрицей, если данные континуальные"""
-        pass
+    # #future Возможно будет применён в будущем
+    # @abstractmethod
+    # def get_batch(self, idxs): # TODO Возможно нужно просто удалить и заменить там где используется 
+    ## на get_spectra_stream, так как попытки написать универсальную работу как матрицей спектров, 
+    # так и индивидиульаных - слишком усложняет код, что 1) ломает гибкость 
+    # 2) усложняет написание и сам код 3) не факт что сильно эффективнее выходит
+    #     """Обязательный метод для загрузки пачки масс спектров либо в ленивом формате, если данные неконтинуальные, либо матрицей, если данные континуальные"""
+    #     pass
     
     @abstractmethod
     def get_mz_stream(self, idxs = None):
-        """Обязательный метод для извлечения нескольких mz шкал масс спектра ленивым методом"""
+        """Lazily yield the m/z scales of multiple mass spectra."""
         pass
 
     @abstractmethod
     def get_intensities_stream(self, idxs = None):
-        """Обязательный метод для извлечения нескольких интенсивностей масс спектра ленивым методом"""
+        """Lazily yield the intensities of multiple mass spectra."""
         pass
     @abstractmethod
     def get_spectra_stream(self, idxs = None):
-        """Обязательный метод для загрузки пачки масс спектров в ленивом формате"""
+        """Lazily yield a batch of mass spectra as (m/z, intensity) tuples."""
         pass
     @abstractmethod
     def get_spectrum_sizes(self, idxs = None):
-        """Обязательный метод для извлечения размеров масс спектров"""
+        """Return the sizes (number of data points) of the given spectra."""
         pass
 
 ###################### IMZML
@@ -1087,28 +1148,30 @@ class loader_imzml_rust(BaseLoader):
         for idx in idxs:
             yield self.source.getspectrum(idx)
 
-    def _get_batch_cont(self, idxs):
-        """
-        Load a batch of continuous spectra as a single matrix.
+    # Maybe for future
+    # def _get_batch_cont(self, idxs):
+    #     """
+    #     Load a batch of continuous spectra as a single matrix.
 
-        :param idxs: Index segments to load.
-        :type idxs: Indexator
+    #     :param idxs: Index segments to load.
+    #     :type idxs: Indexator
 
-        :yields: Tuple ``(mz_scale, intensity_matrix)``.
-        """
-        yield self.mz_scale_cont, np.vstack(tuple(self.get_intensities_stream(idxs)))
+    #     :yields: Tuple ``(mz_scale, intensity_matrix)``.
+    #     """
+    #     yield self.mz_scale_cont, np.vstack(tuple(self.get_intensities_stream(idxs)))
 
-    def _get_batch_discont(self, idxs):
-        """
-        Lazily yield individual discontinuous spectra.
+    # Maybe for future
+    # def _get_batch_discont(self, idxs):
+    #     """
+    #     Lazily yield individual discontinuous spectra.
 
-        :param idxs: Index segments to load.
-        :type idxs: Indexator
+    #     :param idxs: Index segments to load.
+    #     :type idxs: Indexator
 
-        :yields: Tuple ``(mz_array, intensity_array)`` for each spectrum.
-        """
-        for idx in idxs:
-            yield self.source.getspectrum(idx)
+    #     :yields: Tuple ``(mz_array, intensity_array)`` for each spectrum.
+    #     """
+    #     for idx in idxs:
+    #         yield self.source.getspectrum(idx)
 
     def _poslog_parser(self, poslog_path, specnum):
         """
@@ -1184,10 +1247,10 @@ class loader_imzml_rust(BaseLoader):
 
     def get_intensity(self, idx):
         return self.source.getspectrum(idx)[1]
-
-    def get_batch(self, idxs):
-        """Заглушка от @abstractmethod, get_batch назначится динамически после __init__"""
-        pass
+    # #future 
+    # def get_batch(self, idxs):
+    #     """Заглушка от @abstractmethod, get_batch назначится динамически после __init__"""
+    #     pass
 
     def get_metadata(self, draw=True):
         metadata = {}
@@ -1283,10 +1346,10 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
         if mzoffsets[0] == mzoffsets[-1]:
             self.dcont = True
             self.mz_scale_cont = source.getspectrum(0)[0]
-        #     self.get_batch = self._get_batch_cont
+            # self.get_batch = self._get_batch_cont
         else:
             self.dcont = False
-        #     self.get_batch = self._get_batch_discont
+            # self.get_batch = self._get_batch_discont
         self.create_metafile(rebuild_metadata = rebuild_metadata)
     @cached_property
     def source(self):
@@ -1308,28 +1371,30 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
         """
         for idx in idxs:
             yield self.source.getspectrum(idx)
-    def _get_batch_cont(self, idxs):
-        """
-        Load a batch of continuous spectra as a single matrix.
+    # Maybe for future
+    # def _get_batch_cont(self, idxs):
+    #     """
+    #     Load a batch of continuous spectra as a single matrix.
 
-        :param idxs: Index segments to load.
-        :type idxs: Indexator
+    #     :param idxs: Index segments to load.
+    #     :type idxs: Indexator
 
-        :yields: Tuple ``(mz_scale, intensity_matrix)``.
-        """
-        yield self.mz_scale_cont, np.vstack(tuple(self.get_intensities_stream(idxs)))
-    
-    def _get_batch_discont(self, idxs):
-        """
-        Lazily yield individual discontinuous spectra.
+    #     :yields: Tuple ``(mz_scale, intensity_matrix)``.
+    #     """
+    #     yield self.mz_scale_cont, np.vstack(tuple(self.get_intensities_stream(idxs)))
 
-        :param idxs: Index segments to load.
-        :type idxs: Indexator
+    # Maybe for future    
+    # def _get_batch_discont(self, idxs):
+    #     """
+    #     Lazily yield individual discontinuous spectra.
 
-        :yields: Tuple ``(mz_array, intensity_array)`` for each spectrum.
-        """
-        for idx in idxs:
-            yield self.source.getspectrum(idx)
+    #     :param idxs: Index segments to load.
+    #     :type idxs: Indexator
+
+    #     :yields: Tuple ``(mz_array, intensity_array)`` for each spectrum.
+    #     """
+    #     for idx in idxs:
+    #         yield self.source.getspectrum(idx)
 
     def _poslog_parser(self, poslog_path,specnum):
         """
@@ -1404,10 +1469,10 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
         
     def get_intensity(self, idx):
         return self.source.getspectrum(idx)[1]
-    
-    def get_batch(self, idxs):
-        """Заглушка от @abstractmethod, get_batch назначится динамически после __init__"""
-        pass
+    # #future    
+    # def get_batch(self, idxs):
+    #     """Заглушка от @abstractmethod, get_batch назначится динамически после __init__"""
+    #     pass
     def get_metadata(self, draw = True): 
         metadata = {}
         roi_metadata = {}
@@ -1480,22 +1545,14 @@ class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузк
     def _get_physical_coordinates(self, idxs):
         for idx in idxs:
             yield self.source.get_physical_coordinates(idx)
-class loader_hdf5(BaseLoader): #TODO: Написать
-        """
-        Загрузка данных из источника.
-        В зависимости от формата файла, данные загружаются разными способами.
-        """
-        def __init__(self, source, dtypeconv):
-            self.source = source
-            self.dtypeconv = dtypeconv
-            self.mz_scale = source.getspectrum(0)[0]
-            self.sample_metadata = {}
+class loader_hdf5(BaseLoader):
+    pass
 
 class loader_mzxml(BaseLoader): # TODO дописать.
     pass
 
 
-class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: Собственно сам класс, который надо написать
+class loader_cdf(BaseLoader): 
     def __init__(self, file_path, rebuild_metadata = False):
         self.file_path = file_path
         source = xr.open_dataset(self.file_path)
@@ -1516,7 +1573,7 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
         self.__dict__.update(state)
 
     def _dots_slice(self, idx):
-        """собираем один спектр по его индексу"""
+        """Build the slice that selects the data points of a single spectrum."""
 
         start_idx = self.source['scan_index'][idx].item()
         end_idx = self.source['point_count'][idx].item() + start_idx
@@ -1551,10 +1608,10 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
 
     def get_intensity(self, idx):
         return next(self.get_intensities_stream([idx]))
-
-    def get_batch(self, idxs):
-        """заглушка""" # TODO Проверить использую ли я по итогу этот метод
-        yield from self.get_spectra_stream(idxs)
+    # #future
+    # def get_batch(self, idxs):
+    #     """заглушка""" # TODO Проверить использую ли я по итогу этот метод
+    #     yield from self.get_spectra_stream(idxs)
 
     def get_metadata(self, draw=True):
         metadata = {}
@@ -1563,9 +1620,14 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
         file_path = self.file_path
 
         # roi - каналы записи - scan_filters
-        roi_list = np.unique(self.source["scan_filters"])
-        roi_idx = {int(i): Indexator(_to_index(np.where(self.source['scan_filters'].values == i)[0])) for i in
-                   roi_list}
+        if self.source.get("scan_filters", None) is not None:
+                
+            roi_list = np.unique(self.source["scan_filters"])
+            roi_idx = {int(i): Indexator(_to_index(np.where(self.source['scan_filters'].values == i)[0])) for i in
+                    roi_list}
+        else:
+            roi_list = [0]
+            roi_idx = {0: Indexator((0, len(self.source['scan_index'])))}
 
         #как координату записываем retention_time - могут быть записаны как aquisition time
         coords = []
@@ -1585,12 +1647,12 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
 
         # дискретизация
         for roi in roi_list:
-            try:
-                roi_range = np.array(self.source['scan_filters'].values == roi, dtype=bool)
+            if self.source.get('scan_filters') is not None and self.source.get('scan_highmz') is not None and self.source.get('scan_lowmz') is not None:
+                roi_range = np.array(self.source['scan_filters'].values == roi, dtype=bool)               
                 max_by_spec = self.source['scan_highmz'][roi_range].values
                 min_by_spec = self.source['scan_lowmz'][roi_range].values
                 roi_metadata[str(roi)]["mz_range"] = (min(min_by_spec), max(max_by_spec))
-            except:
+            else:
                 roi_metadata[str(roi)]["mz_range"] = self.get_mz_range(roi_idx[roi])
 
 
@@ -1620,14 +1682,17 @@ class loader_cdf(BaseLoader):  # TODO дописать. #TODO @задачка: �
 
 class DataManager():
     """
-    WIP
-    для работы с различными источниками масс-спектрометрических данных (IMZML, HDF5, MZXML). Подгружает необходимый класс для загрузки данных и
-    Обеспечивает унифицированный интерфейс для получения данных m/z шкалы и интенсивностей спектра и метаданных."""
+    Factory that selects the appropriate loader for a data file.
+
+    Works with various mass-spectrometry data formats (imzML,
+    CDF). Based on the file extension, it loads the required loader class
+    and provides a unified interface for retrieving m/z scales, spectrum
+    intensities, and metadata.
+    """
     def __init__(self):
         self._loaders = {
             'imzml': loader_imzml,
-            'hdf5': loader_hdf5,
-            'mzxml': loader_mzxml,
+            # 'mzxml': loader_mzxml,
             'cdf': loader_cdf        
         }
     def get_loader(self, file_path):
