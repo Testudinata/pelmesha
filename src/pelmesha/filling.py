@@ -1276,7 +1276,7 @@ class loader_imzml_rust(BaseLoader):
             specdata["z"] = poslog_specdata[:, 2]
         else:  # If there is no poslog file in the folder, take coordinates from imzml
             # Get base info and coordinates
-            roi = "00"  # Only one roi
+            roi = "R00"  # Only one roi
             roi_list = [roi]
             roi_idx = {}
             roi_idx[roi] = Indexator((0, specnum))
@@ -1328,10 +1328,7 @@ class loader_imzml_rust(BaseLoader):
         for idx in idxs:
             yield self.source.get_physical_coordinates(idx)
 
-class loader_imzml(BaseLoader): #TODO @задачка: Класс выгрузки как пример 
-                                #TODO @задачка: Совет: есть особый класс Indexator, упрощающий индексацию и хранение индексов. Просто пишу краткое пояснение к нему:
-                                #  Индексы разбиваются на непрерывные сегменты и сегмент обозначен начальным и конечным индексом. Класс может считать кол-во индексов в сложных случаях (когда много сегментов) (свойство .count).
-                                #  Класс используется часто для удобного итерирования. У него есть "родственник" SliceIndexator: Тоже самое, но возвращает при итерации слайсы  
+class loader_imzml(BaseLoader): 
     """                         
     Loader for imzML mass spectrometry imaging data.
 

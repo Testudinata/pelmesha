@@ -275,7 +275,7 @@ class DataSet:
                     f"'{sample}'."
                 )
 
-            roi_peaklists = pd.DataFrame(np.vstack(tuple(dict_peak.values())), columns = headers_list).loc[:,['spectra_ind','mz','FWHML','FWHMR']].astype({"spectra_ind": int})
+            roi_peaklists = pd.DataFrame(np.vstack(tuple(dict_peak.values())), columns = headers_list).loc[:,['spectra_ind','mz','FWHM']].astype({"spectra_ind": int})
             sample_peaks[r] = roi_peaklists
 
             discret_coeffs = roi_metadata.loc[r, "discret_coeffs"]

@@ -4,7 +4,7 @@ import os
 import warnings
 from KDEpy import FFTKDE, TreeKDE
 from pybaselines import Baseline
-from pelmesha.utensils import split_pdtable_by_peaks_gap, _set_KDE_X_plot
+from pelmesha.utensils import split_pdtable_by_peaks_gap, _set_KDE_X_plot, _peakpicker_core
 from scipy.signal import savgol_filter
 from multiprocessing import Pool, cpu_count
 from tqdm.auto import tqdm
@@ -65,22 +65,23 @@ def preprocess_configuration_base(
         else:
             internal_configs['process']['Baseliner'] = baseline_algo
 
-    internal_configs['peakpick'] = {}
+    
     # Configure headers conditionally based on processing flags 
-    if configs['peakpicker']["SNR_threshold"] and configs['peakpicker']["Calc_peak_area"]:
+    if configs['peakpicker']["SNR_threshold"] and configs['peakpicker']["return_areas"]:
         headers_list = ["spectra_ind", "mz", "Intensity", "Area", "SNR",  
-                        "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"]
+                        "PextL", "PextR", "FWHM", "Noise", "Mean noise"]
         
     elif configs['peakpicker']["SNR_threshold"]:
         headers_list = ["spectra_ind", "mz", "Intensity", "SNR",  
-                        "PextL", "PextR", "FWHML", "FWHMR", "Noise", "Mean noise"]
-    elif configs['peakpicker']["Calc_peak_area"]:
+                        "PextL", "PextR", "FWHM", "Noise", "Mean noise"]
+    elif configs['peakpicker']["return_areas"]:
         headers_list = ["spectra_ind", "mz", "Intensity", "Area",  
-                        "PextL", "PextR", "FWHML", "FWHMR"]
+                        "PextL", "PextR", "FWHM"]
     else: 
         headers_list = ["spectra_ind", "mz", "Intensity",  
-                        "PextL", "PextR", "FWHML", "FWHMR"]
-    configs.update({"headers": headers_list})
+                        "PextL", "PextR", "FWHM"]
+    internal_configs['peakpick'] = {"discret_coeffs": datasource.roi_metadata.loc[roi,'discret_coeffs'],
+                                    "headers": headers_list}
     return resampled_mz, headers_list, internal_configs
 
 
@@ -172,10 +173,13 @@ def peakpicking_base(
     np.ndarray
         The peak picking result.
     """
-
-    mzsize = mz.size
     configs = configs['peakpicker']  # Directly get the config dict for the peakpicker function.
-    return peakpicker(mz, intensity, mzsize, idx, **configs)
+    return peakpicker(mz, 
+                      intensity, 
+                      idx, 
+                      discret_coeffs=internal_configs['discret_coeffs'],
+                      headers=internal_configs['headers'],
+                      **configs)
 
 
 ###########################################
@@ -377,10 +381,136 @@ def _savgol(y, window, cycles, order=3):
         y = savgol_filter(y, window_length=window, polyorder=order, mode='mirror')
     
     return y
+def peakpicker(mz: np.ndarray,
+               intens: np.ndarray,
+               spectra_ind: int,
+               fwhm_filter: float | tuple[float, float] | list[float, float]
+                          | np.ndarray[float, float] | None = None,
+               fwhm_merge_factor: float | None = None,
+               heightfilter: float | None = None,
+               rel_heightfilter: float | None = None,
+               peaklocation: float = 1,
+               noise_est_iter: int = 3,
+               SNR_threshold: float | None = 3.5,
+               discret_coeffs: np.ndarray | None = None,
+               noise_mz_width: float = 9.0,
+               return_areas: bool = True,
+               headers: list[str] = ["spectra_ind", "mz", "Intensity", "Area",
+                                     "SNR", "FWHM", "PextL", "PextR",
+                                     "Noise", "Mean noise"]
+               ) -> np.ndarray:
+    """Detect and characterise peaks in a profile mass spectrum.
 
-def peakpicker(mz,
+    Locates every peak in the spectrum and produces a feature-rich peak
+    list. For each detected peak the following properties are computed:
+
+    * **m/z and intensity** of the peak apex.
+    * **Peak area** — trapezoidal integration between the left and right
+      peak-base boundaries.
+    * **FWHM** — the interpolated m/z width of the peak at half its
+      maximum intensity.
+    * **Peak base points** (``PextL`` / ``PextR``) — the m/z of the
+      valleys (local minima) delimiting the peak on both sides.
+    * **Signal-to-noise ratio** (``SNR``), the estimated **noise level**
+      and the **mean noise** intensity, when an ``SNR_threshold`` is
+      given. Note: the current SNR filtering uses a z-score criterion.
+
+    Each property can be refined or filtered through the corresponding
+    parameter. If a filtering or calculation parameter is ``None``, the
+    related step is skipped and the property is not added to the output,
+    which saves time and memory.
+
+    Notes
+    -----
+    The heavy computation is offloaded to a JIT-compiled Numba kernel
+    (:func:`_peakpicker_core`). This wrapper performs input validation
+    and result formatting only, and adds negligible overhead.
+
+    Parameters
+    ----------
+    mz : np.ndarray
+        The m/z scale.
+    intens : np.ndarray
+        The intensity values.
+    spectra_ind : int
+        Index of the current spectrum, written into the output peak list.
+    fwhm_filter : float or tuple or None, optional
+        Peak-width filter based on the full width at half maximum (FWHM).
+        A scalar keeps peaks wider than it; a ``(min, max)`` tuple keeps
+        peaks within that range. Default is ``None``.
+    fwhm_merge_factor : float or None, optional
+        Merges peaks that are closer to each other than
+        ``FWHM * fwhm_merge_factor`` (i.e. oversegmented or poorly
+        resolved peaks). Default is ``None``.
+    heightfilter : float or None, optional
+        Removes peaks whose absolute apex intensity is below this value.
+        Default is ``None``.
+    rel_heightfilter : float or None, optional
+        Removes peaks whose apex intensity relative to the spectrum
+        maximum is below this value. Default is ``None``.
+    peaklocation : float, optional
+        Fraction of the peak height used to compute the barycentric peak
+        centre and the thresholds for the oversegmentation filter.
+        Default is ``1``.
+    noise_est_iter : int, optional
+        Number of iterations used to estimate the noise. Higher values
+        give a more stable estimate at the cost of runtime. Default is
+        ``3``.
+    SNR_threshold : float or None, optional
+        Removes peaks whose signal-to-noise ratio is below this
+        threshold. Default is ``3.5``.
+    discret_coeffs : np.ndarray or None, optional
+        Polynomial coefficients mapping m/z to the local point density.
+        If ``None``, ``noise_mz_width`` is interpreted as number of points.
+        Default is ``None``.
+    noise_mz_width : float, optional
+        Width of the m/z window used to estimate the noise. If
+        ``discret_coeffs`` is ``None``, this value is used directly as
+        the window width. Default is ``9.0``.
+    return_areas : bool, optional
+        Whether to compute and return the peak area. Default is ``True``.
+    headers : list of str, optional
+        Column headers used to order the returned peak properties.
+
+    Returns
+    -------
+    np.ndarray
+        The peak list, one row per detected peak, with the requested
+        peak properties as columns (ordered according to *headers*).
+    """
+
+    props = {}
+    pmz, pint, pareas, pSNR, pext_left, pext_right, pfwhm, pnoise, pmean_noise = _peakpicker_core(mz,
+                                                                                                  intens,
+                                                                                                  heightfilter,
+                                                                                                  rel_heightfilter,
+                                                                                                  fwhm_filter,
+                                                                                                  SNR_threshold,
+                                                                                                  noise_mz_width,
+                                                                                                  discret_coeffs,
+                                                                                                  fwhm_merge_factor,
+                                                                                                  peaklocation,
+                                                                                                  return_areas,
+                                                                                                  noise_est_iter)
+    n_peaks = pmz.size
+    if n_peaks == 0:
+        return None
+    props["spectra_ind"] = np.ones(n_peaks, dtype=int) * spectra_ind
+    props["mz"] = pmz
+    props["Intensity"] = pint
+    if return_areas:
+        props["Area"] = pareas
+    if SNR_threshold is not None:
+        props["SNR"] = pSNR
+        props["Noise"] = pnoise
+        props["Mean noise"] = pmean_noise
+    props["PextL"] = pext_left
+    props["PextR"] = pext_right
+    props["FWHM"] = pfwhm
+    return np.column_stack([props[header] for header in headers])
+
+def peakpicker_legacy(mz,
               intens,
-              xsize, 
               spectra_ind,
               fwhhfilter = None,
               oversegmentationfilter = None,
@@ -425,8 +555,6 @@ def peakpicker(mz,
         The m/z scale.
     intens : np.ndarray
         The intensity values.
-    xsize : int
-        Number of data points of the spectrum.
     spectra_ind : int
         Index of the current spectrum, written into the output peak list.
     fwhhfilter : float or tuple or None, optional
@@ -473,6 +601,7 @@ def peakpicker(mz,
     # estimate noise within a window around each peak, where the window is the std
     # of purely-noise points left and right of the peak (peak points excluded) and
     # its size is measured in points (not m/z). Consider using numba.
+    xsize = mz.size
     props={}
     # Robust valley finding
     valley_dots = np.where(np.diff(intens) !=0)[0] 
@@ -511,15 +640,17 @@ def peakpicker(mz,
 
     # Remove peaks below the SNR thresholds
     if SNR_threshold:
-        noise_points = np.array([True]*xsize) # Zero iteration
-
+        noise_bool = np.ones(xsize, dtype = bool) # Zero iteration
+       
         for it in range(noise_est_iterations):
-            for idx in np.where(((val_max-np.mean(intens[noise_points]))/noise_func(intens[noise_points])>=SNR_threshold))[0]: # Essentially a plain z-score. TODO: compare the speed of this implementation with scipy.stats.zscore.
+            noise_func_full = noise_func(intens[noise_bool])
+            noise_mean_full = np.mean(intens[noise_bool])
+            for idx in np.where(((val_max-noise_mean_full)/noise_func_full>=SNR_threshold))[0]: # Essentially a plain z-score.
                 sl = slice(left_min[idx],right_min[idx]+1)
-                noise_points[sl] = False
+                noise_bool[sl] = False
         
-        props["Noise"] = noise_func(intens[noise_points])
-        props["Mean noise"]= np.mean(intens[noise_points])
+        props["Noise"] = noise_func(intens[noise_bool])
+        props["Mean noise"]= np.mean(intens[noise_bool])
         k = (val_max-props["Mean noise"])/props["Noise"]>=SNR_threshold
         
         val_max=val_max[k]
@@ -727,7 +858,7 @@ def _compute_KDE(peaklist: pd.DataFrame,
     Parameters
     ----------
     peaklist : pd.DataFrame
-        Peak list that must contain ``mz`` and ``FWHML`` / ``FWHMR`` columns.
+        Peak list that must contain ``mz`` and ``FWHM`` columns.
     discret_coeffs : np.ndarray
         Polynomial coefficients describing the m/z discretisation step.
     cpu_num : int, optional
@@ -765,7 +896,7 @@ def _compute_KDE(peaklist: pd.DataFrame,
         warnings.warn("Peak list is empty, returning empty arrays for peaks PDF")
         return np.array([]), np.array([])
     if KD_bandwidth == "fwhm":
-        peaklist.loc[:,'KD_bandwidth'] = (peaklist['FWHMR'] - peaklist['FWHML'])*FWHM2sigma*bwc
+        peaklist.loc[:,'KD_bandwidth'] = (peaklist['FWHM'])*FWHM2sigma*bwc
         if account_mzscale:
             mz_discret = mz_model(peaklist['mz'])
             

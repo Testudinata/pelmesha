@@ -11,7 +11,7 @@ import os
 import math
 from multiprocessing import Pool
 from sklearn.preprocessing import normalize
-
+from numba import njit
 FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2)) 
 
 def format_time(value: float) -> str:
@@ -622,8 +622,7 @@ def _consesusing_peaks(peaklists: pd.DataFrame):
     * ``Area`` — keep the sum.
     * ``PextL`` — keep the minimum value.
     * ``PextR`` — keep the maximum value.
-    * ``FWHML`` — keep the minimum value.
-    * ``FWHMR`` — keep the maximum value.
+    * ``FWHM`` — keep the sum.
     * All other columns — keep the first encountered value.
 
     Parameters
@@ -641,7 +640,7 @@ def _consesusing_peaks(peaklists: pd.DataFrame):
     column_headers = peaklists.columns
     preset_rules = {
         "SNR": "max", "Intensity": "max", "Area": "sum",
-        "PextL": "min", "PextR": "max", "FWHML": "min", "FWHMR": "max"
+        "PextL": "min", "PextR": "max", "FWHM": "sum"
     }
     dict4drop = {col: agg for col, agg in preset_rules.items() if col in column_headers}
     excluded_cols = set(dict4drop.keys()) | {'spectra_ind', 'mz'}
@@ -825,3 +824,558 @@ def show_df(dataframe, title=""):
         if title:
             print(f"=== {title} ===")
         print(dataframe)
+
+        
+@njit
+def _prepend(arr, number):
+    result = np.empty(len(arr) + 1, dtype=arr.dtype)
+    result[0] = number
+    result[1:] = arr
+    
+    return result
+@njit
+def _append(arr, number):
+    result = np.empty(len(arr) + 1, dtype=arr.dtype)
+    result[:-1] = arr
+    result[-1] = number
+    return result
+
+@njit
+def _snr_filter(mz: np.ndarray[float],
+                intens: np.ndarray[float],
+                pmz_array: np.ndarray[float], 
+                pint_array: np.ndarray[float], 
+                left_min: np.ndarray[int], 
+                right_min: np.ndarray[int],
+                SNR_threshold: float,
+                noise_mz_width: float = 9.0,
+                noise_est_iter: int = 3,
+                discret_coeffs: np.ndarray[float] = None):
+    """Estimate local noise and filter peaks by signal-to-noise ratio.
+
+    Internal kernel for :func:`peakpicker`. Computes, for each peak, a
+    local noise level from the surrounding baseline points and keeps only
+    peaks whose SNR meets the threshold. The noise estimate is refined
+    iteratively, treating previously detected signal peaks as non-noise
+    on each pass.
+
+    Algorithm
+    ---------
+    1. A seed mask marks low-intensity peaks (below the median apex
+       intensity) as noise; their base regions seed ``noise_bool``.
+    2. For each peak, a symmetric window of ``noise_mz_width`` (converted
+       to a point count via ``discret_coeffs``) is extended outward from
+       the peak until ``n_half`` noise points are collected on each side.
+    3. Mean and standard deviation of the baseline are estimated from the
+       windowed points (sample std, ddof=1).
+    4. Peaks with ``SNR = (apex - noise_mean) / noise_std >= SNR_threshold``
+       are kept; the noise mask is updated and steps 2-4 repeat for
+       ``noise_est_iter`` iterations.
+
+    Parameters
+    ----------
+    mz, intens : np.ndarray (float64)
+        m/z axis and matching intensity profile.
+    pmz_array : np.ndarray (int64)
+        Apex positions (indices into ``intens``), one per peak.
+    pint_array : np.ndarray (float64)
+        Apex intensities, one per peak.
+    left_min, right_min : np.ndarray (int64)
+        Peak-base boundaries (valleys) as indices into ``intens``.
+    SNR_threshold : float
+        Minimum signal-to-noise ratio for a peak to be kept.
+    noise_mz_width : float, optional
+        Width of the noise window. When ``discret_coeffs`` is None, this
+        is interpreted as a point count. Default is ``9.0``.
+    noise_est_iter : int, optional
+        Number of noise-estimation refinement iterations. Default is ``3``.
+    discret_coeffs : np.ndarray (float64) or None, optional
+        Polynomial coefficients mapping m/z to local point density. If
+        None, ``noise_mz_width`` is used as a point count directly.
+        Default is None.
+
+    Returns
+    -------
+    pmz_array : np.ndarray (int64)
+        Apex positions of the peaks passing the SNR filter.
+    pint_array : np.ndarray (float64)
+        Corresponding apex intensities.
+    left_min, right_min : np.ndarray (int64)
+        Peak-base boundaries of the surviving peaks.
+    noise_std, noise_mean : np.ndarray (float64)
+        Local noise statistics (sample std, mean) for each surviving peak.
+
+    Notes
+    -----
+    - Positions are returned as *indices* into ``mz`` and ``intens`` arrays, not m/z values.
+    - Uses sample standard deviation (ddof=1) for the noise estimate.
+    - Does not mutate input arrays.
+    """
+    
+    xsize = mz.size
+    n_peaks = pmz_array.size
+    noise_bool = np.ones(xsize,dtype = np.bool_)
+    dots_half = np.zeros(n_peaks,dtype = np.int64)
+    psl_left = np.zeros(n_peaks,dtype = np.int64)
+    psl_right = np.zeros(n_peaks,dtype = np.int64)
+    noise_std = np.zeros(n_peaks,dtype = np.float64)
+    noise_mean = np.zeros(n_peaks,dtype = np.float64)
+
+    quantile_threshold = np.quantile(pint_array,0.50) #Считаем, что больше половины интенсивностей ниже этого значения - чистый шум,
+                                                        #поэтому затравочный фильтр => какие точки - сигнал, а какие шум определяем по этому значению
+    filtered = pint_array <= quantile_threshold
+    for n in range(n_peaks):
+        pext_left = left_min[n]
+        pext_right = right_min[n]
+
+        noise_bool[pext_left:pext_right+1] = filtered[n] 
+
+    for n in range(n_peaks):
+        pext_left = left_min[n]
+        pext_right = right_min[n]
+        mzd_val = 0.0
+        loc_mz = mz[pmz_array[n]]
+        if discret_coeffs is not None:
+            for c in discret_coeffs:
+                mzd_val = mzd_val * loc_mz + c
+        else:
+            mzd_val = 1 # noise_mz_width - считается по точкам теперь, а не по абсолутному значению m/z
+        n_half = max(noise_mz_width//(2*mzd_val),1)
+        dots_half[n] = n_half 
+
+        count = 0        
+        for i in range(pext_left, -1,-1):
+            if noise_bool[i]:
+                count += 1
+                if count == n_half or i == 0:
+                    sl_left = i
+                    break
+
+        count = 0
+        for i in range(pext_right, xsize):
+            if noise_bool[i]:
+                count += 1
+                if count == n_half or i == xsize-1:
+                    sl_right = i
+                    break
+                
+        sum_ = 0.0
+        sum_sq = 0.0
+        count_local = 0
+
+        if noise_bool[slice(sl_left, sl_right + 1)].sum() >2:
+            for i in range(sl_left, pext_left +1): 
+                if noise_bool[i]:
+                    val = intens[i]
+                    sum_ += val
+                    sum_sq += val * val
+                    count_local += 1
+            for i in range(pext_right, sl_right + 1):
+                if noise_bool[i]:
+                    val = intens[i]
+                    sum_ += val
+                    sum_sq += val * val
+                    count_local += 1
+        else:
+            for i in range(sl_left, pext_left +1): 
+                if ~noise_bool[i]:
+                    val = intens[i]
+                    sum_ += val
+                    sum_sq += val * val
+                    count_local += 1
+            for i in range(pext_right, sl_right + 1):
+                if ~noise_bool[i]:
+                    val = intens[i]
+                    sum_ += val
+                    sum_sq += val * val
+                    count_local += 1
+
+        mean = sum_ / count_local
+        # var = (sum_sq / count_local) - mean * mean # ddof = 0
+        var = ((sum_sq - sum_ * mean) / (count_local - 1)) # ddof = 1
+        std = np.sqrt(var) if var > 0 else 0.0
+        
+        noise_std[n] = std
+        noise_mean[n] = mean
+
+        psl_left[n] = sl_left
+        psl_right[n] = sl_right
+    SNR = (pint_array - noise_mean)/noise_std
+    k =  SNR >= SNR_threshold
+    if noise_est_iter > 1:
+        for _ in range(noise_est_iter-1):
+            for n in range(n_peaks):
+                b = k[n]
+                pext_left = left_min[n]
+                pext_right = right_min[n]
+                noise_bool[pext_left:pext_right+1] = ~b
+
+            for n in range(n_peaks):
+                pext_left = left_min[n]
+                pext_right = right_min[n]
+                n_half = dots_half[n] 
+
+                count = 0        
+                for i in range(pext_left, -1,-1):
+                    if noise_bool[i]:
+                        count += 1
+                        if count == n_half or i == 0:
+                            sl_left = i
+                            break
+
+                count = 0
+                for i in range(pext_right, xsize):
+                    if noise_bool[i]:
+                        count += 1
+                        if count == n_half or i == xsize-1:
+                            sl_right = i
+                            break
+                if psl_left[n] != sl_left and psl_right[n] != sl_right:
+                    sum_ = 0.0
+                    sum_sq = 0.0
+                    count_local = 0
+                    if noise_bool[slice(sl_left, sl_right + 1)].sum() >2:
+                        for i in range(sl_left, pext_left +1): 
+                            if noise_bool[i]:
+                                val = intens[i]
+                                sum_ += val
+                                sum_sq += val * val
+                                count_local += 1
+                        for i in range(pext_right, sl_right + 1):
+                            if noise_bool[i]:
+                                val = intens[i]
+                                sum_ += val
+                                sum_sq += val * val
+                                count_local += 1
+                    else:
+                        for i in range(sl_left, pext_left +1): 
+                            if ~noise_bool[i]:
+                                val = intens[i]
+                                sum_ += val
+                                sum_sq += val * val
+                                count_local += 1
+                        for i in range(pext_right, sl_right + 1):
+                            if ~noise_bool[i]:
+                                val = intens[i]
+                                sum_ += val
+                                sum_sq += val * val
+                                count_local += 1
+                        
+                    mean = sum_ / count_local
+                    # var = (sum_sq / count_local) - mean * mean # ddof = 0
+                    var = ((sum_sq - sum_ * mean) / (count_local - 1)) # ddof = 1
+                    std = np.sqrt(var) if var > 0 else 0.0
+                    noise_std[n] = std
+                    noise_mean[n] = mean
+
+
+                    psl_left[n] = sl_left
+                    psl_right[n] = sl_right
+            SNR = (pint_array - noise_mean)/noise_std
+            k = SNR >= SNR_threshold
+    pmz_array = pmz_array[k] 
+    pint_array = pint_array[k] 
+    left_min = left_min[k] 
+    right_min = right_min[k] 
+    noise_std = noise_std[k]
+    noise_mean = noise_mean[k]
+    return pmz_array, pint_array, left_min, right_min, noise_std, noise_mean
+
+
+@njit
+def _fwhm_interp(mz: np.ndarray[float],
+                 intens: np.ndarray[float],
+                 pmz_array: np.ndarray[float], 
+                 pint_array: np.ndarray[float], 
+                 left_min: np.ndarray[int], 
+                 right_min: np.ndarray[int]):
+    """Interpolate the FWHM boundaries of each peak.
+
+    Internal kernel for :func:`peakpicker`. For every peak, finds the m/z
+    positions where the intensity drops to half its apex value on the
+    left and right sides of the peak.
+
+    Parameters
+    ----------
+    mz, intens : np.ndarray (float64)
+        m/z axis and matching intensity profile.
+    pmz_array : np.ndarray (int64)
+        Apex positions of the peaks (indices into ``intens``).
+    pint_array : np.ndarray (float64)
+        Apex intensities, one per peak.
+    left_min, right_min : np.ndarray (int64)
+        Peak-base boundaries (valleys) as indices into ``intens``,
+        such that ``left_min[n] < pmz_array[n] < right_min[n]``.
+
+    Returns
+    -------
+    fwhm_left : np.ndarray (float64)
+        Interpolated m/z where intensity falls to half the apex on the
+        left side, one per peak.
+    fwhm_right : np.ndarray (float64)
+        Interpolated m/z where intensity falls to half the apex on the
+        right side, one per peak.
+
+    Notes
+    -----
+    - Uses linear interpolation (:func:`np.interp`) between the sampled
+      points bracketing the half-maximum level.
+    - The right boundary is interpolated on a reversed window, so the
+      intensity argument is monotonically decreasing.
+    - The FWHM width itself is ``fwhm_right - fwhm_left``; callers
+      compute it rather than this function returning a width directly.
+    - Does not mutate input arrays.
+    """
+    n_peaks = pmz_array.size
+
+    fwhm_left = np.empty(n_peaks, dtype= np.float64)
+    fwhm_right = np.empty(n_peaks, dtype= np.float64)
+    for n in range(n_peaks):
+        lm =  left_min[n]
+        rm =  right_min[n]
+        vm = pint_array[n]
+        pp = pmz_array[n]
+        half_max = vm / 2.0
+        fwhm_left[n] = np.interp(
+        half_max, intens[lm : pp + 1], mz[lm : pp + 1]
+        )
+        fwhm_right[n] = np.interp(
+            half_max, intens[pp : rm + 1][::-1], mz[pp : rm + 1][::-1]
+        )
+    return fwhm_left, fwhm_right
+
+@njit
+def _peakpicker_core(mz: np.ndarray,
+                    intens: np.ndarray,
+                    heightfilter: float | None = None,
+                    rel_heightfilter: float | None = None,
+                    fwhm_filter: np.ndarray[float] | None = None,
+                    SNR_threshold: float | None = 3.5,
+                    noise_mz_width: float = 5,
+                    discret_coeffs: np.ndarray | None = None,
+                    fwhm_merge_factor: float | None = None,
+                    peaklocation: float = 1,
+                    return_areas: bool = False,
+                    noise_est_iter: int = 3):
+    """Numba kernel for peak detection. Do not call directly.
+
+    Internal implementation of :func:`peakpicker`; inputs are assumed to be
+    already validated by the wrapper.
+
+    Parameters
+    ----------
+    mz, intens : np.ndarray (float64), contiguous
+        m/z axis and matching intensity profile.
+    spectra_ind : int
+        Spectrum index, written into the first column of the output.
+    fwhm_filter : np.ndarray (1 or 2,) or None
+        Peak-width filter; scalar = lower bound, pair = (min, max) range.
+    fwhm_merge_factor : float or None
+        Merge peaks closer than ``FWHM * fwhm_merge_factor``.
+    heightfilter : float or None
+        Drop peaks with apex intensity below this value.
+    rel_heightfilter : float or None
+        Drop peaks whose apex intensity is below this fraction of the
+        spectrum maximum.
+    peaklocation : float
+        Fraction of peak height for the barycentric centre and merge thresholds.
+    noise_est_iter : int
+        Noise-estimation iterations (>= 1).
+    SNR_threshold : float or None
+        Drop peaks with SNR below this threshold.
+    discret_coeffs : np.ndarray (float64) or None
+        Polynomial coefficients for local point density; None -> use
+        ``noise_mz_width`` as a point count.
+    noise_mz_width : float
+        Width of the noise window (in points when ``discret_coeffs`` is None).
+    return_areas : bool
+        Whether to compute peak areas.
+
+    Returns
+    -------
+    tuple of ndarrays
+        ``(peak_mz_idx, peak_intensity, areas, snr, left_idx, right_idx,
+        fwhm, noise_std, noise_mean)``. Positions are *indices*, not m/z;
+        the wrapper converts them to m/z and orders columns via ``headers``.
+
+    Notes
+    -----
+    - Does not mutate input arrays.
+    - Expects contiguous float64 arrays; pass ``np.ascontiguousarray`` copies.
+    """
+
+    xsize = intens.size
+    valley_dots = np.where(np.diff(intens) !=0)[0] 
+    valley_dots = _append(valley_dots,xsize-1)    
+    loc_min = np.diff(intens[valley_dots])
+    loc_min = (np.array([True,*(loc_min < 0)])) & np.array(([*(loc_min > 0),True]))
+    left_min = _prepend(valley_dots[:-1],-1)[loc_min][:-1] + 1
+    right_min = valley_dots[loc_min][1:]
+
+    # Compute max for every peak
+    n_peaks = left_min.size
+    pint_array = np.empty(n_peaks,dtype=np.float64)
+    pmz_array = np.empty(n_peaks,dtype=np.int64)
+    for idx in range(n_peaks):
+        lm = left_min[idx]
+        rm = right_min[idx]
+        pint_array[idx] = np.max(intens[lm:rm])
+        pmz_array[idx] = lm + np.argmax(intens[lm:rm])
+
+    # Remove peaks below the height, relative height
+    if heightfilter is not None and rel_heightfilter is not None:
+        k = (pint_array >= heightfilter) & (pint_array/max(intens) >= rel_heightfilter)
+        pint_array = pint_array[k]
+        left_min = left_min[k]
+        right_min = right_min[k]
+        pmz_array = pmz_array[k]
+    elif heightfilter is not None:
+        k = (pint_array >= heightfilter)
+        pint_array = pint_array[k]
+        left_min = left_min[k]
+        right_min = right_min[k]
+        pmz_array = pmz_array[k]
+    elif rel_heightfilter is not None:
+        k = (pint_array/max(intens) >= rel_heightfilter)
+        pint_array = pint_array[k]
+        left_min = left_min[k]
+        right_min = right_min[k]
+        pmz_array = pmz_array[k]
+
+    
+
+    if SNR_threshold is not None:
+        pmz_array, pint_array, left_min, right_min, noise_std, noise_mean = _snr_filter(mz,
+                                                                                        intens,
+                                                                                        pmz_array,
+                                                                                        pint_array, 
+                                                                                        left_min, 
+                                                                                        right_min, 
+                                                                                        SNR_threshold,
+                                                                                        noise_mz_width,
+                                                                                        noise_est_iter,
+                                                                                        discret_coeffs)
+    else:
+        n_peaks = pint_array.size
+        noise_std = np.zeros(n_peaks,dtype = np.float64)
+        noise_mean = np.zeros(n_peaks,dtype = np.float64)
+    
+    fwhm_left, fwhm_right = _fwhm_interp(mz,intens,pmz_array,pint_array, left_min, right_min)
+   
+    if fwhm_filter is not None:
+        fwhm = (fwhm_right - fwhm_left)
+        if fwhm_filter.size == 2:
+            k = (fwhm >= fwhm_filter[0]) & (fwhm <= fwhm_filter[1])
+        elif fwhm_filter.size == 1:
+            k = (fwhm >= fwhm_filter)
+        else:
+            raise ValueError("fwhmfilter must be a scalar or a tuple of two scalars")
+        pmz_array = pmz_array[k]
+        pint_array = pint_array[k]
+        left_min = left_min[k]
+        right_min = right_min[k]
+        fwhm_left = fwhm_left[k]
+        fwhm_right = fwhm_right[k]
+        noise_std = noise_std[k]
+        noise_mean = noise_mean[k]
+        
+    if fwhm_merge_factor is not None:
+        n_peaks = pmz_array.size
+        eps = np.sqrt(np.finfo(np.float64).eps)
+        # Индексы переразбитых пиков
+        j_prealloc = np.empty(n_peaks, dtype=np.int64) # Выносим за цикл while, так как считаем, что почти не затронет памяти, но сэкономит время на создание нового массива в памяти в цикле while
+        while True:
+            fwhm_res = (fwhm_right - fwhm_left)*fwhm_merge_factor
+            peak_thld = pint_array*peaklocation - eps
+            pkmz = np.empty(n_peaks, dtype=np.float64)
+            
+            for n in range(n_peaks):
+                lm = left_min[n]
+                rm = right_min[n]
+                th = peak_thld[n]
+
+                sum_int = 0.0
+                sum_mz_int = 0.0
+                any_ = False
+                for i in range(lm, rm):
+                    intens_value = intens[i]
+                    if intens_value > th:
+                        sum_int += intens_value
+                        sum_mz_int += mz[i]*intens_value
+                        any_ = True
+                pkmz[n] = sum_mz_int / sum_int if any_ else np.nan
+            # dpkmz = [inf, diff, inf]
+            dpkmz = np.empty(n_peaks + 1, dtype=np.float64)
+            for n in range(1, n_peaks):
+                dpkmz[n] = pkmz[n] - pkmz[n - 1]
+            dpkmz[0] = np.inf
+            dpkmz[-1] = np.inf
+
+
+            count = 0
+            for n in range(1, n_peaks):
+                prev_n = n - 1
+                d = dpkmz[n]
+                if d <= fwhm_res[prev_n] and d <= dpkmz[prev_n] and d < dpkmz[n + 1]:
+                    j_prealloc[count] = prev_n
+                    count += 1
+            j = j_prealloc[:count]
+            j_size = j.size
+            if j_size == 0:
+                break
+
+            for unres_peak_idx in range(j_size):
+                idx = j[unres_peak_idx]
+                idx_next = idx + 1
+                if pint_array[idx_next] > pint_array[idx]:
+                    pint_array[idx] = pint_array[idx_next]
+                    pmz_array[idx] = pmz_array[idx_next]
+                    noise_mean[idx] = noise_mean[idx_next]
+                    noise_std[idx] = noise_std[idx_next]
+            # Удаление
+            j_right = j + 1
+            left_min = np.delete(left_min, j_right)
+            right_min = np.delete(right_min, j)
+            pint_array = np.delete(pint_array, j_right)
+            noise_std = np.delete(noise_std, j_right)
+            noise_mean = np.delete(noise_mean, j_right)
+            pmz_array = np.delete(pmz_array, j_right)
+
+            # Обновляем FWHM-массивы (нужно для адаптивного режима)
+            fwhm_left = np.delete(fwhm_left, j_right)
+            fwhm_right = np.delete(fwhm_right, j)
+            n_peaks = left_min.size
+
+
+    left_bool = (pmz_array - left_min) > 2
+    right_bool = (right_min - pmz_array) > 2
+    if left_bool.any():
+        left_min[left_bool] += 1
+    if right_bool.any():
+        right_min[right_bool] -= 1
+    
+
+    # compute peaks area
+    n_peaks = left_min.size
+    areas = np.empty(n_peaks, dtype=np.float64)
+    if return_areas:
+        for idx in range(n_peaks):
+            start = left_min[idx]
+            end = right_min[idx] + 1
+            intens_slice = intens[start:end]
+            mz_slice = mz[start:end]
+            min_intens = np.min(intens_slice)
+            if min_intens < 0:
+                offset = -min_intens
+            else:
+                offset = 0
+            area = 0.0
+            for i in range(intens_slice.size-1):
+                y1 = intens_slice[i] + offset 
+                y2 = intens_slice[i+1] + offset
+                x1, x2 = mz_slice[i], mz_slice[i+1]
+                area += (y1 + y2) * (x2 - x1) / 2
+            areas[idx] = area
+    fwhm = fwhm_right-fwhm_left
+    SNR = (pint_array - noise_mean)/noise_std
+    return mz[pmz_array], pint_array, areas, SNR, mz[left_min], mz[right_min], fwhm, noise_std, noise_mean
