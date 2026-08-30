@@ -1579,16 +1579,26 @@ class Drawer():
         for r in roi:
             if draw_spectrum_idx is None:
                 rmeta = roi_metadata.loc[r]
-                idxs = Indexator(rmeta["idxroi"].to_numpy(int))
+                idxs = Indexator(rmeta["idxroi"])
                 spectrum_idx = list(idxs)[np.random.randint(0,idxs.count)]
             else:
                 spectrum_idx = draw_spectrum_idx
 
             processing_stream = pipeline._multistream_pipeline(Pipeline._alldata_wrapper, r, idxs = spectrum_idx, dtypeconv=dtypeconv)
-            mz, headers = next(processing_stream)
+            _, headers = next(processing_stream)
             mz_dict, intensity_dict, peaklist = next(processing_stream)
-            
-            self._draw(mz_dict[spectrum_idx], intensity_dict[spectrum_idx].squeeze(), peaklist, headers, r, draw_mz_range, spectrum_idx, axes, draw_raw)
+            mz = mz_dict[spectrum_idx]
+            mz_crop_range  = prepdata[r]["modify_raw_spectrum"]["mz_crop_range"]
+            if mz_crop_range is not None and draw_mz_range is None:
+                low_mz, high_mz = mz_crop_range
+                if low_mz is None:
+                    low_mz = mz.min()
+                if high_mz is None:
+                    high_mz = mz.max()
+                roi_draw_mz_range = (low_mz, high_mz)
+            else:
+                roi_draw_mz_range = draw_mz_range
+            self._draw(mz_dict[spectrum_idx], intensity_dict[spectrum_idx].squeeze(), peaklist, headers, r, roi_draw_mz_range, spectrum_idx, axes, draw_raw)
 
     def draw_processed_data(self,
                             roi: str | list | None = None,
@@ -1641,6 +1651,7 @@ class Drawer():
                 with File(self.processed_spectra_path, "r") as hdf5:
                     data_int = hdf5[r]["int"][datasource._get_local_roi_idx(spectrum_idx), :]
                     mz = hdf5[r]["mz"][:]
+                    roi_draw_mz_range = (mz.min(), mz.max())
             else:
                 if self.prepdata is None:
                     raise ValueError("No processed spectra path or configs to get processed spectrum")
@@ -1651,6 +1662,16 @@ class Drawer():
                     mz_dict, intensity_dict, _ = next(stream)
                     mz = mz_dict[spectrum_idx]
                     data_int = intensity_dict[spectrum_idx].squeeze()
+                    mz_crop_range  = self.prepdata[r]["modify_raw_spectrum"]["mz_crop_range"]
+                    if mz_crop_range is not None and draw_mz_range is None:
+                        low_mz, high_mz = mz_crop_range
+                        if low_mz is None:
+                            low_mz = mz.min()
+                        if high_mz is None:
+                            high_mz = mz.max()
+                        roi_draw_mz_range = (low_mz, high_mz)
+                    else:
+                        roi_draw_mz_range = draw_mz_range
             if os.path.exists(self.peaklists_path):
                 with File(self.peaklists_path, "r") as hdf5:
                     headers = hdf5[r].attrs["Column headers"]
@@ -1658,8 +1679,8 @@ class Drawer():
             else:
                 peaklist = None
 
-            self._draw(mz, data_int, peaklist, headers, r, draw_mz_range, spectrum_idx, axes)
-
+            self._draw(mz, data_int, peaklist, headers, r, roi_draw_mz_range, spectrum_idx, axes)
+            plt.show()
     def draw_peak_density(self,
                            roi: str | list | None = None,
                            draw_mz_borders: tuple[float, float] | None = None):

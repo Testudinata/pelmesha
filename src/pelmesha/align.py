@@ -24,7 +24,7 @@ class Aligner:
         x: np.ndarray,
         array: ty.Optional[np.ndarray],
         peaks: ty.Iterable[float],
-        method: str = "quadratic",
+        method: str = "pchip",
         width: float = 0.1,
         ratio: float = 2.5,
         resolution: int = 100,

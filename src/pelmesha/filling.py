@@ -1020,7 +1020,7 @@ class BaseLoader(ABC):
         :return: Polynomial coefficients (highest degree first).
         :rtype: np.ndarray
         """
-        n_med = 7
+        n_med = 75
         nsize_matrix = degree + 1
         sum_XTX = np.zeros((nsize_matrix, nsize_matrix))
         sum_XTy = np.zeros(nsize_matrix)

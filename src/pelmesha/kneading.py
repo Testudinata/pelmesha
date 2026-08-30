@@ -80,8 +80,8 @@ def preprocess_configuration_base(
     else: 
         headers_list = ["spectra_ind", "mz", "Intensity",  
                         "PextL", "PextR", "FWHM"]
-    internal_configs['peakpick'] = {"discret_coeffs": datasource.roi_metadata.loc[roi,'discret_coeffs'],
-                                    "headers": headers_list}
+    # internal_configs['peakpick'] = {"discret_coeffs": datasource.roi_metadata.loc[roi,'discret_coeffs'],
+    internal_configs['peakpick'] = {"headers": headers_list}
     return resampled_mz, headers_list, internal_configs
 
 
@@ -177,7 +177,7 @@ def peakpicking_base(
     return peakpicker(mz, 
                       intensity, 
                       idx, 
-                      discret_coeffs=internal_configs['discret_coeffs'],
+                    #   discret_coeffs=internal_configs['discret_coeffs'],
                       headers=internal_configs['headers'],
                       **configs)
 
@@ -392,7 +392,6 @@ def peakpicker(mz: np.ndarray,
                peaklocation: float = 1,
                noise_est_iter: int = 3,
                SNR_threshold: float | None = 3.5,
-               discret_coeffs: np.ndarray | None = None,
                noise_mz_width: float = 9.0,
                return_areas: bool = True,
                headers: list[str] = ["spectra_ind", "mz", "Intensity", "Area",
@@ -439,9 +438,20 @@ def peakpicker(mz: np.ndarray,
         A scalar keeps peaks wider than it; a ``(min, max)`` tuple keeps
         peaks within that range. Default is ``None``.
     fwhm_merge_factor : float or None, optional
-        Merges peaks that are closer to each other than
-        ``FWHM * fwhm_merge_factor`` (i.e. oversegmented or poorly
-        resolved peaks). Default is ``None``.
+        Merges peaks closer than ``FWHM * fwhm_merge_factor``. Default is ``None``.
+
+        Practical zones for spurious-peak removal:
+        - ``< 0.85``: guaranteed artefact — always merge (Rayleigh limit).
+        - ``0.85–1.70``: uncertainty zone — merge only after shape inspection.
+        - ``≥ 1.70`` (up to ~2.5): independence zone — do not merge; peaks are resolved.
+        
+        Key reference values:
+        - 1.00: IUPAC standard (50% valley).
+        - 1.18: 10% descent criterion (near baseline).
+        - 1.70: 4σ, 98.5% valley — safe lower bound for de-duplication.
+        - 2.55: 6σ, 99.9% valley — ideal upper bound (no mutual distortion).
+        - 3.00: noise-limited limit (99.99% valley), useful only on high-dynamic instruments.
+
     heightfilter : float or None, optional
         Removes peaks whose absolute apex intensity is below this value.
         Default is ``None``.
@@ -459,14 +469,8 @@ def peakpicker(mz: np.ndarray,
     SNR_threshold : float or None, optional
         Removes peaks whose signal-to-noise ratio is below this
         threshold. Default is ``3.5``.
-    discret_coeffs : np.ndarray or None, optional
-        Polynomial coefficients mapping m/z to the local point density.
-        If ``None``, ``noise_mz_width`` is interpreted as number of points.
-        Default is ``None``.
     noise_mz_width : float, optional
-        Width of the m/z window used to estimate the noise. If
-        ``discret_coeffs`` is ``None``, this value is used directly as
-        the window width. Default is ``9.0``.
+        Width of the m/z window used to estimate the noise. Default is ``9.0``.
     return_areas : bool, optional
         Whether to compute and return the peak area. Default is ``True``.
     headers : list of str, optional
@@ -487,7 +491,6 @@ def peakpicker(mz: np.ndarray,
                                                                                                   fwhm_filter,
                                                                                                   SNR_threshold,
                                                                                                   noise_mz_width,
-                                                                                                  discret_coeffs,
                                                                                                   fwhm_merge_factor,
                                                                                                   peaklocation,
                                                                                                   return_areas,
@@ -755,13 +758,15 @@ def peakpicker_legacy(mz,
 def modify_raw_spectrum(mz,
                         ints,
                         mz_discret_coeffs,
+                        mz_crop_range = None,
                         zero_points_to_peaks_ext = False,
                         mz_segments_to_zero = None):
     """Modify raw spectrum data before further processing.
 
-    Optionally zeroes out the signal in specified m/z segments and/or adds
-    zero-value points around peak edges when peaks are cropped (e.g. when a
-    peak consists of only one or two points).
+    Optionally:
+    - Zero out the signal in specified m/z segments.
+    - Crop the spectrum to a given m/z range.
+    - Add zero-value points around peak edges when peaks are cropped.
 
     Parameters
     ----------
@@ -774,19 +779,35 @@ def modify_raw_spectrum(mz,
     zero_points_to_peaks_ext : bool, optional
         If ``True``, add zero points to peak extensions. Default ``False``.
     mz_segments_to_zero : list of tuple, optional
-        A list of ``(mz_min, mz_max)`` segments whose signal is set to zero.
+        A list of ``(mz_min, m/z_max)`` segments whose signal is set to zero.
         Default ``None``.
+    mz_crop_range : tuple of float or None, optional
+        If provided as ``(min_mz, max_mz)``, the spectrum is cropped to this
+        range. If min_mz or max_mz is ``None``, the spectrum is not cropped from this side. 
+        Points outside the range are removed. Default ``None`` (no cropping at all).
 
     Returns
     -------
     tuple of np.ndarray
         The modified ``(mz, ints)`` pair.
     """
+
+    if mz_crop_range is not None:
+        mz, ints = crop_spectrum(mz, ints, *mz_crop_range)
     if mz_segments_to_zero and mz_discret_coeffs is not None:
         mz, ints = reduce_signal_to_zero(mz, ints, mz_segments_to_zero)
     if zero_points_to_peaks_ext:
         mz, ints = add_zero_points_to_peaks(mz, ints, mz_discret_coeffs)
     return mz, ints
+
+def crop_spectrum(mz, ints, low_mz=None, high_mz=None):
+    left = 0
+    right = mz.size
+    if low_mz is not None:
+        left = np.searchsorted(mz, low_mz, side='left')
+    if high_mz is not None:
+        right = np.searchsorted(mz, high_mz, side='right')
+    return mz[left:right], ints[left:right]
 
 def add_zero_points_to_peaks(mz: np.ndarray,
                              ints: np.ndarray, 
