@@ -195,7 +195,7 @@ def msalign(
     x: np.ndarray,
     array: np.ndarray,
     align_peaks: List | None = None, # if None - return array
-    align_method: str = "cubic",
+    align_method: str = "pchip",
     align_width: float = 10,
     align_ratio: float = 2.5,
     align_resolution: int = 100,
@@ -236,7 +236,7 @@ def msalign(
     align_peaks : list / None
         list of reference peaks that must be found in the xvals vector. Default: None. If None - return array as is
     align_method : str
-        interpolation method. Default: 'cubic'. MATLAB version uses 'pchip' which is significantly slower in Python
+        interpolation method. Default: 'pchip'. Options: "pchip", "zero", "slinear", "quadratic", "cubic", "linear"
     align_pweights: list (optional)
         list of weights associated with the list of peaks. Must be the same length as list of peaks
     align_width : float (optional)
@@ -821,6 +821,7 @@ def add_zero_points_to_peaks(mz: np.ndarray,
     mz_discr = mz_discretion_model(mz[:-1])
     big_gap_bool = diff_mz > 2.5*mz_discr
     small_gap_bool = (diff_mz > 1.25*mz_discr) ^ big_gap_bool
+    
     new_val = {}
     if np.any(big_gap_bool):
         new_val['left'] = mz[np.append(big_gap_bool, [False])] + mz_discr[big_gap_bool]
@@ -835,7 +836,7 @@ def add_zero_points_to_peaks(mz: np.ndarray,
         idx = np.searchsorted(mz, new_val)
         mz = np.insert(mz, idx, new_val)
         ints = np.insert(ints, idx, 0)
-        
+    
     # sorting by mz
     idx_sort = np.argsort(mz)
     new_loc_mz = mz[idx_sort]
@@ -843,6 +844,42 @@ def add_zero_points_to_peaks(mz: np.ndarray,
 
     return new_loc_mz, new_loc_ints
 
+def add_zero_points_to_peaks_extended(mz: np.ndarray,
+                                      ints: np.ndarray, 
+                                      mz_discret_coeffs: list,
+                                      ) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Add zero points to peaks
+    """
+    mz_discretion_model = np.poly1d(mz_discret_coeffs)
+
+    diff_mz = np.diff(mz)
+    mz_discr = mz_discretion_model(mz[:-1])
+    big_gap_bool = diff_mz > 2.5*mz_discr
+    small_gap_bool = (diff_mz > 1.25*mz_discr) ^ big_gap_bool
+    
+    new_val = {}
+    if np.any(big_gap_bool):
+        new_val['left'] = mz[np.append(big_gap_bool, [False])] + mz_discr[big_gap_bool]
+        new_val['right'] = mz[np.append([False], big_gap_bool)] - mz_discr[big_gap_bool]
+
+    if np.any(small_gap_bool):
+        new_val['small'] = mz[np.append(small_gap_bool, [False])] + mz_discr[small_gap_bool]
+
+    if new_val:
+        new_val['borders'] = [mz[0]-mz_discr[0], mz[-1]+mz_discr[-1]]
+        new_val = np.concatenate(list(new_val.values()), axis=None)
+        idx = np.searchsorted(mz, new_val)
+        mz = np.insert(mz, idx, new_val)
+        ints = np.insert(ints, idx, 0)
+    
+    # sorting by mz
+    idx_sort = np.argsort(mz)
+    new_loc_mz = mz[idx_sort]
+    new_loc_ints = ints[idx_sort]
+
+    return new_loc_mz, new_loc_ints
+tremendous_gap_bool = diff_mz > 5*mz_discr
 def reduce_signal_to_zero(mz: np.ndarray,
                           ints: np.ndarray,
                           mz_segments_to_zero: list[tuple[float, float]]) -> tuple[np.ndarray, np.ndarray]:

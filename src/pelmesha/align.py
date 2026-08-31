@@ -65,7 +65,7 @@ class Aligner:
         peaks : list
             list of reference peaks that must be found in the xvals vector
         method : str
-            interpolation method. Default: 'cubic'. MATLAB version uses 'pchip' which is significantly slower in Python
+            interpolation method. Default: 'pchip'.
         weights: list (optional)
             list of weights associated with the list of peaks. Must be the same length as list of peaks
         width : float (optional)
