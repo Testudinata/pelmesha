@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from itertools import  pairwise
 from functools import cached_property
 from pelmesha.dough import Indexator, SliceIndexator
-from pelmesha.utensils import del_hdf5
+from pelmesha.utensils import del_hdf5, _index_to_segment
 import warnings
 
 class DataSource:
@@ -733,6 +733,7 @@ class DataSource:
             A list of index-segment arrays, each fitting within the RAM
             budget.
         """
+        idxs = self._normalize_indices(idxs)
         spectrum_sizes = self.get_spectrum_sizes(idxs)
         idxs_batches = []
         remainder = []
@@ -745,9 +746,7 @@ class DataSource:
             Ramcap = self.Ramcap 
         else:
             Ramcap = Ramcap_GB * (1024 ** 3)
-        Ram_usage_per_batch = Ramcap/ (cpu_count * d)
-        
-        idxs = self._normalize_indices(idxs)
+        Ram_usage_per_batch = Ramcap/ (cpu_count * d)        
 
         length_per_batch = Ram_usage_per_batch // np.dtype(self.metadata['dtype_raw'].iloc[0]).itemsize
         if self.dcont or size_per_spec:
@@ -759,7 +758,7 @@ class DataSource:
             remainder_count = 0
             
             for idx in idxs:
-                assert idx.size == 2
+                assert idx.size == 2 # TODO del
                 segment_size = idx[1]-idx[0]
                 if remainder:
                     if remainder_count+segment_size >= chunk_size:
@@ -773,12 +772,17 @@ class DataSource:
                     else:
                         remainder.append(idx)
                         remainder_count = remainder_count + segment_size
+                        continue
                 if segment_size >= chunk_size:
-                    for idx_batch in pairwise(np.arange(idx[0], idx[1], chunk_size)):
-                        idxs_batches.append(np.array(idx_batch))
-                    if idx[1] != idx_batch[1]:
-                        remainder.append([idx_batch[1], idx[1]])
-                        remainder_count = remainder_count + idx[1] - idx_batch[1]
+                    split_points = np.arange(idx[0], idx[1], chunk_size)
+                    if split_points[-1] != idx[1]:
+                        split_points = np.append(split_points,idx[1])
+                    for idx_batch in pairwise(split_points):
+                        if idx_batch[1] - idx_batch[0] < chunk_size:
+                            remainder.append(idx_batch)
+                            remainder_count = remainder_count + idx[1] - idx_batch[1]
+                        else:
+                            idxs_batches.append(np.array(idx_batch))
                 else:
                     remainder.append(idx)
                     remainder_count = remainder_count + segment_size
@@ -788,10 +792,9 @@ class DataSource:
                 remainder_count = 0
         else:
             length_usage = 0
-            idxs = Indexator(idxs)
             idx_start = idxs[0][0]
             idx_last = idx_start - 1
-            for n, idx in enumerate(idxs):
+            for n, idx in enumerate(Indexator(idxs)):
                 if idx - idx_last > 1: # Учёт сегментного разрыва в индексации
                     remainder.append(np.array([idx_start, idx_last + 1]))
                     idx_start = idx
@@ -800,54 +803,77 @@ class DataSource:
                     if remainder:
                         idxs_batches.append(np.vstack(remainder))
                         remainder = []
-                    else:   
-                        idxs_batches.append(np.array([idx_start, idx + 1]))
+                    # else:   
+                        # idxs_batches.append(np.array([idx_start, idx + 1]))
+                    idxs_batches.append(np.array([idx_start, idx + 1]))
                     idx_start = idx
                     length_usage = 0
                 else:
                     length_usage += spectrum_sizes[n]
                 idx_last = idx
-
+            
             if length_usage != 0:
+                
                 if remainder:
                     idxs_batches.append(np.vstack(remainder))
                     remainder = []
-                else:
-                    idxs_batches.append(np.array([idx_start, idx + 1]))
+                # else:
+                    # idxs_batches.append(np.array([idx_start, idx + 1]))
+                idxs_batches.append(np.array([idx_start, idx + 1]))
         n_spec = len(spectrum_sizes)
-        if len(idxs_batches) < cpu_count and n_spec > cpu_count*3:
-            batch_size = max(1, int(n_spec/(cpu_count*3)))
-            target = cpu_count * 3
-            idxs_batches = [np.asarray(b, dtype=np.int64).reshape(-1, 2)
-                            for b in idxs_batches]
-            while len(idxs_batches) < target:
-                # Ищем самый крупный батч для нарезки.
-                best_i, best_dots = -1, 0
-                for i, batch in enumerate(idxs_batches):
-                    dots = int(np.sum(batch[:, 1] - batch[:, 0]))
-                    if dots > best_dots:
-                        best_dots, best_i = dots, i
-                if best_i < 0 or best_dots < 2:
+        min_batches = cpu_count * 3
+        if len(idxs_batches) < cpu_count and n_spec > min_batches:
+            """Равномерно разбить сегменты индексов на ~min_batches батчей."""
+
+            total = sum(e - s for s, e in idxs)
+            if total == 0 or min_batches <= 1:
+                return np.asarray(idxs, dtype=np.int64)
+
+            # 2. Накопленные точки на границах сегментов
+            cum = [0]
+            for s, e in idxs:
+                cum.append(cum[-1] + (e - s))
+
+            result = []
+            seg_j = 0  # индекс текущего (не до конца использованного) сегмента
+
+            for k in range(min_batches):
+                lo = total * k / min_batches
+                hi = total * (k + 1) / min_batches
+
+                # Пропускаем сегменты, целиком лежащие ниже lo
+                while seg_j < len(idxs) and cum[seg_j + 1] <= lo:
+                    seg_j += 1
+                if seg_j >= len(idxs):
                     break
-                batch = idxs_batches[best_i]
-                if len(batch) >= 2:
-                    # Несколько сегментов: режем по границе между ними.
-                    cut = (len(batch) + 1) // 2
-                    idxs_batches[best_i] = batch[:cut]
-                    idxs_batches.insert(best_i + 1, batch[cut:])
+
+                # Старт внутри segments[seg_j]
+                start = idxs[seg_j][0] + int(round(lo - cum[seg_j]))
+
+                # Ищем сегмент, в который попадает hi
+                end_j = seg_j
+                while end_j < len(idxs) and cum[end_j + 1] < hi:
+                    end_j += 1
+                if end_j >= len(idxs):
+                    end = idxs[-1][1]
                 else:
-                    # Один сплошной сегмент: нарезаем кусками по batch_size.
-                    s, e = int(batch[0, 0]), int(batch[0, 1])
-                    need = target - len(idxs_batches)
-                    pieces = [[st, min(st + batch_size, e)]
-                              for st in range(s, e, batch_size)]
-                    if len(pieces) < 2:
-                        mid = (s + e) // 2
-                        pieces = [[s, mid], [mid, e]]
-                    idxs_batches[best_i] = np.array(pieces[:1], dtype=np.int64)
-                    idxs_batches[best_i + 1:best_i + 1] = [
-                        np.array(p, dtype=np.int64).reshape(1, 2)
-                        for p in pieces[1:need + 1]]
+                    end = idxs[end_j][0] + int(round(hi - cum[end_j]))
+                    end = max(end, start + 1)  # защита от пустых батчей
+
+                # 3. Собираем батч: от start до end, с полными сегментами между
+                if seg_j == end_j:
+                    batch = [[start, end]]
+                else:
+                    batch = [[start, idxs[seg_j][1]]]
+                    batch.extend([idxs[j][0], idxs[j][1]] for j in range(seg_j + 1, end_j))
+                    batch.append([idxs[end_j][0], end])
+
+                result.append(np.array(batch, dtype=np.int64).reshape(-1, 2))
+
+                # Продвигаем seg_j: если сегмент end_j исчерпан — следующий
+                seg_j = end_j + 1 if end >= idxs[end_j][1] else end_j
+            idxs_batches = result
+        assert Indexator(np.vstack(idxs_batches)).count == Indexator(idxs).count, f' Пропали спектры! На выходе {Indexator(np.vstack(idxs_batches)).count} != на входе {Indexator(idxs).count}' # TODO delete
         return idxs_batches
 
     def _default_save_path(self, suffix = "", prefix = "") -> str:
@@ -1620,7 +1646,7 @@ class loader_cdf(BaseLoader):
         if self.source.get("scan_filters", None) is not None:
                 
             roi_list = np.unique(self.source["scan_filters"])
-            roi_idx = {int(i): Indexator(_to_index(np.where(self.source['scan_filters'].values == i)[0])) for i in
+            roi_idx = {int(i): Indexator(_index_to_segment(np.where(self.source['scan_filters'].values == i)[0])) for i in
                     roi_list}
         else:
             roi_list = [0]
@@ -1709,13 +1735,3 @@ class DataManager():
         if not loader:
             raise ValueError(f'File extension {file_ext} is not supported')
         return loader
-
-def _to_index(arr):
-    ranges = []
-    for _, group in itertools.groupby(enumerate(arr), lambda pair: pair[1] - pair[0]):
-        group_list = list(group)
-        start = group_list[0][1]
-        end = group_list[-1][1] + 1
-        ranges.append((start, end))
-    # return np.asarray(ranges, dtype=np.int64)
-    return ranges

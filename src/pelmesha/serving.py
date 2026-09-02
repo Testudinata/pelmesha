@@ -2,7 +2,7 @@ from pelmesha.cookbook import Configs, PreparedDataSource, PipelineConfigurator,
 from pelmesha.filling import DataSource
 from pelmesha.dough import Indexator, SliceIndexator
 from pelmesha.kneading import _compute_KDE
-from pelmesha.utensils import _summerize_kde_mz, _consesusing_peaks, apply_kde_mzcorrection, _frequency_filtration, _consensus_peaks_summary, show_df, _nunique_summary
+from pelmesha.utensils import _summerize_kde_mz, _consesusing_peaks, apply_kde_mzcorrection, _frequency_filtration, _consensus_peaks_summary, show_df, _nunique_summary, _index_to_segment
 from sklearn.preprocessing import normalize
 from itertools import pairwise
 import pyarrow.parquet as pq
@@ -168,6 +168,8 @@ class DataSet:
                             num_peaks_per_step: int = 5,
                             min_occurence: float = 0.1,
                             return_weight: bool = True,
+                            allowed_indices: np.ndarray | None = None,
+                            allowed_coords: list[dict]| dict | None = None,
                             free_cpus: int = 1,
                             Ram_GB_limit: float = 2,
                             dtypeconv: np.dtype | str | None = None):
@@ -256,12 +258,16 @@ class DataSet:
         multiindex_keys: list[tuple[str, str]] = []
 
         for r in roi:
+            idxs = pipeline._filter_roi_segments(r,
+                                    allowed_indices = allowed_indices,
+                                    allowed_coords = allowed_coords)
             peakpicking_stream = pipeline._multistream_pipeline(
                 pipeline._peakpick_wrapper,
                 roi=r,
                 cpu_num=cpu_num,
                 Ram_GB_limit=Ram_GB_limit,
                 dtypeconv=dtypeconv,
+                idxs = idxs
             )
             multiindex_keys.append((sample, r))
             _, headers_list = next(peakpicking_stream)
@@ -681,6 +687,8 @@ class DataSet:
             )
     def peakpick(self,
                 sample_name: list | str | None = None,
+                allowed_indices: np.ndarray | None = None,
+                allowed_coords: np.ndarray | None = None,
                 free_cpus: int = 1, 
                 draw: bool = True, 
                 draw_mz_range: tuple[float, float] | None = None,
@@ -725,16 +733,17 @@ class DataSet:
 
         for sample in sample_name:
             print(f"Processing SAMPLE {sample}...")
-            Pipeline(self.sources[sample]).peakpick(
-                free_cpus=free_cpus,
-                draw=draw,
-                draw_mz_range=draw_mz_range,
-                draw_spectrum_idx=draw_spectrum_idx,
-                Ram_GB_limit=Ram_GB_limit,
-                h5chunk_size_MB=h5chunk_size_MB,
-                dtypeconv=dtypeconv,
-                **kwargs
-            )
+            Pipeline(self.sources[sample]).peakpick(allowed_indices = allowed_indices,
+                                                    allowed_coords = allowed_coords,
+                                                    free_cpus=free_cpus,
+                                                    draw=draw,
+                                                    draw_mz_range=draw_mz_range,
+                                                    draw_spectrum_idx=draw_spectrum_idx,
+                                                    Ram_GB_limit=Ram_GB_limit,
+                                                    h5chunk_size_MB=h5chunk_size_MB,
+                                                    dtypeconv=dtypeconv,
+                                                    **kwargs
+                                                )
     def estimate_peak_density_kde(self, 
                                   sample_name: list | str | None = None,
                                   free_cpus: int = 1,
@@ -1266,7 +1275,7 @@ class DataSet:
         # --- tbody --------------------------------------------------- #
         html.append("  <tbody>")
         for row_idx, row in enumerate(rows):
-            bg = "#f9f9f9" if row_idx % 2 == 0 else "#ffffff"
+            bg = "#777B7F" if row_idx % 2 == 0 else "#868E96"
             html.append(f'    <tr style="background-color: {bg};">')
 
             for col_idx, cell in enumerate(row):
@@ -1637,13 +1646,18 @@ class Drawer():
         else:
             raise ValueError("Invalid roi")
         datasource = self.datasource
-
+        peaklists_bool = os.path.exists(self.peaklists_path)
         for r in roi:
             headers = None
             if draw_spectrum_idx is None:
-                rmeta = datasource.roi_metadata.loc[r]
-                idxs = Indexator(rmeta["idxroi"])
-                spectrum_idx = list(idxs)[np.random.randint(0,idxs.count)]
+                if peaklists_bool:
+                    peaklist = self.datasource.peaklists(r)
+                    spec_list = peaklist['spectra_ind'].unique().tolist()
+                    spectrum_idx = np.random.choice(spec_list)
+                else:
+                    rmeta = datasource.roi_metadata.loc[r]
+                    idxs = Indexator(rmeta["idxroi"])
+                    spectrum_idx = np.random.choice(idxs)
             else:
                 spectrum_idx = draw_spectrum_idx
             
@@ -1659,7 +1673,7 @@ class Drawer():
                     pipeline = Pipeline(self.prepdata)
                     stream = pipeline._multistream_pipeline(Pipeline._alldata_wrapper,r, cpu_num=1, idxs = spectrum_idx)
                     mz, headers = next(stream)
-                    mz_dict, intensity_dict, _ = next(stream)
+                    mz_dict, intensity_dict, peaklist_streamed = next(stream)
                     mz = mz_dict[spectrum_idx]
                     data_int = intensity_dict[spectrum_idx].squeeze()
                     mz_crop_range  = self.prepdata[r]["modify_raw_spectrum"]["mz_crop_range"]
@@ -1672,12 +1686,13 @@ class Drawer():
                         roi_draw_mz_range = (low_mz, high_mz)
                     else:
                         roi_draw_mz_range = draw_mz_range
-            if os.path.exists(self.peaklists_path):
-                with File(self.peaklists_path, "r") as hdf5:
-                    headers = hdf5[r].attrs["Column headers"]
-                    peaklist = pd.DataFrame(hdf5[r][:], columns = headers).astype({"spectra_ind": int}).query('spectra_ind == @spectrum_idx')
-            else:
-                peaklist = None
+            if not peaklists_bool:
+                peaklist = peaklist_streamed
+            #     with File(self.peaklists_path, "r") as hdf5:
+            #         headers = hdf5[r].attrs["Column headers"]
+            #         peaklist = pd.DataFrame(hdf5[r][:], columns = headers).astype({"spectra_ind": int}).query('spectra_ind == @spectrum_idx')
+            # else:
+            #     peaklist = None
 
             self._draw(mz, data_int, peaklist, headers, r, roi_draw_mz_range, spectrum_idx, axes)
             plt.show()
@@ -2082,6 +2097,8 @@ class Pipeline:
             )
 
     def process(self,
+                allowed_indices: np.ndarray | None = None,
+                allowed_coords: list[dict] | dict | None = None,
                 free_cpus: int = 1, 
                 draw: bool = False, 
                 draw_mz_range: tuple[float, float] | None = None,
@@ -2131,11 +2148,18 @@ class Pipeline:
         bytes_flsize = dtypeconv.itemsize
         chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
         for roi in roi_metadata.index:
+            idxs = self._filter_roi_segments(roi,
+                                             allowed_indices = allowed_indices,
+                                             allowed_coords = allowed_coords)
+            if idxs is not None and not idxs:
+                warnings.warn(f"Skipping {roi}")
+                continue
             processing_stream = self._multistream_pipeline(self._procfunc_wrapper,
                                                            roi = roi,
                                                            cpu_num = cpu_num,
                                                            Ram_GB_limit = Ram_GB_limit,
-                                                           dtypeconv = dtypeconv)
+                                                           dtypeconv = dtypeconv,
+                                                           idxs= idxs)
             gen_mz, headers_list = next(processing_stream)
             if gen_mz is None:
                 processing_stream.close()
@@ -2161,6 +2185,8 @@ class Pipeline:
         
 
     def peakpick(self,
+                 allowed_indices: np.ndarray | None = None,
+                 allowed_coords: np.ndarray | None = None,
                  free_cpus: int = 1,
                  draw: bool = False,
                  draw_mz_range: tuple[float, float] | None = None,
@@ -2212,12 +2238,23 @@ class Pipeline:
         chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
         
         roi_metadata = datasource.roi_metadata
+
+
         for roi in roi_metadata.index:
+                 
+            idxs = self._filter_roi_segments(roi,
+                                             allowed_indices = allowed_indices,
+                                             allowed_coords = allowed_coords)
+
+            if idxs is not None and len(idxs) == 0:
+                warnings.warn(f"Skipping sample {datasource.sample_name} ROI {roi}")
+                continue
             peakpicking_stream = self._multistream_pipeline(self._peakpick_wrapper,
                                                            roi = roi,
                                                            cpu_num = cpu_num,
                                                            Ram_GB_limit = Ram_GB_limit,
-                                                           dtypeconv = dtypeconv)
+                                                           dtypeconv = dtypeconv,
+                                                           idxs = idxs)
             _, headers_list = next(peakpicking_stream)
             
             with File(hdf5_save_path,"a") as hdf5:
@@ -2622,7 +2659,10 @@ class Pipeline:
         else:
             if mz is not None:
                 size_per_spec = len(mz)
-            idxs_batches = datasource.split_idxs(idxs = idxs,cpu_count=cpu_num, Ramcap_GB = Ram_GB_limit, size_per_spec = size_per_spec)
+            idxs_batches = datasource.split_idxs(idxs = idxs,
+                                                 cpu_count=cpu_num, 
+                                                 Ramcap_GB = Ram_GB_limit, 
+                                                 size_per_spec = size_per_spec)
             with Pool(cpu_num) as p:
                 for data in tqdm(p.imap_unordered(partial_worker, idxs_batches), total=len(idxs_batches), unit = 'batch', desc = f'Processing ROI {roi}'):
                     yield data
@@ -2644,6 +2684,72 @@ class Pipeline:
             The resolved output file path.
         """
         return self._datasource._default_save_path(suffix, prefix)
+    def _filter_roi_segments(self,
+                             roi: str,
+                             allowed_indices: np.ndarray | None = None,
+                             allowed_coords: list[dict]| dict | None = None):
+        """
+        Filter the ROI segments to only include those that are allowed.
+
+        Parameters
+        ----------
+        allowed_indices : np.ndarray | None, optional
+            The indices of the allowed ROI segments.
+        allowed_coords : list[dict] | dict | None, optional
+            The coordinates of the allowed ROI segments.
+
+        Returns
+        -------
+        np.ndarray
+            The filtered ROI index segments.
+        """
+        datasource = self._datasource
+        roi_metadata = datasource.roi_metadata
+
+        idxs = None
+        
+        if allowed_indices is not None or allowed_coords is not None:
+            idxs = roi_metadata.loc[roi,"idxroi"]
+            total_spectra = Indexator(idxs).count
+            if allowed_indices is not None:
+                new_idxs = []
+                for seg_start, seg_end in idxs:
+                    for allowed_start, allowed_end in allowed_indices:
+                        intersect_start = max(seg_start, allowed_start)
+                        intersect_end = min(seg_end, allowed_end)
+                        if intersect_start < intersect_end:
+                            new_idxs.append((intersect_start, intersect_end))
+                if not new_idxs:
+                    warnings.warn(f"No allowed indices for ROI {roi}. Returning empty list.")
+                    return []
+                else:
+                    idxs = new_idxs
+            
+            if allowed_coords is not None:
+                extract = None
+                if isinstance(allowed_coords, dict):
+                    extract = allowed_coords.keys()
+                    allowed_coords = [allowed_coords]
+                coords = datasource.get_coords(idxs = idxs, extract = extract)
+
+                new_idxs = set()
+                for allowed_coords_rect in allowed_coords:
+                    loc_coords = coords.copy()
+                    for coord_name, coord_values in allowed_coords_rect.items():
+                        coords_array = loc_coords[coord_name].values
+                        loc_coords_bool = np.logical_or.reduce([
+                            (coords_array >= seg[0]) & (coords_array <= seg[1]) 
+                            for seg in coord_values
+                        ])
+                        loc_coords = loc_coords.loc[loc_coords_bool]
+                    new_idxs.update(loc_coords.index)
+                if not new_idxs:
+                    warnings.warn(f"No allowed coordinates for ROI {roi}. Returning empty list.")
+                    return []
+                idxs = np.asarray(_index_to_segment(sorted(new_idxs)))
+            print(f"ROI {roi}: {total_spectra} → {Indexator(idxs).count} spectra (after coordinate/index filtering)")
+        return idxs
+
     @staticmethod
     def _procfunc_wrapper(idxs: Indexator | SliceIndexator | tuple| np.ndarray,
                           datasource: "DataSource",

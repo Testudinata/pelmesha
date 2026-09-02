@@ -3,7 +3,7 @@ import time
 import warnings
 from typing import List, Union, Callable
 import pandas as pd
-from itertools import pairwise
+from itertools import pairwise, groupby
 import numpy as np
 import scipy.interpolate as interpolate
 from tqdm.auto import tqdm
@@ -911,259 +911,93 @@ def _snr_filter(mz: np.ndarray[float],
     n_peaks = pmz_array.size
     mz_half = noise_mz_width/2
 
+    if n_peaks == 0:
+        # Degenerate spectrum: nothing to estimate. Return empty results instead
+        # of crashing downstream numba kernels (e.g. np.quantile on a size-1
+        # array), which would otherwise silently kill a worker under multiprocessing.
+        empty_f64 = np.empty(0, dtype=np.float64)
+        empty_i64 = np.empty(0, dtype=np.int64)
+        return empty_i64, empty_f64, empty_i64, empty_i64, empty_f64, empty_f64
+
     noise_bool = np.ones(xsize,dtype = np.bool_)
+
     psl_left = np.zeros(n_peaks,dtype = np.int64)
     psl_right = np.zeros(n_peaks,dtype = np.int64)
-    noise_std = np.zeros(n_peaks,dtype = np.float64)
+    noise_std = np.ones(n_peaks,dtype = np.float64)
     noise_mean = np.zeros(n_peaks,dtype = np.float64)
 
-    quantile_threshold = np.quantile(pint_array,0.50) #Считаем, что больше половины интенсивностей ниже этого значения - чистый шум,
-                                                        #поэтому затравочный фильтр => какие точки - сигнал, а какие шум определяем по этому значению
+    # Median apex intensity. Computed manually because np.quantile(x, 0.5) hits
+    # numba's _select_two (assert high > low) on size-1 arrays, which raises an
+    # AssertionError that silently kills a worker process under multiprocessing.
+    # Heuristic: peaks below this value are treated as pure noise (seed mask).
+    sp = np.sort(pint_array)
+    mid = n_peaks // 2
+    if n_peaks % 2 == 1:
+        quantile_threshold = sp[mid]
+    else:
+        quantile_threshold = 0.5 * (sp[mid - 1] + sp[mid])
     filtered = pint_array <= quantile_threshold
-    for n in range(n_peaks):
-        pext_left = left_min[n]
-        pext_right = right_min[n]
+    for ind in range(n_peaks):
+        pext_left = left_min[ind]
+        pext_right = right_min[ind]
 
-        noise_bool[pext_left:pext_right+1] = filtered[n] 
+        noise_bool[pext_left:pext_right+1] = filtered[ind] 
 
-    for n in range(n_peaks):
-        pext_left = left_min[n]
-        pext_right = right_min[n]
-        # mzd_val = 0.0
-        # loc_mz = mz[pmz_array[n]]
-        # if discret_coeffs is not None:
-        #     for c in discret_coeffs:
-        #         mzd_val = mzd_val * loc_mz + c
-        # else:
-        #     mzd_val = 1 # noise_mz_width - считается по точкам теперь, а не по абсолутному значению m/z
-        # n_half = max(noise_mz_width//(2*mzd_val),5) # важно для подсчёта std
-        # dots_half[n] = n_half 
-        
-        # count = 0        
-        # for i in range(pext_left, -1,-1):
-        #     if noise_bool[i]:
-        #         count += 1
-        #         if count == n_half or i == 0:
-        #             sl_left = i
-        #             break
+    for ind in range(n_peaks):
+        pext_left = left_min[ind]
+        pext_right = right_min[ind]
 
-        # count = 0
-        # for i in range(pext_right, xsize):
-        #     if noise_bool[i]:
-        #         count += 1
-        #         if count == n_half or i == xsize-1:
-        #             sl_right = i
-        #             break
-        
-        
+        sl_left, sl_right = _peaks_snr_window(mz,
+                                              noise_bool, 
+                                              pext_left, 
+                                              pext_right, 
+                                              mz_half,
+                                              xsize)
 
-        mz_count = 0        
-        for i in range(pext_left, -1,-1):
-            if noise_bool[i] and noise_bool[i+1]:
-                mz_count += mz[i+1] - mz[i]
-                if mz_count > mz_half:
-                    sl_left = i
-                    break
-                elif i == 0:
-                    sl_left = 0
-                    mz_left_res = mz_half - mz_count if mz_count < mz_half else 0
-                    break
-
-        mz_count = 0 - mz_left_res
-        for i in range(pext_right, xsize):
-            if noise_bool[i] and noise_bool[i-1]:
-                mz_count += mz[i] - mz[i-1]
-                if mz_count > mz_half:
-                    sl_right = i
-                    break
-                elif i == xsize-1:
-                    sl_right = xsize-1
-                    mz_right_res = mz_half - mz_count if mz_count < mz_half else 0
-                    break
-
-        mz_count = 0
-        if sl_left !=0 and mz_right_res > 0:
-            for i in range(sl_left, -1,-1):
-                if noise_bool[i] and noise_bool[i+1]:
-                    mz_count += mz[i+1] - mz[i]
-                    if mz_count > mz_right_res:
-                        sl_left = i
-                        break
-                    elif i == 0:
-                        sl_left = 0
-                        break
+        noise_mean[ind], noise_std[ind] = _snr_window_stats(intens,
+                                                            noise_bool,
+                                                            pext_left,
+                                                            pext_right,
+                                                            sl_left,
+                                                            sl_right)
 
 
-        sum_ = 0.0
-        sum_sq = 0.0
-        count_local = 0
-
-        if noise_bool[slice(sl_left, sl_right + 1)].sum() >2:
-            for i in range(sl_left, pext_left +1): 
-                if noise_bool[i]:
-                    val = intens[i]
-                    sum_ += val
-                    sum_sq += val * val
-                    count_local += 1
-            for i in range(pext_right, sl_right + 1):
-                if noise_bool[i]:
-                    val = intens[i]
-                    sum_ += val
-                    sum_sq += val * val
-                    count_local += 1
-        else:
-            for i in range(sl_left, pext_left +1): 
-                # if ~noise_bool[i]:
-                    val = intens[i]
-                    sum_ += val
-                    sum_sq += val * val
-                    count_local += 1
-            for i in range(pext_right, sl_right + 1):
-                # if ~noise_bool[i]:
-                    val = intens[i]
-                    sum_ += val
-                    sum_sq += val * val
-                    count_local += 1
-
-        mean = sum_ / count_local
-        # var = (sum_sq / count_local) - mean * mean # ddof = 0
-        var = ((sum_sq - sum_ * mean) / (count_local - 1)) # ddof = 1
-        std = np.sqrt(var) if var > 0 else np.inf
-        
-        noise_std[n] = std
-        noise_mean[n] = mean
-
-        psl_left[n] = sl_left
-        psl_right[n] = sl_right
+        psl_left[ind] = sl_left
+        psl_right[ind] = sl_right
+    noise_std = np.maximum(noise_std, np.finfo(np.float64).eps)
     SNR = (pint_array - noise_mean)/noise_std
     k =  SNR >= SNR_threshold
     if noise_est_iter > 1:
         for _ in range(noise_est_iter-1):
-            for n in range(n_peaks):
-                b = k[n]
-                pext_left = left_min[n]
-                pext_right = right_min[n]
+            for ind in range(n_peaks):
+                b = k[ind]
+                pext_left = left_min[ind]
+                pext_right = right_min[ind]
                 noise_bool[pext_left:pext_right+1] = ~b
 
-            for n in range(n_peaks):
-                pext_left = left_min[n]
-                pext_right = right_min[n]
-                # n_half = dots_half[n] 
+            for ind in range(n_peaks):
+                pext_left = left_min[ind]
+                pext_right = right_min[ind]
 
-                # count = 0        
-                # for i in range(pext_left, -1,-1):
-                #     if noise_bool[i]:
-                #         count += 1
-                #         if count == n_half or i == 0:
-                #             sl_left = i
-                #             break
-
-                # count = 0
-                # for i in range(pext_right, xsize):
-                #     if noise_bool[i]:
-                #         count += 1
-                #         if count == n_half or i == xsize-1:
-                #             sl_right = i
-                #             break
-                # mz_count = 0        
-                # for i in range(pext_left, -1,-1):
-                #     if noise_bool[i] and noise_bool[i+1]:
-                #         mz_count += mz[i+1] - mz[i]
-                #         if mz_count > mz_half:
-                #             sl_left = i
-                #             break
-                #         elif i == 0:
-                #             sl_left = 0
-                #             mz_left_res = mz_half - mz_count if mz_count < mz_half else 0
-                #             break
-
-                # mz_count = 0 - mz_left_res
-                # for i in range(pext_right, xsize):
-                #     if noise_bool[i] and noise_bool[i-1]:
-                #         mz_count += mz[i] - mz[i-1]
-                #         if mz_count > mz_half or i == xsize-1:
-                #             sl_right = i
-                #             break
-
-                mz_count = 0        
-                for i in range(pext_left, -1,-1):
-                    if noise_bool[i] and noise_bool[i+1]:
-                        mz_count += mz[i+1] - mz[i]
-                        if mz_count > mz_half:
-                            sl_left = i
-                            break
-                        elif i == 0:
-                            sl_left = 0
-                            mz_left_res = mz_half - mz_count if mz_count < mz_half else 0
-                            break
-
-                mz_count = 0 - mz_left_res
-                for i in range(pext_right, xsize):
-                    if noise_bool[i] and noise_bool[i-1]:
-                        mz_count += mz[i] - mz[i-1]
-                        if mz_count > mz_half:
-                            sl_right = i
-                            break
-                        elif i == xsize-1:
-                            sl_right = xsize-1
-                            mz_right_res = mz_half - mz_count if mz_count < mz_half else 0
-                            break
-
-                mz_count = 0
-                if sl_left !=0 and mz_right_res > 0:
-                    for i in range(sl_left, -1,-1):
-                        if noise_bool[i] and noise_bool[i+1]:
-                            mz_count += mz[i+1] - mz[i]
-                            if mz_count > mz_right_res:
-                                sl_left = i
-                                break
-                            elif i == 0:
-                                sl_left = 0
-                                break
-
-                if psl_left[n] != sl_left and psl_right[n] != sl_right:
-                    sum_ = 0.0
-                    sum_sq = 0.0
-                    count_local = 0
-                    if noise_bool[slice(sl_left, sl_right + 1)].sum() >2:
-                        for i in range(sl_left, pext_left +1): 
-                            if noise_bool[i]:
-                                val = intens[i]
-                                sum_ += val
-                                sum_sq += val * val
-                                count_local += 1
-                        for i in range(pext_right, sl_right + 1):
-                            if noise_bool[i]:
-                                val = intens[i]
-                                sum_ += val
-                                sum_sq += val * val
-                                count_local += 1
-                    else:
-                        for i in range(sl_left, pext_left +1): 
-                            # if ~noise_bool[i]:
-                                val = intens[i]
-                                sum_ += val
-                                sum_sq += val * val
-                                count_local += 1
-                        for i in range(pext_right, sl_right + 1):
-                            # if ~noise_bool[i]:
-                                val = intens[i]
-                                sum_ += val
-                                sum_sq += val * val
-                                count_local += 1
-                    
-                    mean = sum_ / count_local
-                    # var = (sum_sq / count_local) - mean * mean # ddof = 0
-                    if count_local == 1:
-                        raise ValueError(f"count_local == 1, left_size {pext_left - sl_left}, right_size {sl_right-pext_right}")
-                    var = ((sum_sq - sum_ * mean) / (count_local - 1)) # ddof = 1
-                    std = np.sqrt(var) if var > 0 else np.inf
-                    noise_std[n] = std
-                    noise_mean[n] = mean
+                sl_left, sl_right = _peaks_snr_window(mz,
+                                                    noise_bool, 
+                                                    pext_left, 
+                                                    pext_right, 
+                                                    mz_half,
+                                                    xsize)
+                
+                if psl_left[ind] != sl_left and psl_right[ind] != sl_right:
+                    noise_mean[ind], noise_std[ind] = _snr_window_stats(intens,
+                                                                        noise_bool,
+                                                                        pext_left,
+                                                                        pext_right,
+                                                                        sl_left,
+                                                                        sl_right)
 
 
-                    psl_left[n] = sl_left
-                    psl_right[n] = sl_right
+                    psl_left[ind] = sl_left
+                    psl_right[ind] = sl_right
+            noise_std = np.maximum(noise_std, np.finfo(np.float64).eps)
             SNR = (pint_array - noise_mean)/noise_std
             k = SNR >= SNR_threshold
     pmz_array = pmz_array[k] 
@@ -1174,7 +1008,150 @@ def _snr_filter(mz: np.ndarray[float],
     noise_mean = noise_mean[k]
     return pmz_array, pint_array, left_min, right_min, noise_std, noise_mean
 
+@njit
+def _peaks_snr_window(mz: np.ndarray[float],
+                     noise_bool: np.ndarray[bool],
+                     pext_left: int,
+                     pext_right: int,
+                     mz_half: float,
+                     xsize: int):
+    """Compute the window for the peak SNR calculations.
 
+    Internal kernel for :func:`peakpicker`.
+
+    Parameters
+    ----------
+    mz: np.ndarray (float64)
+        m/z axis.
+    pext_left, pext_right : int
+        Indices into ``mz`` and ``intens`` of the left and right peaks bases.
+    mz_half : float
+        Half the m/z width of the peak.
+
+    Returns
+    -------
+    sl_left, sl_right : int
+        Indices into ``mz`` and ``intens`` of the left and right boundaries of
+        the window.
+    """
+    sl_left = pext_left
+    sl_right = pext_right
+    mz_left_res = 0.0
+    mz_right_res = 0.0
+    mz_count = 0
+    for i in range(pext_left-1, -1,-1):
+        if noise_bool[i] and noise_bool[i+1]:
+            mz_count += mz[i+1] - mz[i]
+            if mz_count > mz_half:
+                sl_left = i
+                break
+            elif i == 0:
+                sl_left = 0
+                mz_left_res = mz_half - mz_count if mz_count < mz_half else 0
+                break
+
+    mz_count = 0 - mz_left_res
+    for i in range(pext_right+1, xsize):
+        if noise_bool[i] and noise_bool[i-1]:
+            mz_count += mz[i] - mz[i-1]
+            if mz_count > mz_half:
+                sl_right = i
+                break
+            elif i == xsize-1:
+                sl_right = xsize-1
+                mz_right_res = mz_half - mz_count if mz_count < mz_half else 0
+                break
+
+    mz_count = 0
+    if sl_left !=0 and mz_right_res > 0:
+        for i in range(sl_left-1, -1,-1):
+            if noise_bool[i] and noise_bool[i+1]:
+                mz_count += mz[i+1] - mz[i]
+                if mz_count > mz_right_res:
+                    sl_left = i
+                    break
+                elif i == 0:
+                    sl_left = 0
+                    break
+    
+    return sl_left, sl_right
+
+@njit
+def _snr_window_stats(intens: np.ndarray[float],
+                       noise_bool: np.ndarray[bool],
+                       pext_left: int,
+                       pext_right: int,
+                       sl_left: int,
+                       sl_right: int):
+    """Compute the statistics of the SNR window.
+
+    Internal kernel for :func:`peakpicker`.
+
+    Parameters
+    ----------
+    intens : np.ndarray (float64)
+        Intensity profile.
+    noise_bool : np.ndarray (bool)
+        Boolean array indicating the noise points.
+    pext_left, pext_right : int
+        Indices into ``intens`` of the left and right peaks bases.
+    sl_left, sl_right : int
+        Indices into ``intens`` of the left and right boundaries of
+        the window.
+
+    """
+    sum_ = 0.0
+    sum_sq = 0.0
+    count_local = 0
+                
+    count_valid = 0
+    for j in range(sl_left, pext_left + 1):
+        count_valid += noise_bool[j]
+        if count_valid > 2:
+            break
+    if count_valid <= 2:
+        for j in range(pext_right, sl_right + 1):
+            count_valid += noise_bool[j]
+            if count_valid > 2:
+                break
+    if count_valid > 2:
+        for i in range(sl_left, pext_left +1): 
+            if noise_bool[i]:
+                val = intens[i]
+                sum_ += val
+                sum_sq += val * val
+                count_local += 1
+        for i in range(pext_right, sl_right + 1):
+            if noise_bool[i]:
+                val = intens[i]
+                sum_ += val
+                sum_sq += val * val
+                count_local += 1
+    else:
+        for i in range(sl_left, pext_left +1): 
+            # if ~noise_bool[i]:
+                val = intens[i]
+                sum_ += val
+                sum_sq += val * val
+                count_local += 1
+        for i in range(pext_right, sl_right + 1):
+            # if ~noise_bool[i]:
+                val = intens[i]
+                sum_ += val
+                sum_sq += val * val
+                count_local += 1
+
+    if count_local == 0 or count_local == 1: # TODO del if problem is never again raised
+        count_local = 2
+        print("DBG zdiv sl_left=", sl_left, "pext_left=", pext_left,
+                "pext_right=", pext_right, "sl_right=", sl_right,
+                "window_sum=", count_valid,
+                "count_local=", count_local)
+    mean = sum_ / count_local
+    # var = (sum_sq / count_local) - mean * mean # ddof = 0
+    var = ((sum_sq - sum_ * mean) / (count_local - 1)) # ddof = 1
+    std = np.sqrt(var) if var > 0 else np.inf
+    return mean, std
 @njit
 def _fwhm_interp(mz: np.ndarray[float],
                  intens: np.ndarray[float],
@@ -1293,15 +1270,30 @@ def _peakpicker_core(mz: np.ndarray,
     - Expects contiguous float64 arrays; pass ``np.ascontiguousarray`` copies.
     """
 
+    # # experimental
+    # Remove zero/valley plateaus so the valley detector only sees meaningful
+    # profile transitions. The SAME mask is applied to both intens and mz so
+    # the two arrays stay length-aligned; mismatched domains make the downstream
+    # kernels (SNR windows, FWHM, area) index a shorter array and can stall or
+    # crash a worker process under multiprocessing.
+    valley_bool = np.diff(intens) != 0
+    non_zero_mask = intens != 0
+    non_zero_mask[1:] = non_zero_mask[1:] | valley_bool
+    intens = intens[non_zero_mask]
+    mz = mz[non_zero_mask]
+    # # experimental
     xsize = intens.size
-    
-    valley_dots = np.where(np.abs(np.diff(intens)) != 0)[0] 
-    valley_dots = _append(valley_dots,xsize-1)    
+    if xsize < 2:
+        empty_f64 = np.empty(0, dtype=np.float64)
+        return (empty_f64, empty_f64, empty_f64, empty_f64,
+                empty_f64, empty_f64, empty_f64, empty_f64, empty_f64)
+    valley_dots = np.where(np.diff(intens) != 0)[0]
+    valley_dots = _append(valley_dots, xsize - 1)
     loc_min = np.diff(intens[valley_dots])
-    loc_min = (np.array([True,*(loc_min < 0)])) & np.array(([*(loc_min > 0),True]))
+    loc_min = (np.array([True, *(loc_min < 0)])) & np.array(([*(loc_min > 0), True]))
     # eps_threshold = np.finfo(intens.dtype).eps
     # loc_min = (np.array([True,*(loc_min < -eps_threshold*10)])) & np.array(([*(loc_min > eps_threshold*10),True]))
-    left_min = _prepend(valley_dots[:-1],-1)[loc_min][:-1] + 1
+    left_min = _prepend(valley_dots[:-1], -1)[loc_min][:-1] + 1
     right_min = valley_dots[loc_min][1:]
 
     # Compute max for every peak
@@ -1348,7 +1340,7 @@ def _peakpicker_core(mz: np.ndarray,
                                                                                         noise_est_iter)
     else:
         n_peaks = pint_array.size
-        noise_std = np.zeros(n_peaks,dtype = np.float64)
+        noise_std = np.ones(n_peaks,dtype = np.float64)
         noise_mean = np.zeros(n_peaks,dtype = np.float64)
     
     fwhm_left, fwhm_right = _fwhm_interp(mz,intens,pmz_array,pint_array, left_min, right_min)
@@ -1470,3 +1462,13 @@ def _peakpicker_core(mz: np.ndarray,
     fwhm = fwhm_right-fwhm_left
     SNR = (pint_array - noise_mean)/noise_std
     return mz[pmz_array], pint_array, areas, SNR, mz[left_min], mz[right_min], fwhm, noise_std, noise_mean
+
+def _index_to_segment(arr):
+    ranges = []
+    for _, group in groupby(enumerate(arr), lambda pair: pair[1] - pair[0]):
+        group_list = list(group)
+        start = group_list[0][1]
+        end = group_list[-1][1] + 1
+        ranges.append((start, end))
+    # return np.asarray(ranges, dtype=np.int64)
+    return ranges

@@ -84,7 +84,6 @@ def preprocess_configuration_base(
     internal_configs['peakpick'] = {"headers": headers_list}
     return resampled_mz, headers_list, internal_configs
 
-
 def process_spectra_base(
     mz: np.ndarray,
     intensity: np.ndarray,
@@ -146,7 +145,7 @@ def process_spectra_base(
     # Aligning step
     if msalign_configs.get('align_peaks', None) is not None:
         intensity = msalign(mz, intensity, **msalign_configs)
-    
+
     return mz, intensity
 
 def peakpicking_base(
@@ -879,7 +878,7 @@ def add_zero_points_to_peaks_extended(mz: np.ndarray,
     new_loc_ints = ints[idx_sort]
 
     return new_loc_mz, new_loc_ints
-tremendous_gap_bool = diff_mz > 5*mz_discr
+
 def reduce_signal_to_zero(mz: np.ndarray,
                           ints: np.ndarray,
                           mz_segments_to_zero: list[tuple[float, float]]) -> tuple[np.ndarray, np.ndarray]:
