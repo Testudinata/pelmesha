@@ -685,6 +685,7 @@ class DataSet:
                 dtypeconv=dtypeconv,
                 **kwargs,
             )
+
     def peakpick(self,
                 sample_name: list | str | None = None,
                 allowed_indices: np.ndarray | None = None,

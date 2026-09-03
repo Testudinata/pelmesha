@@ -186,6 +186,176 @@ def _format_param_value(value: Any) -> str:
 
 
 # --------------------------------------------------------------------------- #
+#  Docstring parsing (configurable style)                                     #
+# --------------------------------------------------------------------------- #
+_DOCSTYLE_AUTO = "auto"
+_DOCSTYLE_NUMPY = "numpy"
+_DOCSTYLE_GOOGLE = "google"
+_DOCSTYLE_RST = "rst"
+_DOCSTYLES: frozenset[str] = frozenset({
+_DOCSTYLE_AUTO, _DOCSTYLE_NUMPY, _DOCSTYLE_GOOGLE, _DOCSTYLE_RST,
+})
+
+
+def _detect_doc_style(doc: str) -> str:
+    """Auto-detect the docstring style of *doc* (numpy/google/rst)."""
+    lines = textwrap.dedent(doc).splitlines()
+    for i, ln in enumerate(lines):
+        low = ln.strip().lower()
+        if low == "parameters":
+            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            if nxt and set(nxt) <= set("-=") and len(nxt) >= 3:
+                return _DOCSTYLE_NUMPY
+        if low in ("args:", "arguments:", "params:", "parameters:", "keyword args:"):
+            return _DOCSTYLE_GOOGLE
+        if ":param" in low:
+            return _DOCSTYLE_RST
+    return _DOCSTYLE_NUMPY
+
+
+_NUMPY_SECTION_NAMES = ("Returns", "Raises", "Notes", "Examples", "References",
+                        "Yields", "See Also", "Warning", "Warnings")
+
+
+def _split_numpy(doc: str) -> tuple[str, dict[str, str]]:
+    """Parse a numpy-style docstring into (description, {param: description})."""
+    import re
+    header_re = re.compile(r"^([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:")
+    lines = textwrap.dedent(doc).splitlines()
+    idx: int | None = None
+    for i, ln in enumerate(lines):
+        if ln.strip().lower() == "parameters":
+            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            if nxt and set(nxt) <= set("-=") and len(nxt) >= 3:
+                idx = i
+                break
+    description = "\n".join(lines[:idx]).strip() if idx is not None else doc.strip()
+
+    params: dict[str, str] = {}
+    if idx is None:
+        return description, params
+    j = idx + 1
+    while j < len(lines) and lines[j].strip() and set(lines[j].strip()) <= set("-="):
+        j += 1
+    current: str | None = None
+    header_indent: int | None = None
+    while j < len(lines):
+        stripped = lines[j].strip()
+        if not stripped:
+            j += 1
+            continue
+        indent = len(lines[j]) - len(lines[j].lstrip())
+        # stop at the next top-level section
+        if stripped.split(" ", 1)[0] in _NUMPY_SECTION_NAMES and (header_indent is None
+                                                                   or indent <= header_indent):
+            break
+        m = header_re.match(stripped)
+        if m and (header_indent is None or indent == header_indent):
+            if header_indent is None:
+                header_indent = indent
+            current = m.group(1).split(",")[0].strip()
+            params[current] = ""
+            j += 1
+            continue
+        if current is not None and (header_indent is None or indent > header_indent):
+            params[current] += ((" " + stripped) if params[current] else stripped)
+            j += 1
+            continue
+        break
+    return description, {k: v.strip() for k, v in params.items() if v.strip()}
+
+
+def _split_google(doc: str) -> tuple[str, dict[str, str]]:
+    """Parse a Google-style docstring into (description, {param: description})."""
+    import re
+    header_re = re.compile(r"^([A-Za-z_]\w*)(\s*\(.*?\))?:\s*(.*)$")
+    lines = textwrap.dedent(doc).splitlines()
+    idx: int | None = None
+    for i, ln in enumerate(lines):
+        low = ln.strip().lower()
+        if low in ("args:", "arguments:", "params:", "parameters:", "keyword args:"):
+            idx = i
+            break
+    description = "\n".join(lines[:idx]).strip() if idx is not None else doc.strip()
+
+    params: dict[str, str] = {}
+    if idx is None:
+        return description, params
+    section_indent = len(lines[idx]) - len(lines[idx].lstrip())
+    stop = ("returns:", "yields:", "raises:", "notes:", "examples:", "references:")
+    current: str | None = None
+    header_indent: int | None = None
+    for ln in lines[idx + 1:]:
+        s = ln.strip()
+        if not s:
+            continue
+        low = s.lower()
+        indent = len(ln) - len(ln.lstrip())
+        if indent <= section_indent:
+            if low.startswith(stop):
+                break
+            break  # a new unindented section
+        m = header_re.match(s)
+        if m:
+            if header_indent is None:
+                header_indent = indent
+            current = m.group(1)
+            params[current] = (m.group(3) or "").strip()
+            continue
+        if current is not None and (header_indent is None or indent >= header_indent):
+            params[current] += ((" " + s) if params[current] else s)
+    return description, {k: v.strip() for k, v in params.items() if v}
+
+
+def _split_rst(doc: str) -> tuple[str, dict[str, str]]:
+    """Parse an RST/:param-style docstring into (description, {param: desc})."""
+    import re
+    param_re = re.compile(r"^\s*:param\s+([^:]+):\s*(.*)$")
+    lines = textwrap.dedent(doc).splitlines()
+    params: dict[str, str] = {}
+    current: str | None = None
+    buffer_desc: list[str] = []
+    first_idx: int | None = None
+    for i, ln in enumerate(lines):
+        m = param_re.match(ln)
+        if m:
+            if first_idx is None:
+                first_idx = i
+            if current is not None:
+                params[current] = " ".join(buffer_desc).strip()
+            name = m.group(1).strip()
+            rest = m.group(2).strip()
+            current = name
+            buffer_desc = [rest] if rest else []
+        elif current is not None:
+            buffer_desc.append(ln.strip())
+    if current is not None:
+        params[current] = " ".join(buffer_desc).strip()
+    description = ("\n".join(lines[:first_idx]).strip()
+                if first_idx is not None else doc.strip())
+    return description, {k: v for k, v in params.items() if v}
+
+
+def _parse_docstring(doc: str, style: str = _DOCSTYLE_AUTO) -> dict[str, Any]:
+    """Parse *doc* into ``{"description": str, "params": {name: desc}}``.
+
+    *style* may be ``"auto"`` (default; detects numpy/google/rst), ``"numpy"``,
+    ``"google"`` or ``"rst"``.
+    """
+    if not doc:
+        return {"description": "", "params": {}}
+    if style == _DOCSTYLE_AUTO:
+        style = _detect_doc_style(doc)
+    if style == _DOCSTYLE_GOOGLE:
+        description, params = _split_google(doc)
+    elif style == _DOCSTYLE_RST:
+        description, params = _split_rst(doc)
+    else:
+        description, params = _split_numpy(doc)
+    return {"description": description, "params": params}
+
+
+# --------------------------------------------------------------------------- #
 #  YAML representer / constructor for callable values                         #
 # --------------------------------------------------------------------------- #
 
@@ -292,6 +462,17 @@ class Configs():
     """
     Base configuration class for managing pipeline parameters.
     """
+
+    # Best-effort online doc prefixes for common third-party modules used in
+    # ``_online_doc_url``. Used only when no local source file can be resolved.
+    _DOC_URL_PREFIXES: dict[str, str] = {
+        "numpy": "https://numpy.org/doc/stable/reference/generated/",
+        "scipy": "https://docs.scipy.org/doc/scipy/reference/generated/",
+        "pandas": "https://pandas.pydata.org/docs/reference/api/",
+        "pybaselines": "https://pybaselines.readthedocs.io/en/latest/api/",
+        "KDEpy": "https://kdepy.readthedocs.io/en/latest/api/",
+    }
+
     def __init__(self,
                  configs_source: str | dict | None = None,
                  **kwargs):
@@ -301,6 +482,16 @@ class Configs():
         # from default extraction. Populated by PipelineConfigurator during
         # AST-based extraction; used by set_method to preserve exclusions.
         self._explicit_params_map: dict[tuple[str, str], set[str]] = {}
+        # Maps a storage_key (config key) -> a live callable reference used to
+        # dynamically load docstrings/links when building ``__repr__`` /
+        # ``_repr_html_``. A reference is either a plain callable (function) or
+        # a ``(method, class)`` tuple. For methods, an additional qualified key
+        # ``"ClassName.method"`` is also registered. When empty (e.g. a
+        # standalone Configs), representations render no doc info at all.
+        self._function_refs: dict[str, Any] = {}
+        # Docstring parsing style used to separate the general description from
+        # per-parameter descriptions (see ``docstring_style`` property).
+        self._docstring_style: str = _DOCSTYLE_AUTO
         if configs_source:
             if isinstance(configs_source, str):
                 self.load_config(configs_source)
@@ -631,7 +822,13 @@ class Configs():
         raise KeyError(f"Unsupported key type: {type(key).__name__}.")
     
     def __repr__(self) -> str:
-        """Human-readable representation grouped by function/method."""
+        """Human-readable representation grouped by function/method.
+
+        Only the configured parameter values are shown.  Docstrings and
+        per-parameter descriptions are NOT included in plain text ``repr`` (a
+        console cannot render hover tooltips); use the rich HTML representation
+        (:meth:`_repr_html_`) in Jupyter to get doc tooltips and links.
+        """
         methods: dict = self.configs.get("methods", {})
         functions: dict = self.configs.get("functions", {})
         lines = ["Configs("]
@@ -670,7 +867,246 @@ class Configs():
 
         lines.append(")")
         return "\n".join(lines)
-    
+
+    # ------------------------------------------------------------------ #
+    #  Dynamic doc reference loading (used by repr / _repr_html_)         #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _escape_html(text: Any) -> str:
+        """Escape HTML special characters for safe embedding in tooltips."""
+        table = {
+                "&": "&amp;",   # Превращает & в безопасный код
+                "<": "&lt;",    # Превращает < в безопасный код
+                ">": "&gt;",    # Превращает > в безопасный код
+                '"': "&quot;",  # Защищает двойную кавычку внутри title="..."
+                "'": "&#x27;",  # Защищает одинарную кавычку
+            }
+        return "".join(table.get(c, c) for c in str(text))
+
+    @staticmethod
+    def _file_url(path) -> str | None:
+        """Convert a local path to a ``file:///`` URL (opens in OS editor)."""
+        if not path:
+            return None
+        from urllib.parse import quote
+        try:
+            return "file:///" + quote(str(path).replace("\\", "/"), safe="/:")
+        except Exception:
+            return None
+
+    @staticmethod
+    def _split_ref(ref):
+        """Split a callable reference into ``(primary_callable, owner_class)``.
+
+        *ref* is either a plain callable or a ``(method, class)`` tuple as
+        produced by :meth:`PipelineConfigurator._extract_called_functions`.
+        """
+        if (isinstance(ref, tuple) and len(ref) == 2
+                and isinstance(ref[1], type)):
+            return ref[0], ref[1]
+        return ref, None
+
+    @classmethod
+    def _online_doc_url(cls, module, qualname) -> str | None:
+        """Best-effort online documentation URL for a third-party callable."""
+        if not module or not qualname:
+            return None
+        base = module.split(".")[0]
+        prefix = cls._DOC_URL_PREFIXES.get(base)
+        if prefix is None:
+            return None
+        if base == "scipy":
+            return prefix + f"{module}.{qualname}".rstrip(".") + ".html"
+        if base == "numpy":
+            return prefix + f"numpy.{qualname}".rstrip(".") + ".html"
+        return prefix + qualname + ".html"
+
+    def _load_doc_ref(self, ref, use_class: bool = False) -> dict | None:
+        """Build a docs payload for a callable reference, or ``None``.
+
+        The payload separates the general ``description`` from per-parameter
+        descriptions (``params``), parsed according to ``self.docstring_style``
+        (default ``"auto"`` → numpy/google/rst auto-detection).
+
+        When *use_class* is ``True`` and the reference carries an owning class,
+        the class docstring is used instead (e.g. for ``cls_init_params``).
+        """
+        func, owner_cls = self._split_ref(ref)
+        target = owner_cls if (use_class and owner_cls is not None) else func
+        doc = inspect.getdoc(target)
+        if not doc:
+            return None
+        parsed = _parse_docstring(doc, self._docstring_style)
+        payload = {
+            "doc": doc,
+            "description": parsed["description"],
+            "short": (doc.strip().splitlines()[0] if doc.strip() else ""),
+            "params": parsed["params"],
+            "module": getattr(target, "__module__", None),
+            "qualname": (getattr(target, "__qualname__", None)
+                         or getattr(target, "__name__", None)),
+            "source_path": None,
+            "url": None,
+        }
+        try:
+            payload["source_path"] = inspect.getsourcefile(target)
+        except (OSError, TypeError):
+            pass
+        if payload["source_path"]:
+            payload["url"] = self._file_url(payload["source_path"])
+        else:
+            payload["url"] = self._online_doc_url(payload["module"], payload["qualname"])
+        return payload
+
+    @property
+    def docstring_style(self) -> str:
+        """Docstring parsing style used for ``repr``/``_repr_html_`` doc extraction.
+
+        One of ``"auto"`` (default), ``"numpy"``, ``"google"``, ``"rst"``.
+        """
+        return self._docstring_style
+
+    @docstring_style.setter
+    def docstring_style(self, value: str) -> None:
+        if value not in _DOCSTYLES:
+            raise ValueError(
+                f"Unknown docstring style '{value}'. "
+                f"Allowed: {sorted(_DOCSTYLES)}."
+            )
+        self._docstring_style = value
+
+    def _lookup_ref(self, group_key: str, cls_name: str | None = None):
+        """Resolve a config group key to its callable reference (if any)."""
+        if cls_name:
+            ref = self._function_refs.get(f"{cls_name}.{group_key}")
+            if ref is not None:
+                return ref
+        return self._function_refs.get(group_key)
+
+    def _group_short_doc(self, group_key: str, cls_name: str | None = None) -> str | None:
+        """Return the first line of a group's docstring, or ``None``."""
+        ref = self._lookup_ref(group_key, cls_name)
+        if not ref:
+            return None
+        payload = self._load_doc_ref(ref)
+        return payload.get("short") if payload else None
+
+    def _render_name_html(self, name: str, payload: dict | None) -> str:
+        """Render a function/method name cell with a tooltip and docs link."""
+        if not payload:
+            return f"<code>{self._escape_html(name)}</code>"
+        # Tooltip shows only the parsed general description (not the full
+        # docstring); per-parameter descriptions appear as their own tooltips.
+        title = self._escape_html(payload.get("description", ""))
+        label = (
+            f'<span title="{title}" '
+            f'style="border-bottom: 1px dashed #888; cursor: help;">'
+            f'{self._escape_html(name)}</span>'
+        )
+        url = payload.get("url")
+        if url:
+            label += (
+                f' <a href="{self._escape_html(url)}" target="_blank" '
+                f'style="color: #1a73e8; text-decoration: none; font-size: 11px;">'
+                f'\U0001F4D6</a>'
+            )
+        return f"<code>{label}</code>"
+
+    def _render_params_html(self, params: dict, payload: dict | None) -> str:
+        """Render a parameters cell, adding per-parameter doc tooltips."""
+        if not params:
+            return "<i>(no parameters)</i>"
+        pdesc: dict[str, str] = (payload or {}).get("params", {}) or {}
+        items: list[str] = []
+        for k, v in params.items():
+            desc = pdesc.get(k, "")
+            val = self._escape_html(_format_param_value(v))
+            inner = f"<b>{self._escape_html(k)}</b>=<code>{val}</code>"
+            if desc:
+                style = "border-bottom: 1px dashed #bbb; cursor: help;"
+                items.append(
+                    f'<span title="{self._escape_html(desc)}" style="{style}">{inner}</span>'
+                )
+            else:
+                items.append(f"<span>{inner}</span>")
+        return " ".join(items)
+
+    def _repr_html_(self) -> str:
+        """Rich HTML summary of the configs for Jupyter Notebook.
+
+        Each configured function/method is rendered as a table row. When a live
+        callable reference is known (``_function_refs``), the name gets a
+        ``title`` tooltip with the full docstring and a clickable link to the
+        documentation (local source file, or a best-effort online page). Each
+        parameter gets a tooltip with its description from the numpy-style
+        ``Parameters`` section. When no references are known (e.g. a standalone
+        :class:`Configs`), plain text is shown and no links/tooltips are added.
+        """
+        methods: dict = self.configs.get("methods", {})
+        functions: dict = self.configs.get("functions", {})
+
+        rows: list[tuple[str, str]] = []
+
+        for func_name, params in functions.items():
+            ref = self._lookup_ref(func_name)
+            payload = self._load_doc_ref(ref) if ref else None
+            rows.append((self._render_name_html(func_name, payload),
+                         self._render_params_html(params, payload)))
+
+        for cls_name, func_dict in methods.items():
+            for method_name, bucket in func_dict.items():
+                ref = self._lookup_ref(method_name, cls_name)
+                payload = self._load_doc_ref(ref) if ref else None
+                init_payload = (self._load_doc_ref(ref, use_class=True) if ref else None)
+                label = f"{cls_name}.{method_name}"
+                parts: list[str] = []
+                init_params = bucket.get("cls_init_params", {})
+                method_params = bucket.get("params", {})
+                if init_params:
+                    parts.append(
+                        "__init__(" + self._render_params_html(init_params, init_payload) + ")"
+                    )
+                if method_params:
+                    parts.append(
+                        method_name + "(" + self._render_params_html(method_params, payload) + ")"
+                    )
+                if not parts:
+                    parts.append(method_name + "()")
+                rows.append((self._render_name_html(label, payload), "<br>".join(parts)))
+
+        if not rows:
+            return "<div style='font-family: sans-serif;'><b>Configs</b>: (empty)</div>"
+
+        html = [
+            '<div style="font-family: sans-serif; font-size: 13px;">',
+            '  <b>Configs</b>',
+            '  <table style="border-collapse: collapse; margin-top: 6px; '
+            'font-size: 13px;">',
+            '    <thead>',
+            '      <tr>',
+            '        <th style="border: 1px solid #999; padding: 4px 8px; '
+            'background-color: #4a4a4a; color: #fff; text-align: left;">Step / function</th>',
+            '        <th style="border: 1px solid #999; padding: 4px 8px; '
+            'background-color: #4a4a4a; color: #fff; text-align: left;">Parameters</th>',
+            '      </tr>',
+            '    </thead>',
+            '    <tbody>',
+        ]
+        for i, (name_html, params_html) in enumerate(rows):
+            bg = "#777B7F" if i % 2 == 0 else "#868E96"
+            html.append(
+                f'      <tr style="background-color: {bg};">'
+                f'<td style="border: 1px solid #ccc; padding: 3px 8px; '
+                f'text-align: left; vertical-align: top;">{name_html}</td>'
+                f'<td style="border: 1px solid #ccc; padding: 3px 8px; '
+                f'text-align: left; vertical-align: top;">{params_html}</td></tr>'
+            )
+        html.append('    </tbody>')
+        html.append('  </table>')
+        html.append('</div>')
+        return "\n".join(html)
+
     def update(self,
                params_source: str | dict[str, Any] | None = None,
                **kwargs) -> None:
@@ -1462,6 +1898,12 @@ class Configs():
             self._merge_params(param_bucket, params,
                                f"{cls_name}.{method_name}")
 
+        # Register the live callable reference for dynamic doc display.
+        method_func = getattr(cls_obj, method_name, None)
+        if method_func is not None and callable(method_func):
+            self._function_refs[method_name] = (method_func, cls_obj)
+            self._function_refs[f"{cls_name}.{method_name}"] = (method_func, cls_obj)
+
     def set_function(self,
                      func_name: str,
                      delete_old: bool = True,
@@ -1507,6 +1949,10 @@ class Configs():
         else:
             func_bucket = functions.setdefault(func_name, {})
 
+        # Register the live callable reference for dynamic doc display.
+        if func_obj is not None:
+            self._function_refs[func_name] = func_obj
+
         # --- Apply overrides from **params ---
         if params:
             if func_obj is not None:
@@ -1539,6 +1985,12 @@ class PipelineConfigurator(Configs):
         # from default extraction. Populated during AST-based extraction;
         # used by set_method to preserve exclusions.
         self._explicit_params_map: dict[tuple[str, str], set[str]] = {}
+        # Live callable references (storage_key -> callable or (method, cls))
+        # used to dynamically load docstrings/links in repr/_repr_html_. Filled
+        # from the AST-extracted pipeline functions below.
+        self._function_refs: dict[str, Any] = {}
+        # Docstring parsing style used for repr/_repr_html_ doc extraction.
+        self._docstring_style: str = _DOCSTYLE_AUTO
 
         # Collect pipeline functions for default extraction,
         # keeping track of which step each function belongs to.
@@ -1588,6 +2040,10 @@ class PipelineConfigurator(Configs):
                     key = (None, config_key)
                     self._explicit_params_map[key] = explicit_params
 
+        # Register live callable references so repr/_repr_html_ can display
+        # dynamic docstrings and doc links for each configured function.
+        self._populate_refs_from_items(pipeline_funcs)
+
         # 2. Load params from YAML or dict and override with kwargs
         if configs_source:
             if isinstance(configs_source, str):
@@ -1601,6 +2057,45 @@ class PipelineConfigurator(Configs):
                 )
         if kwargs:
             self.update(kwargs)
+
+    def _populate_refs_from_items(self, items: list) -> None:
+        """Fill ``_function_refs`` from ``_extract_called_functions`` items.
+
+        Each item is a ``(callable_or_pair, config_key, explicit_params)``
+        tuple. The storage key is normalised exactly like
+        :func:`_inspect_defaults`: ``config_key`` when provided, otherwise the
+        callable's ``__name__`` (this matters e.g. for ``peakpicker``, which is
+        extracted with ``config_key=None``). For methods, an additional
+        qualified key ``"ClassName.method"`` is registered so per-class lookups
+        are unambiguous even when several classes share a method name.
+        """
+        for item in items:
+            if not (isinstance(item, tuple) and len(item) == 3
+                    and isinstance(item[2], (set, frozenset))):
+                continue
+            callable_or_pair = item[0]
+            config_key: str | None = item[1]
+            if (isinstance(callable_or_pair, tuple) and len(callable_or_pair) == 2
+                    and isinstance(callable_or_pair[1], type)):
+                func, cls_obj = callable_or_pair
+                storage_key = config_key if config_key is not None else func.__name__
+                cls_name = cls_obj.__name__
+                self._function_refs[storage_key] = callable_or_pair
+                self._function_refs[f"{cls_name}.{storage_key}"] = callable_or_pair
+            else:
+                func = callable_or_pair
+                storage_key = config_key if config_key is not None else func.__name__
+                self._function_refs[storage_key] = callable_or_pair
+
+    def _rebuild_function_refs(self) -> None:
+        """Re-extract called functions from the current step functions and
+        refresh ``_function_refs`` (used after loading configs from YAML)."""
+        items: list = []
+        for step_func in (self._preprocess_function,
+                          self._process_function,
+                          self._peakpick_function):
+            items.extend(PipelineConfigurator._extract_called_functions(step_func))
+        self._populate_refs_from_items(items)
 
     # ------------------------------------------------------------------ #
     #  Override set_method / set_function to keep _step_func_names in    #
@@ -2153,6 +2648,10 @@ class PipelineConfigurator(Configs):
             self._preprocess_function = preprocess_configuration_base
             self._process_function = process_spectra_base
             self._peakpick_function = peakpicking_base
+
+        # Refresh live callable references from the (possibly restored) step
+        # functions so repr/_repr_html_ can display up-to-date docs/links.
+        self._rebuild_function_refs()
 
     @staticmethod
     def _get_source(func: Callable) -> str | None:

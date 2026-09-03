@@ -250,9 +250,9 @@ def msalign(
         performance. Default: 5
     align_grid_steps : int (optional)
         number of steps to be used in the grid search. Default: 20
-    align_shift_range : list or numpy.ndarray, optional
-    The maximum allowed shift values in the m/z axis. If `align_by_index` or `only_shift` is set to True, 
-    these shifts are measured in data points (indices) instead. Default: [-0.95, 0.95].
+    align_shift_range : list or numpy.ndarray, optional 
+        The maximum allowed shift values in the m/z axis. If `align_by_index` or `only_shift` is set to True, 
+        these shifts are measured in data points (indices) instead. Default: [-0.95, 0.95].
     only_shift : bool
         determines if signal should be shifted (True) or rescaled (False). Default: True
     return_shifts : bool
@@ -283,7 +283,6 @@ def msalign(
     return aligner.apply()
 
 
-msalign.__doc__ = Aligner.__doc__
 
 def resample_mz_scale(mz_min: float,
                       mz_max: float,
@@ -331,6 +330,24 @@ def smoothing(y: np.ndarray,
               smooth_algo: str = None, 
               smooth_window: int = 7, 
               smooth_cycles: int = 1) -> np.ndarray:
+    """Smoothing function.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Array to be smoothed.
+    smooth_algo : str, optional
+        Smoothing algorithm. Default is 'None'.
+    smooth_window : int, optional
+        Window size. Default is 7.
+    smooth_cycles : int, optional
+        Number of cycles. Default is 1.
+
+    Returns
+    -------
+    np.ndarray
+        Smoothed array.
+    """
     if len(y) == 0:
         return np.array([])
     
