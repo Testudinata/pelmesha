@@ -140,6 +140,10 @@ After peak picking, the probability density function (PDF) of the peaks is built
 | [`align`](src/pelmesha/align.py) | The `Aligner` class implementing signal calibration/alignment. |
 | [`utensils`](src/pelmesha/utensils.py) | Assorted helper functions and constants. |
 
+## Contacts
+- **Bug reports & feature requests**: [GitHub Issues](https://github.com/Testudinata/pelmesha/issues)
+- **Direct contact**: Kuzya-90@bk.ru
+
 ## License
 
 Distributed under the Apache-2.0 license. See [`LICENSE.txt`](LICENSE.txt).
