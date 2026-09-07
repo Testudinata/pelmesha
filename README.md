@@ -114,6 +114,7 @@ ds.set_align_peaks_from_ref()
 ## Interactive tutorial
 For a step‑by‑step interactive walkthrough with visualisations and additional tips, check out the tutorial Jupyter Notebook:  
 📘 **[Tutorial Notebook: Working with the pelmesha Package](https://github.com/Testudinata/pelmesha/blob/main/notebook_example/pelmesha_tutorial_notebook.ipynb)**
+
 ⚠️ Note: The repository currently does not include sample `.imzml` or `.cdf` files (due to file size and licensing). We plan to add a minimal test dataset in a future release. For now, please run the pipeline on your data. The tutorial notebook demonstrates the workflow and expected outputs using representative data structures.
 
 ## Pipeline steps
