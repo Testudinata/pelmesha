@@ -9,7 +9,7 @@
 - **Loading & metadata extraction** — reads raw MSI data and builds a structured metadata HDF5 file (`*_ingredients.hdf5`) containing sample metadata, per-ROI index ranges, m/z ranges, and spatial coordinates.
 - **Configuration-driven processing pipeline** — a configuration system (`Configs`, `PipelineConfigurator`, `PreparedDataSource`) that validates parameters, distributes them to the pipeline steps, and supports YAML serialisation. The lightweight `KDEConfigs` class is built on Pydantic.
 - **Spectrum processing** — smoothing, baseline correction, resampling to a uniform m/z scale, and alignment against reference peaks using a slightly modified version of the [`msalign`](https://github.com/lukasz-migas/msalign) implementation.
-- **Peak picking** — detection of peaks together with their area, FWHM points, peak-base boundaries, and signal-to-noise ratio.
+- **Peak picking** — detection of peaks together with their area, FWHM, peak-base boundaries, and signal-to-noise ratio.
 - **KDE-based m/z correction** — peaks that wander slightly across spectra are grouped into single m/z values based on their kernel density estimate (using [KDEpy](https://github.com/tommyod/KDEpy)).
 - **Multi-sample aggregation** — builds a feature matrix from the peak lists of several samples and ROIs, with optional occurrence filtering, duplicate merging, pivoting, and coordinate merging.
 - **Reference peaks** — generates a reference peak list from a reference source and uses it to align the other samples registered in the same `DataSet`.
