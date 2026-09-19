@@ -2,7 +2,7 @@ from pelmesha.cookbook import Configs, PreparedDataSource, PipelineConfigurator,
 from pelmesha.filling import DataSource
 from pelmesha.dough import Indexator, SliceIndexator
 from pelmesha.kneading import _compute_KDE
-from pelmesha.utensils import _summerize_kde_mz, _consesusing_peaks, apply_kde_mzcorrection, _frequency_filtration, _consensus_peaks_summary, show_df, _nunique_summary, _index_to_segment
+from pelmesha.utensils import _summerize_kde_mz, _consesusing_peaks, apply_kde_mzcorrection, _frequency_filtration, _consensus_peaks_summary, show_df, _nunique_summary, _index_to_segment, mspeaks_KD
 from sklearn.preprocessing import normalize
 from itertools import pairwise
 import pyarrow.parquet as pq
@@ -10,6 +10,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
+from matplotlib.colors import Normalize, to_rgb, LinearSegmentedColormap
+from matplotlib.cm import ScalarMappable
+import numbers
 import os
 import yaml
 import warnings
@@ -168,6 +171,7 @@ class DataSet:
                             num_peaks_per_step: int = 5,
                             min_occurence: float = 0.1,
                             return_weight: bool = True,
+                            pdf_fwhm_merge_factor: float = 0.85,
                             allowed_indices: np.ndarray | None = None,
                             allowed_coords: list[dict]| dict | None = None,
                             free_cpus: int = 1,
@@ -315,7 +319,7 @@ class DataSet:
             feature_matrix = sample_peaks[r]
 
         feature_matrix = apply_kde_mzcorrection(
-            feature_matrix, kde_mz, kde_density, cpu_num
+            feature_matrix, kde_mz, kde_density, pdf_fwhm_merge_factor, cpu_num
         )
 
         # Occurrence weights per corrected m/z across all spectra.
@@ -793,12 +797,15 @@ class DataSet:
                         rois: str | list[str] | None = None,
                         sample_rois_map: dict[str, list[str]] | None = None,
                         countf: int = 10,
+                        countf_rel: float | None = None,
+                        pdf_fwhm_merge_factor: float = 0.85,
                         duplicates_drop: bool = True,
                         pivot_values: str | list[str] | None = None,  # 'Intensity', ['Intensity', 'Area']
                         fill_values = 0.0,
                         free_cpus: int = 1,
-                        draw_borders: float = 1.5,
+                        draw_borders: float| tuple[float, float] = 1.5,
                         draw: bool = True,
+                        show_stats: bool = True,
                         save_path: str = None,
                         local_roi_idx: bool = True,
                         merge_with_coords: bool = False) -> pd.DataFrame:
@@ -811,12 +818,26 @@ class DataSet:
             Dictionary of ROIs to process. Example: {sample_name: [roi_name, ...]}.
         countf : int, optional
             Number of features to keep (default 10).
+        countf_rel : float, optional
+            Number of features to keep as a fraction of the total number of features (default None).
+        pdf_fwhm_merge_factor : float, optional
+            This factor controls the merging of bins that are produced after
+            constructing the global probability density function (PDF) (default 0.85). 
+            It addresses rare edge-case behavior in the algorithm where a single logical bin
+            can be split into two adjacent bins due to numerical or discretization artifacts.
         duplicates_drop : bool, optional
             Whether to drop duplicates (default True).
         pivot_values : str | list[str], optional
             Values to pivot on (default None).
         fill_values : float, optional
             Value to fill missing values with (default 0.0).
+        draw_borders : float, optional
+            Defines the border width to draw around a selected range.
+
+            - If a fixed range is provided (as a tuple of floats), borders are drawn exactly around that range.
+            - If a single float is given (default: 1.5), it specifies ± value around a randomly chosen peak.
+
+            This parameter is primarily used for visualization (e.g., highlighting regions of interest on spectra or KDE density plots).
         free_cpus : int, optional
             Number of CPUs to leave free (default 1).
         save_path : str, optional
@@ -833,12 +854,15 @@ class DataSet:
                                        rois = rois,
                                        sample_rois_map = sample_rois_map,
                                        countf = countf,
+                                       countf_rel = countf_rel,
+                                       pdf_fwhm_merge_factor = pdf_fwhm_merge_factor,
                                        duplicates_drop = duplicates_drop,
                                        pivot_values = pivot_values,
                                        fill_values = fill_values,
                                        free_cpus = free_cpus,
                                        draw_borders = draw_borders,
                                        draw = draw,
+                                       show_stats = show_stats,
                                        save_path = save_path,
                                        local_roi_idx = local_roi_idx,
                                        merge_with_coords = merge_with_coords)
@@ -1071,6 +1095,35 @@ class DataSet:
             sources = [sources]
         for source in sources:
             Drawer(self.sources[source]).audit_processing(roi, draw_mz_range, draw_spectrum_idx, dtypeconv)
+
+    def draw_mass_difference_map(self,
+                            sources: str | list[str] | None = None,
+                            roi: str | list[str] | None = None,
+                            draw_mz_range: tuple[float, float] | None = None,
+                            y_axis: str = 'spectra_ind',
+                            **kwargs):
+        """
+        Draw the mass difference map.
+
+        Parameters
+        ----------
+        sources : str or list, optional
+            The data source to audit. If None, all sources are audited.
+        roi : str or list, optional
+            The ROI to audit. If None, all ROIs are audited.
+        draw_mz_range : tuple of float, optional
+            If not None, draw a spectrum within the given m/z range.
+        y_axis : str, optional
+            The y-axis to use as category for spectrum on the y axis. Default is 'spectra_ind'.
+        **kwargs
+            Additional keyword arguments forwarded to _draw_mass_difference_map (e.g. draw_mz_borders, y_axis, cmap).
+        """
+        if sources is None:
+            sources = list(self.sources.keys())
+        if isinstance(sources, str):
+            sources = [sources]
+        for source in sources:
+            Drawer(self.sources[source]).draw_mass_difference_map(roi,draw_mz_borders = draw_mz_range, y_axis = y_axis, **kwargs)
     
     # ------------------------------------------------------------------ #
     #  Table representations (__repr__ / _repr_html_)                    #
@@ -1371,9 +1424,7 @@ class DataSet:
         else:
             for s in self.sources.values():
                 s.close()
-
-
-
+    
 class Drawer():
     def __init__(self, datasource: "str | DataSource | PreparedDataSource"):
         """
@@ -1689,17 +1740,14 @@ class Drawer():
                         roi_draw_mz_range = draw_mz_range
             if not peaklists_bool:
                 peaklist = peaklist_streamed
-            #     with File(self.peaklists_path, "r") as hdf5:
-            #         headers = hdf5[r].attrs["Column headers"]
-            #         peaklist = pd.DataFrame(hdf5[r][:], columns = headers).astype({"spectra_ind": int}).query('spectra_ind == @spectrum_idx')
-            # else:
-            #     peaklist = None
+
 
             self._draw(mz, data_int, peaklist, headers, r, roi_draw_mz_range, spectrum_idx, axes)
             plt.show()
     def draw_peak_density(self,
                            roi: str | list | None = None,
-                           draw_mz_borders: tuple[float, float] | None = None):
+                           draw_mz_borders: tuple[float, float] | None = None,
+                           pdf_fwhm_merge_factor: float = 0.85):
         """
         Draw the KDE peak density around a randomly chosen peak.
 
@@ -1749,7 +1797,10 @@ class Drawer():
             quered_peaklists = peaklists.query("mz>=@mz_borders[0] and mz<=@mz_borders[1]")
             quered_peaklists['uncor_mz'] = quered_peaklists['mz'].copy()
 
-            corrected_peaklists = apply_kde_mzcorrection(quered_peaklists, kde_mz, kde_density)
+            corrected_peaklists = apply_kde_mzcorrection(quered_peaklists,
+                                                        kde_mz, 
+                                                        kde_density, 
+                                                        pdf_fwhm_merge_factor)
             
             Peaks_list=corrected_peaklists["mz"].sort_values().unique()
             for peak in Peaks_list:
@@ -1870,156 +1921,381 @@ class Drawer():
         axes_prob.legend(graphs, leg, loc = 'upper left')
         return axes_prob
 
-    @staticmethod
-    def _draw_datasets_mzcorrection(dataset: DataSet,
-                                    kde_mz: np.ndarray,
-                                    kde_density: np.ndarray,
-                                    peak_mz: float,
-                                    samples: list[str] | None = None,
-                                    rois: str | list[str] | None = None, 
-                                    sample_rois_map: dict[str, list[str]] | None = None,
-                                    draw_mz_borders: float = 2.5,
-                                    countf_rel: float | None = None,
-                                    countf: int | None = None,
-                                    duplicates_drop: bool = True,
-                                    cpu_num: int = 1):
-        """Build a verification plot of the m/z correction for one random source.
-
-        Uses a randomly chosen source and ROI from the dataset to visualise
-        the m/z correction applied during feature-matrix construction: the
-        KDE probability density, the corrected and original peak positions,
-        the excluded peaks, and the raw/processed mean spectrum.
+    def draw_mass_difference_map(self,
+                                 roi: str | list | None = None,
+                                 uncor_col: str = "uncorrected_mz",
+                                 y_axis: str = 'spectra_ind',
+                                 **kwargs) -> plt.Axes | None:
         """
-        formatter = AbsoluteFormatter(useMathText=True)
-        formatter.set_scientific(True)
-        formatter.set_powerlimits((-3, 3))
-        mz_borders = (peak_mz-draw_mz_borders,peak_mz+draw_mz_borders)
-        # datasources = dataset.sources
-        multiindex_keys = []
-        feature_matrix = []
-        
-        sample_rois_map = dataset._resolve_sample_rois_map(samples, rois, sample_rois_map)
-        for sample, rois in sample_rois_map.items():
-            datasource = dataset.sources[sample]
-            if os.path.exists(datasource.peaklists_path):
-                for roi in rois:
-                    multiindex_keys.append((sample, roi))
-                    uncor_peaklist = datasource.peaklists(roi)
-                    uncor_quered_peaklist = uncor_peaklist.query("mz>=@mz_borders[0] and mz<=@mz_borders[1]")
-                    uncor_quered_peaklist['uncor_mz'] = uncor_quered_peaklist['mz'].copy()
+        Draw the mass difference map of one or several ROIs.
 
-                    feature_matrix.append(uncor_quered_peaklist)
-        feature_matrix = pd.concat(feature_matrix, keys=multiindex_keys, names = ['sample', 'roi'])
-        feature_matrix = apply_kde_mzcorrection(feature_matrix, kde_mz, kde_density, cpu_num)
-        if duplicates_drop:
-            feature_matrix = _consesusing_peaks(feature_matrix)
-        
-        if countf or countf_rel:
-            if countf is None and countf_rel is not None:
-                countf = countf_rel*uncor_peaklist.shape[0]
-            print(f"[DEBUG] BEFORE merge: feature_matrix.index.names={feature_matrix.index.names!r}, "
-                  f"len(index)={len(feature_matrix.index)}")
-            feature_matrix = feature_matrix.merge(feature_matrix['mz'].value_counts().to_frame(name='count'),left_on="mz",right_index=True)
-            print(f"[DEBUG] AFTER merge: feature_matrix.index.names={feature_matrix.index.names!r}, "
-                  f"index={feature_matrix.index[:5].tolist()}")
+        For every detected peak the deviation between the uncorrected and the
+        KDE-corrected m/z (in ppm) is rendered as a coloured band on a
+        ``(spectral characteristic x m/z)`` image. The per-ROI peak lists
+        (containing the *uncorrected* m/z) and the peaks-density KDE are loaded
+        from disk, the KDE m/z correction is applied on the fly (keeping the
+        original values in ``uncor_col``), and the resulting map is drawn by
+        :meth:`_draw_mass_difference_map`.
 
-            excluded_peaks = feature_matrix.loc[feature_matrix['count'] < countf]
-            feature_matrix = feature_matrix.loc[feature_matrix['count'] >= countf]
-            # corrected_peaklist = _peaks_filtration(corrected_peaklist, countf_loc, countf_rel_loc)
-            feature_matrix.drop(columns=['count'], inplace=True)
-            excluded_peaks.drop(columns=['count'], inplace=True)
+        Parameters
+        ----------
+        roi : str | list | None, optional
+            ROI name or list of ROI names. Default ``None`` (all ROIs).
+        uncor_col : str, optional
+            Column name that will hold the uncorrected m/z values before the
+            KDE correction. Default ``"uncorrected_mz"``.
+        **kwargs
+            Additional keyword arguments forwarded to
+            :meth:`_draw_mass_difference_map` (e.g. ``draw_mz_borders``,
+            ``y_axis``, ``cmap``).
+
+        Returns
+        -------
+        plt.Axes | None
+            The axes of the last drawn map, or ``None`` if no ROI had data.
+        """
+        if self.prepdata is not None and getattr(self.prepdata, "rois", None):
+            rois = self.prepdata.rois if roi is None else roi
+        else:
+            rois = list(self.datasource.roi_metadata.index) if roi is None else roi
+        if isinstance(rois, str):
+            rois = [rois]
+        if not os.path.exists(self.peaks_density_path):
+            raise FileNotFoundError(
+                f"Peaks density file {self.peaks_density_path} does not exist. "
+                "Please run `estimate_peak_density_kde` first"
+            )
+        if not os.path.exists(self.peaklists_path):
+            raise FileNotFoundError(
+                f"Peaklists file {self.peaklists_path} does not exist. "
+                "Please run `peakpick` first"
+            )
+        axes = None
+        for r in rois:
+            with File(self.peaks_density_path, "r") as hdf5:
+                kde_mz = hdf5[r]["mz"][:]
+                kde_density = hdf5[r]["peaks_density"][:]
+                if kde_density.size == 0:
+                    warnings.warn(f"No peaks-density data for roi = {r}. Skipping.")
+                    continue
+                # kde_density = normalize(kde_density.reshape(1, -1), norm='l1').squeeze()
+
+            peaklists = self.datasource.peaklists(r)
+            peaklists[uncor_col] = peaklists["mz"].copy()
+            peaklists = apply_kde_mzcorrection(peaklists, 
+                                               kde_mz, 
+                                               kde_density, 
+                                               pdf_fwhm_merge_factor = kwargs.get("pdf_fwhm_merge_factor", 0.85))
+            if kwargs.get("draw_mz_borders", False):
+                draw_mz_borders = kwargs.get("draw_mz_borders")
+                peaklists = peaklists.loc[(peaklists["mz"] >= draw_mz_borders[0]) & (peaklists["mz"] <= draw_mz_borders[1])]
+                kde_bool = (kde_mz >= draw_mz_borders[0]) & (kde_mz <= draw_mz_borders[1])
+                kde_mz = kde_mz[kde_bool]
+                kde_density = kde_density[kde_bool]
             
+            if y_axis == 'coords':
+                coords = self.datasource.get_coords(idxs = r)
+                peaklists = peaklists.merge(coords, how = "left", left_on="spectra_ind", right_index=True) # TODO Попробовать срезать feature_matrix и остальные вещи где-то здесь по границам mz
+                peaklists.set_index(list(coords.columns), inplace=True)
+            else:
+                peaklists.set_index("spectra_ind", inplace=True)
+            axes = self._draw_mass_difference_map(
+                peaklists, kde_mz, kde_density, uncor_col=uncor_col, **kwargs)
+        return axes
+
+    @staticmethod
+    def _draw_mass_difference_map(feature_matrix: pd.DataFrame,
+                                  kde_mz: np.ndarray,
+                                  kde_density: np.ndarray,
+                                  pdf_fwhm_merge_factor: float = 0.85,
+                                  uncor_col: str | None = None,
+                                  left_pext_col: str = "PextL",
+                                  right_pext_col: str = "PextR",
+                                  countf_rel: float | None = None,
+                                  countf: int | None = None,
+                                  filter_mz_mask: np.ndarray[bool] | None = None,
+                                  draw_mz_borders: tuple[float, float] | None = None,
+                                  y_axis: str | None = None,
+                                  n_px: int = 15000,
+                                  ppm_vmin: float | None = None,
+                                  ppm_vmax: float | None = None,
+                                  cmap: str | None = None,
+                                  axes: plt.Axes | None = None) -> plt.Axes:
+        """
+        Draw the mass difference map: corrected vs uncorrected m/z (ppm).
+
+        Every peak of ``feature_matrix`` is rendered as a coloured band along
+        the m/z axis: the band spans the peak base extent
+        (``left_pext_col`` → ``right_pext_col``) and its colour encodes the
+        deviation (in ppm) between the uncorrected m/z (``uncor_col``) and the
+        KDE-corrected ``mz`` column. The colour intensity is maximal at the
+        uncorrected m/z position of the peak and falls off linearly towards the
+        peak base edges (uniform transition to the background where there is no
+        peak). Along the Y axis — a spectral characteristic (coordinates,
+        ``spectra_ind`` or the feature-matrix index) — the colours are smoothed
+        with a Gaussian so that neighbouring spectra blend smoothly. The bins
+        of the KDE peak list (:func:`~pelmesha.utensils.mspeaks_KD`) are marked
+        with a solid vertical line at the true m/z centre and dashed lines at
+        the left/right bin edges.
+
+        Parameters
+        ----------
+        feature_matrix : pd.DataFrame
+            Feature matrix with at least the columns ``mz`` (corrected),
+            ``left_pext_col``, ``right_pext_col`` and an uncorrected-m/z
+            column.
+        kde_mz : np.ndarray
+            KDE m/z grid.
+        kde_density : np.ndarray
+            KDE density aligned with ``kde_mz``.
+        pdf_fwhm_merge_factor : float, optional
+            This factor controls the merging of bins that are produced after
+            constructing the global probability density function (PDF) (default 0.85). 
+            It addresses rare edge-case behavior in the algorithm where a single logical bin
+            can be split into two adjacent bins due to numerical or discretization artifacts.
+        uncor_col : str | None, optional
+            Column holding the uncorrected m/z. When ``None`` the first column
+            containing "mz" (except ``mz`` itself) is used.
+        left_pext_col : str, optional
+            Column with the left peak base m/z (default ``"PextL"``).
+        right_pext_col : str, optional
+            Column with the right peak base m/z (default ``"PextR"``).
+        countf_rel : float | None, optional
+            Relative frequency threshold for peak filtering.
+        countf : int | None, optional
+            Absolute frequency threshold for peak filtering.
+        filter_mz_mask : np.ndarray[bool] | None, optional
+            Precomputed boolean mask of rows to draw.
+        draw_mz_borders : tuple[float, float] | None, optional
+            m/z window to draw. Default ``None`` (full KDE range).
+        y_axis : str | None, optional
+            Column/index level used as the Y characteristic (e.g. coordinates
+            ``"x"``/``"y"`` or ``"spectra_ind"``). When ``None``,
+            ``spectra_ind`` is used if present, otherwise the feature-matrix
+            row position.
+        n_px : int, optional
+            Number of pixels along the m/z axis (default 1500).
+        ppm_vmin, ppm_vmax : float | None, optional
+            ppm range mapped onto the colormap. When ``None`` a symmetric
+            range based on the 98th percentile of |ppm| is used.
+        cmap : str, optional
+            Matplotlib colormap name (default ``"coolwarm"``).
+        background_color : str | tuple, optional
+            Background colour where no peak is present (default ``"white"``).
+        draw_bin_borders : bool, optional
+            Whether to draw the KDE peak bins: a vertical line at each true
+            m/z centre and dashed lines at the left/right bin edges
+            (default True).
+        axes : plt.Axes | None, optional
+            Axes to draw into; a new figure is created when ``None``.
+
+        Returns
+        -------
+        plt.Axes
+            The axes with the drawn mass difference map.
+        """
+        if feature_matrix is None or feature_matrix.empty:
+            raise ValueError("feature_matrix is empty: nothing to draw")
+
+        # def fm_col(name: str) -> pd.Series:
+        #     return _feature_matrix_column(feature_matrix, name)
+
+        # ------------------------- uncorrected m/z column -------------------------
+        if uncor_col is None:
+            probably_uncor_cols = [col for col in feature_matrix.columns
+                                   if "mz" in str(col).lower() and col != "mz"]
+            if not probably_uncor_cols:
+                raise ValueError(
+                    "Cannot find the uncorrected m/z column: pass `uncor_col` "
+                    "explicitly (e.g. 'uncorrected_mz')"
+                )
+            uncor_col = probably_uncor_cols[0]
+        mz = feature_matrix["mz"].astype(float).to_numpy()
+        uncor = feature_matrix[uncor_col].astype(float).to_numpy()
+        left_ext = feature_matrix[left_pext_col].astype(float).to_numpy()
+        right_ext = feature_matrix[right_pext_col].astype(float).to_numpy()
+        # Deviation in ppm of the uncorrected value from the corrected one.
+        ppm = np.where(mz != 0, np.abs(uncor - mz) / mz * 1e6, np.nan)
+
+        # ------------------------- optional frequency filtration -------------------------
+        if filter_mz_mask is None:
+            if countf is not None or countf_rel is not None:
+                filter_mz_mask = _frequency_filtration(
+                    feature_matrix["mz"], countf, countf_rel).to_numpy()
+            else:
+                filter_mz_mask = np.ones(len(feature_matrix), dtype=bool)
         else:
-            excluded_peaks = pd.DataFrame(columns=feature_matrix.columns)
-        
-        dots_bord = (np.array(kde_mz)>=mz_borders[0]) & (np.array(kde_mz)<=mz_borders[1])
-        local_kde_mz = np.array(kde_mz)[dots_bord]
-        local_kde_density = np.array(kde_density)[dots_bord]
+            filter_mz_mask = np.asarray(filter_mz_mask, dtype=bool)
 
-        plt.figure(figsize=(25, 6), dpi=600)
-        kde_line, = plt.plot(local_kde_mz, local_kde_density*(-1), color="k",alpha=0.85)
-        graphs = [kde_line]
-        leg = ["Probability density function"]
-        plt.xlim(mz_borders)        
-        
-        Peaks_list=feature_matrix["mz"].sort_values().unique()
-        excluded_peaks_list=excluded_peaks["mz"].sort_values().unique()
-        for peak in Peaks_list:
-            # assert peak in excluded_peaks_list 
-            temp_query = feature_matrix.query("mz == @peak")
-            color = plt.gca()._get_lines.get_next_color()
-            peak_dot, = plt.plot([peak],[0],'|', markersize=12,alpha=1, color = color, mew =3)
-            graphs+=[peak_dot]
-            leg+=[f"Peak {peak:.3f} m/z: Adjusted / Original"]
-            plt.plot(temp_query['uncor_mz'], [0]*temp_query.shape[0],'|', markersize=6,alpha=0.33, color = color)
-        excl_dots, = plt.plot(excluded_peaks_list, [0]*len(excluded_peaks_list),'x', markersize=12,alpha=1, color = 'k', mew=3)
-        graphs+=[excl_dots]
-        leg+=[f"Excluded peaks"]
-        plt.plot(excluded_peaks['uncor_mz'], [0]*excluded_peaks.shape[0],'x', markersize=6,alpha=0.5, color = 'k')
-        plt.xlabel('m/z')
-        plt.ylabel("Probability Density")
-        plt.gca().set_title(f"Dataset m/z correction results around {peak_mz:.3f} m/z.")
-        plt.legend(graphs, leg, loc = 'upper left')
-        plt.minorticks_on()
-        plt.grid(visible=True,which="both")
-        axes_prob = plt.gca()
-        axes_prob.yaxis.set_major_formatter(formatter)
-        ylim_min, ylim_max = axes_prob.get_ylim()
-        limit = max(abs(ylim_min), abs(ylim_max))
-        axes_prob.set_ylim((-limit, limit))
-        axes_prob.legend(graphs, leg, loc = 'upper left')
-        # leg_twin=[f'Mean spectrum']
-        axes = plt.gca().twinx()
-        legend1 = axes.legend(graphs, leg, loc = 'upper left',framealpha=0.95)
-        # axes.plot(*exampled_datasource.get_mean_spectrum(roi,mz_range = mz_borders), color="r",alpha=0.85)
-
-        axes.set_ylabel("Intensity")
-
-        axes.add_artist(legend1)
-        # axes.legend(leg_twin, loc = 'upper right')
-        datasources = dataset.sources
-        rand_ds_name = np.random.choice(list(sample_rois_map.keys()))
-        rand_ds = datasources[rand_ds_name]
-        sample_rois = sample_rois_map[rand_ds_name]
-        rand_roi_int = np.random.randint(0, len(sample_rois))
-        rand_roi = sample_rois[rand_roi_int]
-        print(f"[DEBUG] At .loc: feature_matrix.index.names={feature_matrix.index.names!r}")
-        print(f"[DEBUG] At .loc: rand_ds_name={rand_ds_name!r} (type {type(rand_ds_name).__name__}), "
-              f"rand_roi={rand_roi!r} (type {type(rand_roi).__name__})")
-        if not isinstance(feature_matrix.index, pd.MultiIndex):
-            print(f"[DEBUG] At .loc: INDEX IS NOT A MULTIINDEX -> index sample values: "
-                  f"{feature_matrix.index[:5].tolist()}")
+        # ------------------------- m/z window & local KDE -------------------------
+        if draw_mz_borders is None:
+            draw_mz_borders = (float(np.min(kde_mz)), float(np.max(kde_mz)))
+            local_kde_mz, local_kde_density = kde_mz, kde_density
         else:
-            print(f"[DEBUG] At .loc: index roi level (level 1) unique sample = "
-                  f"{feature_matrix.index.get_level_values(1).unique()[:10].tolist()}, "
-                  f"has_rand_roi={rand_roi in feature_matrix.index.get_level_values(1)}")
-        rand_spec = feature_matrix.loc[(rand_ds_name, rand_roi)].query("mz == @peak_mz")['spectra_ind']
-        print(f"[DEBUG] feature_matrix: {feature_matrix}")
-        print(f"[DEBUG] feature_matrix.shape: {feature_matrix.shape}")
-        print(f"[DEBUG] peak_mz: {peak_mz}")
-        if rand_spec.empty:
-            print(f"[DEBUG] At .loc: rand_spec is empty")
-            rand_spec = feature_matrix.loc[(rand_ds_name, rand_roi)].query("mz >= (@peak_mz - 1e-6) and mz <= (@peak_mz + 1e-6)")['spectra_ind']
-            print(f"[DEBUG] At .loc: rand_spec is empty after query with tol {rand_spec}")
-        while rand_spec.empty:
-            del sample_rois[rand_roi_int]
-            rand_roi_int = np.random.randint(0, len(sample_rois))
-            rand_roi = sample_rois[rand_roi_int]
-            rand_spec = feature_matrix.loc[(rand_ds_name, rand_roi)].query("mz == @peak_mz")['spectra_ind']
-                 
-        rand_spec = np.random.choice(rand_spec)
+            kde_borders_mask = (kde_mz >= draw_mz_borders[0]) & (kde_mz <= draw_mz_borders[1])
+            local_kde_mz = kde_mz[kde_borders_mask]
+            local_kde_density = kde_density[kde_borders_mask]
+        mz_lo, mz_hi = float(draw_mz_borders[0]), float(draw_mz_borders[1])
+        if not (np.isfinite(mz_lo) and np.isfinite(mz_hi) and mz_lo < mz_hi):
+            raise ValueError(f"Invalid draw_mz_borders: {draw_mz_borders!r}")
 
-        axes.plot(*rand_ds.get_mean_spectrum(rand_roi,mz_range = mz_borders), color="r",alpha=0.85)
-        leg_twin=[f'Mean spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}']
-        legend2 = axes.legend(leg_twin, loc = 'upper right')
-        Drawer(rand_ds).audit_processing(rand_roi,mz_borders, rand_spec, axes = axes, configs_path = rand_ds.configs_path)
-        ylim_min, ylim_max = axes.get_ylim() 
-        limit = max(abs(ylim_min), abs(ylim_max))
-        axes.set_ylim( (-limit, limit) )
-        legend2 = axes.get_legend()
-        legend2.get_texts()[1].set_text(f'Raw mass spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}, N{rand_spec}')
-        legend2.get_texts()[2].set_text(f'Processed mass spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}, N{rand_spec}' )
-        plt.show()
+        # ------------------------- KDE peak list with bin edges -------------------------
+        true_mz, left_bin_edge, right_bin_edge, _  = mspeaks_KD(local_kde_mz, local_kde_density, pdf_fwhm_merge_factor = pdf_fwhm_merge_factor)
+
+        # ------------------------- Y axis: spectral characteristic -------------------------
+        y_axis = feature_matrix.index
+        y_label = y_axis.names
+        # if any(isinstance(y, tuple) for y in y_axis):
+        #     y_axis = np.asaray([zip(y_label, idx) for idx in pd.unique(y_axis)])
+            
+        try:
+            if isinstance(getattr(y_axis, "index", y_axis), pd.MultiIndex):
+                # Объединяем уровни мультииндекса в понятные текстовые строки, например "sample_1_roi_0"
+                y_axis_str = [
+                    "_".join(str(item) for item in row) for row in y_axis
+                ]
+                y_values, y_inv = np.unique(y_axis_str, return_inverse=True)
+            else:
+                y_values, y_inv = np.unique(y_axis.to_numpy(dtype=float),
+                                            return_inverse=True)
+            # y_row = y_inv.astype(np.intp)
+            # n_y = int(y_values.max()) + 1
+
+        except (TypeError, ValueError):
+            y_values, y_inv = np.unique(y_axis.astype(str).to_numpy(),
+                                        return_inverse=True)
+        y_row = y_inv.astype(np.intp)
+        n_y = int(y_row.max()) + 1
+        if n_y * n_px > 50_000_000:
+            warnings.warn(
+                f"The mass difference map raster is large ({n_y} x {n_px} pixels). "
+                "Consider passing `y_axis='spectra_ind'`, a narrower "
+                "`draw_mz_borders` or a smaller `n_px`."
+            )
+
+        # ------------------------- ppm scale & colormap -------------------------
+        finite_ppm = ppm[np.isfinite(ppm)]
+        if finite_ppm.size == 0:
+            raise ValueError("No finite ppm values found in feature_matrix")
+
+        ppm_vmin = 0
+        ppm_vmax = float(np.percentile(np.abs(finite_ppm), 98))
+
+        norm = Normalize(vmin=ppm_vmin, vmax=ppm_vmax)
+
+        if cmap is None:
+            cmap = LinearSegmentedColormap.from_list("white_dark_blue", ["#ffffff", "#222222"])
+        colormap = plt.get_cmap(cmap)
+        bg_rgb = np.asarray(to_rgb('#222222'), dtype=float)
+
+        # ------------------------- select features to rasterize -------------------------
+        sel = (
+            filter_mz_mask
+            & (left_ext < mz_hi)
+            & (right_ext > mz_lo)
+            & (left_ext < right_ext)
+            & np.isfinite(ppm)
+            & np.isfinite(left_ext)
+            & np.isfinite(right_ext)
+            & np.isfinite(mz)
+            & np.isfinite(uncor)
+        )
+        
+        # ------------------------- plotting -------------------------
+        if axes is None:
+            fig, axes = plt.subplots(figsize=(18, 9), dpi=600)
+            axes.set_title(
+            f"Mass difference map (uncorrected vs corrected m/z, ppm) - "
+            f"range {mz_lo:.3f} - {mz_hi:.3f} m/z"
+        )
+        else:
+            fig = axes.figure
+        axes.set_facecolor('#222222')
+        
+        # y_lo, y_hi = 0.0, float(max(n_y, 1))
+        # if y_axis is not None and np.issubdtype(np.asarray(y_values).dtype, np.number):
+        #     y_lo, y_hi = float(y_values.min()), float(y_values.max())
+        #     if abs(y_hi - y_lo) < 1e-12:
+        #         y_lo -= 0.5
+        #         y_hi += 0.5
+        # axes.imshow(image, origin="lower", aspect="auto",
+        #             extent=(mz_lo, mz_hi, 0, float(n_y)), interpolation="nearest", zorder=1)
+        axes.set_xlim(mz_lo, mz_hi)
+        # axes.set_ylim(y_lo, y_hi)
+        axes.set_ylim(0, float(n_y))
+        
+        if n_y <= 20000:
+            step = max(1, n_y // 10)
+            tick_rows = np.arange(0, n_y, step)
+            axes.set_yticks(tick_rows + 0.5)
+            axes.set_yticklabels([f"{y_values[i]:g}" if not isinstance(y_values[i], (str, np.str_)) else y_values[i] for i in tick_rows])
+
+
+        # Bins from the KDE peak list (peaklist_with_edges): a solid vertical
+        # line at every true m/z centre and dashed lines at the bin edges.
+
+        legend_handles = []
+        legend_labels = []
+        mz_cl = mz[filter_mz_mask]
+        uncor_cl = uncor[filter_mz_mask]
+        y_row_cl = y_row[filter_mz_mask]
+        ppm_cl = ppm[filter_mz_mask]
+
+        mz_f = mz[~filter_mz_mask]
+        uncor_f = uncor[~filter_mz_mask]
+        y_row_f = y_row[~filter_mz_mask]
+        ppm_f = ppm[~filter_mz_mask]
+        for i, (t, le, re_) in enumerate(zip(true_mz, left_bin_edge, right_bin_edge)):
+            color_cycle = plt.gca()._get_lines.get_next_color()
+            mask_bin = (mz_cl == t)
+            if mask_bin.any():
+                axes.scatter(uncor_cl[mask_bin], y_row_cl[mask_bin] + 0.5, edgecolors=color_cycle, linewidths=1, c=ppm_cl[mask_bin], cmap=colormap, alpha=0.75, norm=norm, s = 18)
+
+            mask_bin = (mz_f == t)
+            if mask_bin.any():
+                axes.scatter(uncor_f[mask_bin], y_row_f[mask_bin] + 0.5, edgecolors="w", linewidths=0.5, c="k", s = 36, marker = "X")
+            # Legend entry: the marker outline colour and the centre-line
+            # colour are shared per bin and encode the true (corrected) m/z.
+            bin_handle, = axes.plot([], [], color=color_cycle, lw=1.5, ls="-", alpha=0.7,
+                                    marker="o", ms=6, mfc="none", mec=color_cycle, mew=1.2)
+            legend_handles.append(bin_handle)
+            legend_labels.append(f"Bin {i}: true m/z = {t:.4f}")
+            lo_b, hi_b = max(le, mz_lo), min(re_, mz_hi)
+            if lo_b >= hi_b:
+                continue
+            # if i % 2 == 0:
+            #     axes.axvspan(lo_b, hi_b, color="grey", alpha=0.07, lw=0, zorder=2)
+            # Left and right bin edges.
+            axes.axvline(lo_b, color="w", lw=0.75, ls="--", alpha=0.45, zorder=3)
+            axes.axvline(hi_b, color="w", lw=0.75, ls="--", alpha=0.45, zorder=3)
+
+            # True (corrected) m/z centre of every bin.
+
+            axes.axvline(t, color=color_cycle, lw=2, ls="-", alpha=0.7, zorder=3)
+            axes.axvline(t, color="w", lw=0.5, ls="-", alpha=0.7, zorder=4)
+
+        # Static legend entries: bin-edge lines and the ppm fill of markers.
+        edge_handle, = axes.plot([], [], color="w", lw=0.75, ls="--", alpha=0.45)
+        legend_handles.append(edge_handle)
+        legend_labels.append("Left/right bin edges")
+        fill_handle, = axes.plot([], [], marker="o", ms=6, mfc="grey", mec="none", ls="None")
+        legend_handles.append(fill_handle)
+        legend_labels.append("Marker fill: ppm deviation (colorbar)")
+
+        axes.set_xlabel("m/z")
+        axes.set_ylabel(y_label if y_label is not None else "Spectra")
+
+        axes.minorticks_on()
+        axes.legend(legend_handles, legend_labels, loc="upper left",
+                    fontsize=8, framealpha=0.95)
+        # ppm legend (colour scale).
+        mappable = ScalarMappable(cmap=colormap, norm=norm)
+        mappable.set_array([])
+        cbar = fig.colorbar(mappable, ax=axes, pad=0.1, fraction=0.046,orientation='horizontal')
+        cbar.set_label("Deviation of uncorrected m/z from corrected, ppm")
+        cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.1f"))
+        return axes
+
 
 class AbsoluteFormatter(ticker.ScalarFormatter):
     """
@@ -2324,6 +2600,7 @@ class Pipeline:
         for roi in prepdata.rois:
             if draw:
                 Drawer(self.prepdata).draw_peak_density(roi, draw_borders)
+
     @staticmethod
     def feature_matrix(dataset: DataSet,
                        samples: list[str] | None = None,
@@ -2331,6 +2608,7 @@ class Pipeline:
                         sample_rois_map: dict[str, list[str]] | None = None,
                         countf: int = 10,
                         countf_rel: float | None = None,
+                        pdf_fwhm_merge_factor: float = 0.85,
                         duplicates_drop: bool = True,
                         pivot_values: str | list[str] | None = None,  # 'Intensity', ['Intensity', 'Area']
                         fill_values = 0.0,
@@ -2338,6 +2616,7 @@ class Pipeline:
                         save_path: str = None,
                         draw_borders: float = 2.5,
                         draw: bool = True,
+                        show_stats: bool = True, 
                         local_roi_idx: bool = True,
                         merge_with_coords: bool = False) -> pd.DataFrame:
         """
@@ -2361,6 +2640,11 @@ class Pipeline:
         countf_rel : float | None, optional
             Minimum relative occurrence count (fraction of spectra) for a
             peak to be kept. Default ``None``.
+        pdf_fwhm_merge_factor : float, optional
+            This factor controls the merging of bins that are produced after
+            constructing the global probability density function (PDF) (default 0.85). 
+            It addresses rare edge-case behavior in the algorithm where a single logical bin
+            can be split into two adjacent bins due to numerical or discretization artifacts.
         duplicates_drop : bool, optional
             Whether to merge duplicate peaks into consensus peaks
             (default True).
@@ -2376,6 +2660,9 @@ class Pipeline:
             m/z window used when drawing the correction results (default 2.5).
         draw : bool, optional
             Whether to draw the m/z correction verification plot
+            (default True).
+        show_stats : bool, optional
+            Whether to show the statistics of the m/z correction
             (default True).
         local_roi_idx : bool, optional
             Whether to use local (per-ROI) spectrum indices (default True).
@@ -2437,25 +2724,33 @@ class Pipeline:
         feature_matrix = pd.concat(feature_matrix, keys=multiindex_keys, names = ['sample', 'roi'])
         if draw:
             feature_matrix['uncorrected_mz'] = feature_matrix['mz'].copy()
-        nunique_stats.append(_nunique_summary(feature_matrix['mz'].droplevel('spectra_ind'),'before correction'))
-        feature_matrix = apply_kde_mzcorrection(feature_matrix, kde_mz, kde_density, cpu_num)
-        nunique_stats.append(_nunique_summary(feature_matrix['mz'].droplevel('spectra_ind'),'after correction'))
+        if show_stats:
+            nunique_stats.append(_nunique_summary(feature_matrix['mz'].droplevel('spectra_ind'),'before correction'))
+        feature_matrix = apply_kde_mzcorrection(feature_matrix, 
+                                                kde_mz, 
+                                                kde_density,
+                                                pdf_fwhm_merge_factor, 
+                                                cpu_num)
+        if show_stats:
+            nunique_stats.append(_nunique_summary(feature_matrix['mz'].droplevel('spectra_ind'),'after correction'))
 
         # Duplicates manipulations
         # Counting duplicates
-        dupl_stats = _consensus_peaks_summary(feature_matrix['mz'])
+        if show_stats:
+            dupl_stats = _consensus_peaks_summary(feature_matrix['mz'])
         # Merging duplicates and create consensus peaks
 
         # Peaks filtration
         if countf or countf_rel:
             filter_bool = _frequency_filtration(feature_matrix['mz'], countf, countf_rel)
-            nunique_stats.append(_nunique_summary(feature_matrix['mz'].loc[filter_bool].droplevel('spectra_ind'),'after filtration'))
-            # Duplicates recounting with merging
-            dupl_stats_filtration = _consensus_peaks_summary(feature_matrix['mz'])
-            all_columns = dupl_stats.columns.union(dupl_stats_filtration.columns)
-            dupl_stats = dupl_stats.reindex(columns=all_columns, fill_value=0)
-            dupl_stats_filtration = dupl_stats_filtration.reindex(columns=all_columns, fill_value=0)
-            dupl_stats = pd.concat([dupl_stats, dupl_stats_filtration],axis=1, keys=["before filtration", "after filtration"])
+            if show_stats:
+                nunique_stats.append(_nunique_summary(feature_matrix['mz'].loc[filter_bool].droplevel('spectra_ind'),'after filtration'))
+                # Duplicates recounting with merging
+                dupl_stats_filtration = _consensus_peaks_summary(feature_matrix['mz'])
+                all_columns = dupl_stats.columns.union(dupl_stats_filtration.columns)
+                dupl_stats = dupl_stats.reindex(columns=all_columns, fill_value=0)
+                dupl_stats_filtration = dupl_stats_filtration.reindex(columns=all_columns, fill_value=0)
+                dupl_stats = pd.concat([dupl_stats, dupl_stats_filtration],axis=1, keys=["before filtration", "after filtration"])
         
         if draw:
             peaks_num = filter_bool.sum()
@@ -2463,6 +2758,7 @@ class Pipeline:
                 # Randomizer: pick a random sample and ROI first, then a random peak that
                 # is guaranteed to exist within that ROI's filtered data, so the later mz
                 # query can never run empty (fixes ValueError: high <= 0 from randint(0, 0)).
+                
                 rand_ds_name_list = set(feature_matrix[filter_bool].index.get_level_values(0)) & set(sample_rois_map.keys())
                 rand_ds_name = np.random.choice(list(rand_ds_name_list))
                 rand_ds = datasources[rand_ds_name]
@@ -2478,9 +2774,31 @@ class Pipeline:
                         "cannot draw a random peak"
                     )
                 rand_num = np.random.randint(0, roi_filtered.shape[0])
-                peak_mz = roi_filtered['mz'].values[rand_num]
-                draw_mz_borders = (peak_mz - draw_borders, peak_mz + draw_borders)
-                axes_prob = Drawer.draw_mzcorrection(feature_matrix, kde_mz, kde_density, draw_mz_borders = draw_mz_borders, countf_rel=countf_rel, countf=countf, filter_mz_mask = filter_bool, flipped_kde_density = True)
+                if isinstance(draw_borders, numbers.Number):                    
+                    peak_mz = roi_filtered['mz'].values[rand_num]
+                    draw_mz_borders = (peak_mz - draw_borders, peak_mz + draw_borders)
+                    rand_spec = feature_matrix.sort_index().loc[(rand_ds_name, rand_roi)].query("mz == @peak_mz").index.get_level_values('spectra_ind').tolist()
+                    while not rand_spec:
+                        del sample_rois[rand_roi_int]
+                        rand_roi_int = np.random.randint(0, len(sample_rois))
+                        rand_roi = sample_rois[rand_roi_int]
+                        rand_spec = feature_matrix.loc[(rand_ds_name, rand_roi)].query("mz == @peak_mz")['spectra_ind']
+                    rand_spec = np.random.choice(rand_spec)
+                elif isinstance(draw_borders, (tuple, list)) and len(draw_borders) == 2:
+                    draw_mz_borders = draw_borders
+                    rand_spec = feature_matrix.sort_index().loc[(rand_ds_name, rand_roi)].index.get_level_values('spectra_ind').tolist()
+                    while not rand_spec:
+                        del sample_rois[rand_roi_int]
+                        rand_roi_int = np.random.randint(0, len(sample_rois))
+                        rand_roi = sample_rois[rand_roi_int]
+                        rand_spec = feature_matrix.loc[(rand_ds_name, rand_roi)]['spectra_ind']
+                    rand_spec = np.random.choice(rand_spec)
+                else:
+                    raise ValueError(
+                        f"Invalid draw_borders={draw_borders} (expected scalar, tuple or list of length 2)"
+                    )
+                fig, (axes_prob, axes_diff) = plt.subplots(2,1, sharex = True, figsize = (25,16))
+                axes_prob = Drawer.draw_mzcorrection(feature_matrix, kde_mz, kde_density, draw_mz_borders = draw_mz_borders, countf_rel=countf_rel, countf=countf, filter_mz_mask = filter_bool, flipped_kde_density = True, axes = axes_prob )
                 graphs, leg = axes_prob.get_legend_handles_labels()
                 axes_spectrum = axes_prob.twinx()
                 legend1 = axes_spectrum.legend(graphs, leg, loc = 'upper left',framealpha=0.95)
@@ -2488,18 +2806,6 @@ class Pipeline:
 
                 axes_spectrum.set_ylabel("Intensity")
                 axes_spectrum.add_artist(legend1)
-                
-                rand_spec = feature_matrix.sort_index().loc[(rand_ds_name, rand_roi)].query("mz == @peak_mz").index.get_level_values('spectra_ind').tolist()
-                
-                # if not rand_spec:
-                    
-                #     rand_spec = feature_matrix.sort_index().loc[(rand_ds_name, rand_roi)].query("mz >= (@peak_mz - 1e-6) and mz <= (@peak_mz + 1e-6)").index.get_level_values('spectra_ind').tolist()
-                while not rand_spec:
-                    del sample_rois[rand_roi_int]
-                    rand_roi_int = np.random.randint(0, len(sample_rois))
-                    rand_roi = sample_rois[rand_roi_int]
-                    rand_spec = feature_matrix.loc[(rand_ds_name, rand_roi)].query("mz == @peak_mz")['spectra_ind']
-                rand_spec = np.random.choice(rand_spec)
 
                 axes_spectrum.plot(*rand_ds.get_mean_spectrum(rand_roi,mz_range = draw_mz_borders), color="r",alpha=0.85)
                 leg_twin=[f'Mean spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}']
@@ -2511,18 +2817,26 @@ class Pipeline:
                 legend2 = axes_spectrum.get_legend()
                 legend2.get_texts()[1].set_text(f'Raw mass spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}, N{rand_spec}')
                 legend2.get_texts()[2].set_text(f'Processed mass spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}, N{rand_spec}' )
+
+
+                Drawer._draw_mass_difference_map(feature_matrix, kde_mz=kde_mz, kde_density=kde_density, uncor_col = 'uncorrected_mz', filter_mz_mask = filter_bool, draw_mz_borders=draw_mz_borders, axes = axes_diff)
+                fig.subplots_adjust(hspace=0)
+                plt.setp(axes_prob.get_xticklabels(), visible=False)
                 plt.show()
+
             else:
                 print(f"No peaks after filtration with countf_rel={countf_rel} and countf={countf}")
+            # axes_diff = plt.subplot(2, 1, 2, sharex=axes_prob)
+
 
         feature_matrix = feature_matrix[filter_bool]
         if duplicates_drop:
             feature_matrix = _consesusing_peaks(feature_matrix)
-
-        nunique_stats = pd.concat(nunique_stats, axis=1)
-        nunique_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique peaks', c, '') for c in nunique_stats.columns] )
-        dupl_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique consensus peaks', *c) for c in dupl_stats.columns] )
-        show_df(pd.concat([nunique_stats, dupl_stats], axis=1), 'Peaks statistics')
+        if show_stats:
+            nunique_stats = pd.concat(nunique_stats, axis=1)
+            nunique_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique peaks', c, '') for c in nunique_stats.columns] )
+            dupl_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique consensus peaks', *c) for c in dupl_stats.columns] )
+            show_df(pd.concat([nunique_stats, dupl_stats], axis=1), 'Peaks statistics')
         # if draw:
         #     rand_num = np.random.randint(0,feature_matrix[filter_bool].shape[0])
         #     col_idx = feature_matrix.columns.get_loc("mz")

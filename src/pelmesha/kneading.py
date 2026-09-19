@@ -80,8 +80,9 @@ def preprocess_configuration_base(
     else: 
         headers_list = ["spectra_ind", "mz", "Intensity",  
                         "PextL", "PextR", "FWHM"]
-    # internal_configs['peakpick'] = {"discret_coeffs": datasource.roi_metadata.loc[roi,'discret_coeffs'],
+
     internal_configs['peakpick'] = {"headers": headers_list}
+    internal_configs['peakpick']['resampled_discontiniuous'] = not datasource.dcont and resampled_mz is not None
     return resampled_mz, headers_list, internal_configs
 
 def process_spectra_base(
@@ -128,20 +129,21 @@ def process_spectra_base(
         intensity = smoothing(intensity, **smooth_configs)
     
     # BaselineCorrection step
-    if baseline_algo is not None: 
+    if baseline_algo is not None:
+
         if isinstance(baseline_algo, str):
-            if baseline_algo == 'asls': #Hack just for setting default params
+            if baseline_algo == 'asls': #Hack just for setting default params by automatic
                 intensity = intensity - Baseline(mz, assume_sorted = True, **configs['Baseline']).asls(intensity, **configs['asls'])[0]
             else:
                 intensity = intensity - getattr(Baseline(mz, assume_sorted = True,**configs['Baseline']), baseline_algo)(intensity, **configs[baseline_algo])[0]
         else:
             intensity = intensity - baseline_algo(intensity, **configs[baseline_algo.__name__])[0]
+
     
     # Resampling step
     if resampled_mz is not None:
         intensity = np.interp(resampled_mz, mz, intensity, left=intensity.ravel()[0], right=intensity.ravel()[-1])
         mz = resampled_mz
-    
     # Aligning step
     if msalign_configs.get('align_peaks', None) is not None:
         intensity = msalign(mz, intensity, **msalign_configs)
@@ -172,12 +174,13 @@ def peakpicking_base(
     np.ndarray
         The peak picking result.
     """
+    # Get the config dict for the peakpicker function.
     configs = configs['peakpicker']  # Directly get the config dict for the peakpicker function.
     return peakpicker(mz, 
                       intensity, 
-                      idx, 
-                    #   discret_coeffs=internal_configs['discret_coeffs'],
-                      headers=internal_configs['headers'],
+                      idx,
+                      resampled_discontiniuous = internal_configs['resampled_discontiniuous'],
+                      headers = internal_configs['headers'],
                       **configs)
 
 
@@ -410,6 +413,7 @@ def peakpicker(mz: np.ndarray,
                SNR_threshold: float | None = 3.5,
                noise_mz_width: float = 9.0,
                return_areas: bool = True,
+               resampled_discontiniuous: bool = False,
                headers: list[str] = ["spectra_ind", "mz", "Intensity", "Area",
                                      "SNR", "FWHM", "PextL", "PextR",
                                      "Noise", "Mean noise"]
@@ -510,7 +514,8 @@ def peakpicker(mz: np.ndarray,
                                                                                                   fwhm_merge_factor,
                                                                                                   peaklocation,
                                                                                                   return_areas,
-                                                                                                  noise_est_iter)
+                                                                                                  noise_est_iter,
+                                                                                                  resampled_discontiniuous)
     n_peaks = pmz.size
     if n_peaks == 0:
         return None
@@ -616,10 +621,7 @@ def peakpicker_legacy(mz,
         The peak list, one row per detected peak, with the requested peak
         properties as columns (ordered according to *headers*).
     """
-    # TODO: implement a hybrid fast/slow SNR filter. In the last one or two cycles,
-    # estimate noise within a window around each peak, where the window is the std
-    # of purely-noise points left and right of the peak (peak points excluded) and
-    # its size is measured in points (not m/z). Consider using numba.
+    
     xsize = mz.size
     props={}
     # Robust valley finding
@@ -828,42 +830,6 @@ def crop_spectrum(mz, ints, low_mz=None, high_mz=None):
 def add_zero_points_to_peaks(mz: np.ndarray,
                              ints: np.ndarray, 
                              mz_discret_coeffs: list) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Add zero points to peaks
-    """
-    mz_discretion_model = np.poly1d(mz_discret_coeffs)
-
-    diff_mz = np.diff(mz)
-    mz_discr = mz_discretion_model(mz[:-1])
-    big_gap_bool = diff_mz > 2.5*mz_discr
-    small_gap_bool = (diff_mz > 1.25*mz_discr) ^ big_gap_bool
-    
-    new_val = {}
-    if np.any(big_gap_bool):
-        new_val['left'] = mz[np.append(big_gap_bool, [False])] + mz_discr[big_gap_bool]
-        new_val['right'] = mz[np.append([False], big_gap_bool)] - mz_discr[big_gap_bool]
-
-    if np.any(small_gap_bool):
-        new_val['small'] = mz[np.append(small_gap_bool, [False])] + mz_discr[small_gap_bool]
-
-    if new_val:
-        new_val['borders'] = [mz[0]-mz_discr[0], mz[-1]+mz_discr[-1]]
-        new_val = np.concatenate(list(new_val.values()), axis=None)
-        idx = np.searchsorted(mz, new_val)
-        mz = np.insert(mz, idx, new_val)
-        ints = np.insert(ints, idx, 0)
-    
-    # sorting by mz
-    idx_sort = np.argsort(mz)
-    new_loc_mz = mz[idx_sort]
-    new_loc_ints = ints[idx_sort]
-
-    return new_loc_mz, new_loc_ints
-
-def add_zero_points_to_peaks_extended(mz: np.ndarray,
-                                      ints: np.ndarray, 
-                                      mz_discret_coeffs: list,
-                                      ) -> tuple[np.ndarray, np.ndarray]:
     """
     Add zero points to peaks
     """

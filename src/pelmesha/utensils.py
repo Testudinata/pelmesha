@@ -382,7 +382,7 @@ def del_hdf5(hdf5_path):
         print(f"Deleted file {os.path.basename(hdf5_path)} in directory {os.path.dirname(hdf5_path)}")
 
 
-def mspeaks_KD(X, Y,oversegmentationfilter=None,peaklocation=1, return_pkY = False):
+def mspeaks_KD_legacy(X, Y,oversegmentationfilter=None,peaklocation=1, return_pkY = False):
     """
     Detect peaks in a KDE curve and return their centers and boundaries.
 
@@ -462,7 +462,120 @@ def mspeaks_KD(X, Y,oversegmentationfilter=None,peaklocation=1, return_pkY = Fal
         return np.array((pkX, X[left_min], X[right_min], val_max))
     return np.array((pkX, X[left_min], X[right_min]))
 
-def Peak_assignment(peakstable_batch,Xp_batch):
+@njit
+def mspeaks_KD(X: np.ndarray, 
+                Y: np.ndarray, 
+                peaklocation: float = 1, 
+                pdf_fwhm_merge_factor: float = 0.85):
+    """Core function for the pdf peak detection algorithm.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Monotonic array of m/z values.
+    Y : np.ndarray
+        Array of probability distribuion values.
+    peaklocation : float, optional
+        Location of the peak, by default 1.
+    pdf_fwhm_merge_factor : float, optional
+        Merge peaks closer than ``FWHM * pdf_fwhm_merge_factor``, by default 0.85.
+
+    Returns
+    -------
+    np.ndarray
+        X, left_min, right_min, pY_array
+    """
+    X = np.asarray(X)
+    Y = np.asarray(Y)
+    xsize = X.size
+    if xsize < 2:
+        empty_f64 = np.empty(0, dtype=np.float64)
+        return (empty_f64, empty_f64, empty_f64, empty_f64)
+    
+    valley_dots = np.where(np.abs(Y[1:] - Y[:-1]) > 0)[0]
+    valley_dots = _append(valley_dots, xsize - 1)
+    loc_min = np.diff(Y[valley_dots])
+    loc_min = (np.array([True, *(loc_min < 0)])) & np.array(([*(loc_min > 0), True]))
+
+    left_min = _prepend(valley_dots[:-1], -1)[loc_min][:-1] + 1
+    right_min = valley_dots[loc_min][1:]
+
+    pX_array, pY_array = _compute_max(Y, left_min, right_min)
+
+    fwhm_left, fwhm_right = _fwhm_interp(X,Y,pX_array,pY_array, left_min, right_min)
+    eps = np.sqrt(np.finfo(np.float64).eps)
+
+    if pdf_fwhm_merge_factor is not None: # This is just copy of peak merging by fwhm distance from _peakpicker_core - i 
+        n_peaks = left_min.size
+        
+        # Индексы переразбитых пиков
+        j_prealloc = np.empty(n_peaks, dtype=np.int64) # Выносим за цикл while, так как считаем, что почти не затронет памяти, но сэкономит время на создание нового массива в памяти в цикле while
+        while True:
+            fwhm_res = (fwhm_right - fwhm_left)*pdf_fwhm_merge_factor
+            peak_thld = pY_array*peaklocation - eps
+            pkX = np.empty(n_peaks, dtype=np.float64)
+            
+            for n in range(n_peaks):
+                lm = left_min[n]
+                rm = right_min[n]
+                th = peak_thld[n]
+
+                sum_Y = 0.0
+                sum_X_Y = 0.0
+                any_ = False
+                for i in range(lm, rm):
+                    Y_value = Y[i]
+                    if Y_value > th:
+                        sum_Y += Y_value
+                        sum_X_Y += X[i]*Y_value
+                        any_ = True
+                pkX[n] = sum_X_Y / sum_Y if any_ else np.nan
+
+            dpkX = np.empty(n_peaks + 1, dtype=np.float64)
+            for n in range(1, n_peaks):
+                dpkX[n] = pkX[n] - pkX[n - 1]
+            dpkX[0] = np.inf
+            dpkX[-1] = np.inf
+
+
+            count = 0
+            for n in range(1, n_peaks):
+                prev_n = n - 1
+                d = dpkX[n]
+                if d <= fwhm_res[prev_n] and d <= dpkX[prev_n] and d < dpkX[n + 1]:
+                    j_prealloc[count] = prev_n
+                    count += 1
+            j = j_prealloc[:count]
+            j_size = j.size
+            if j_size == 0:
+                break
+
+            for unres_peak_idx in range(j_size):
+                idx = j[unres_peak_idx]
+                idx_next = idx + 1
+                if pY_array[idx_next] > pY_array[idx]:
+                    pY_array[idx] = pY_array[idx_next]
+                    pX_array[idx] = pX_array[idx_next]
+            # Удаление
+            keep_mask = np.ones(n_peaks, dtype=np.bool_)
+            keep_mask[j] = False
+            keep_mask_r = np.ones(n_peaks, dtype=np.bool_)
+            keep_mask_r[j+1] = False
+            
+            left_min = left_min[keep_mask_r]
+            right_min = right_min[keep_mask]
+            pY_array = pY_array[keep_mask_r]
+            pX_array = pX_array[keep_mask_r]
+
+            # Обновляем FWHM-массивы (нужно для адаптивного режима)
+            fwhm_left = fwhm_left[keep_mask_r]
+            fwhm_right = fwhm_right[keep_mask]
+            n_peaks = left_min.size
+
+    return X[pX_array], X[left_min], X[right_min], pY_array
+    
+
+def Peak_assignment(peakstable_batch,pX, Xl, Xr, pY = None):
     """Assign the corrected m/z value of each detected KDE peak to the peaks of a batch.
 
     For every peak found in the KDE density (defined by its centre and left/
@@ -488,15 +601,16 @@ def Peak_assignment(peakstable_batch,Xp_batch):
     """
     if not peakstable_batch.empty:
         mz_col_dtype = peakstable_batch["mz"].dtype.type
-        if len(Xp_batch) == 3:
-            
-            for peak, xl, xr in Xp_batch.T:
+        if pY is None:
+            for i in range(pX.size):
+                peak, xl, xr = pX[i], Xl[i], Xr[i]
                 bool_mask = (peakstable_batch['mz']>=xl) & (peakstable_batch['mz']<=xr)
                 
                 peakstable_batch.loc[bool_mask, "mz"] = mz_col_dtype(peak)
         else:
             density_col_dtype = peakstable_batch["Density"].dtype.type
-            for peak, xl, xr, density in Xp_batch.T:
+            for i in range(pX.size):
+                peak, xl, xr, density = pX[i], Xl[i], Xr[i], pY[i]
                 bool_mask = (peakstable_batch['mz']>=xl) & (peakstable_batch['mz']<=xr)
                 peakstable_batch.loc[bool_mask,"mz"] = mz_col_dtype(peak)
                 peakstable_batch.loc[bool_mask,"Density"] = density_col_dtype(density)
@@ -559,6 +673,7 @@ def _summerize_kde_mz(kde_mz_list: list[np.ndarray],
 def apply_kde_mzcorrection(peaklist: pd.DataFrame,
                            kde_mz: np.ndarray,
                            kde_density: np.ndarray,
+                           pdf_fwhm_merge_factor: float = 0.85,
                            cpu_num: int = 1) -> pd.DataFrame:
     """Correct the m/z values of the peaks using a KDE density.
 
@@ -575,6 +690,11 @@ def apply_kde_mzcorrection(peaklist: pd.DataFrame,
         The m/z grid of the combined density.
     kde_density : np.ndarray
         The density values aligned with ``kde_mz``.
+    pdf_fwhm_merge_factor : float, optional
+        This factor controls the merging of bins that are produced after
+        constructing the global probability density function (PDF) (default 0.85). 
+        It addresses rare edge-case behavior in the algorithm where a single logical bin
+        can be split into two adjacent bins due to numerical or discretization artifacts.
     cpu_num : int, optional
         Number of processes used for the correction. Default ``1``.
 
@@ -584,10 +704,7 @@ def apply_kde_mzcorrection(peaklist: pd.DataFrame,
         A new peak table with the corrected ``mz`` values (and a ``Density``
         column when the KDE data include density values).
     """
-    Xp_data = mspeaks_KD(kde_mz,kde_density)
-    Xp = Xp_data[0]
-    Xl = Xp_data[1]
-    Xr = Xp_data[2]
+    Xp, Xl, Xr, _ = mspeaks_KD(kde_mz,kde_density, pdf_fwhm_merge_factor = pdf_fwhm_merge_factor)
     mz_sequence = np.sort(peaklist['mz'].unique())
     mz_num = len(mz_sequence)
     if mz_num < cpu_num*3:
@@ -605,7 +722,9 @@ def apply_kde_mzcorrection(peaklist: pd.DataFrame,
         Xr_max = Xr[min(len(Xr) - 1, idx_r)]
         batch_indexes = (Xp>=Xl_min) & (Xp<=Xr_max)
         par_args[batch_n] = (peaklist.loc[(peaklist['mz'] >= mzb_min) & (peaklist['mz'] <= mzb_max)],
-                             Xp_data[:,batch_indexes])
+                             Xp[batch_indexes],
+                             Xl[batch_indexes],
+                             Xr[batch_indexes])
     with Pool(cpu_num) as p:
         grftable = p.starmap(Peak_assignment,par_args)
     grftable=pd.concat(grftable)
@@ -654,7 +773,7 @@ def _consesusing_peaks(peaklists: pd.DataFrame):
     group_keys = base_index + ['spectra_ind', 'mz']
 
     result = peaklists.groupby(group_keys, as_index=False).agg(dict4drop)
-    
+
     return result.set_index(base_index)
 
 def _consensus_peaks_summary(feature_series: pd.Series) -> pd.DataFrame:
@@ -697,12 +816,6 @@ def _consensus_peaks_summary(feature_series: pd.Series) -> pd.DataFrame:
     total_summary.loc[:,index_names[0]] = ["Total"] * n_consesused
     total_summary.loc[:,index_names[1]] = [''] * n_consesused 
      
-    # return pd.concat([consesused, total_summary], ignore_index=True).pivot_table(
-    #     index=["sample", "roi"],
-    #     columns="count",
-    #     values="mz",
-    #     aggfunc="nunique",
-    # ).add_suffix(" subs").fillna(0).astype('int')
     return (
     pd.concat([consesused, total_summary], ignore_index=True)
     .groupby(["sample", "roi",'count'])[col_name]
@@ -849,7 +962,8 @@ def _snr_filter(mz: np.ndarray[float],
                 right_min: np.ndarray[int],
                 SNR_threshold: float,
                 noise_mz_width: float = 9.0,
-                noise_est_iter: int = 3):
+                noise_est_iter: int = 3,
+                non_plaetau_bool: np.ndarray[bool] = None):
     """Estimate local noise and filter peaks by signal-to-noise ratio.
 
     Internal kernel for :func:`peakpicker`. Computes, for each peak, a
@@ -899,6 +1013,16 @@ def _snr_filter(mz: np.ndarray[float],
         Peak-base boundaries of the surviving peaks.
     noise_std, noise_mean : np.ndarray (float64)
         Local noise statistics (sample std, mean) for each surviving peak.
+    non_plaetau_bool : np.ndarray (bool)
+        Boolean mask indicating non-plateau points in the resampled spectrum.
+
+        This mask is used to improve noise estimation by excluding points that were
+        artificially added during resampling into empty gaps between signal regions.
+        Such points do not represent real signal or baseline and can distort noise
+        metrics if included.
+
+        The mask is relevant only for resampled data. For native (non-resampled)
+        spectra, this array is setted to all True.
 
     Notes
     -----
@@ -918,8 +1042,10 @@ def _snr_filter(mz: np.ndarray[float],
         empty_f64 = np.empty(0, dtype=np.float64)
         empty_i64 = np.empty(0, dtype=np.int64)
         return empty_i64, empty_f64, empty_i64, empty_i64, empty_f64, empty_f64
-
-    noise_bool = np.ones(xsize,dtype = np.bool_)
+    if non_plaetau_bool is not None:
+        noise_bool = non_plaetau_bool
+    else:
+        noise_bool = np.ones(xsize,dtype = np.bool_)
 
     psl_left = np.zeros(n_peaks,dtype = np.int64)
     psl_right = np.zeros(n_peaks,dtype = np.int64)
@@ -1225,7 +1351,8 @@ def _peakpicker_core(mz: np.ndarray,
                     fwhm_merge_factor: float | None = None,
                     peaklocation: float = 1,
                     return_areas: bool = False,
-                    noise_est_iter: int = 3):
+                    noise_est_iter: int = 3,
+                    resampled_discontiniuous: bool = False):
     """Numba kernel for peak detection. Do not call directly.
 
     Internal implementation of :func:`peakpicker`; inputs are assumed to be
@@ -1256,6 +1383,8 @@ def _peakpicker_core(mz: np.ndarray,
         Width of the noise window (in points when ``discret_coeffs`` is None).
     return_areas : bool
         Whether to compute peak areas.
+    resampled_discontiniuous : bool
+        Whether the input arrays are resampled discontiniuous.
 
     Returns
     -------
@@ -1270,41 +1399,45 @@ def _peakpicker_core(mz: np.ndarray,
     - Expects contiguous float64 arrays; pass ``np.ascontiguousarray`` copies.
     """
 
-    # # experimental
     # Remove zero/valley plateaus so the valley detector only sees meaningful
     # profile transitions. The SAME mask is applied to both intens and mz so
     # the two arrays stay length-aligned; mismatched domains make the downstream
     # kernels (SNR windows, FWHM, area) index a shorter array and can stall or
     # crash a worker process under multiprocessing.
-    valley_bool = np.diff(intens) != 0
-    non_zero_mask = intens != 0
-    non_zero_mask[1:] = non_zero_mask[1:] | valley_bool
-    intens = intens[non_zero_mask]
-    mz = mz[non_zero_mask]
-    # # experimental
+    
+    if resampled_discontiniuous:
+        
+        float_threshold = np.finfo(intens.dtype).eps * 10.0
+        non_zero_plaetau_mask = intens > float_threshold
+        valley_dots = np.abs(intens[1:] - intens[:-1]) > float_threshold
+
+        non_zero_plaetau_mask[1:-1] = non_zero_plaetau_mask[1:-1] | valley_dots[:-1] | valley_dots[1:]
+
+
+        non_zero_plaetau_mask[0] = non_zero_plaetau_mask[1]
+        non_zero_plaetau_mask[-1] = non_zero_plaetau_mask[-2]
+        intens = intens[non_zero_plaetau_mask]
+        mz = mz[non_zero_plaetau_mask]
+
     xsize = intens.size
     if xsize < 2:
         empty_f64 = np.empty(0, dtype=np.float64)
         return (empty_f64, empty_f64, empty_f64, empty_f64,
                 empty_f64, empty_f64, empty_f64, empty_f64, empty_f64)
-    valley_dots = np.where(np.diff(intens) != 0)[0]
+    
+    valley_dots = np.where(np.abs(intens[1:] - intens[:-1]) > float_threshold)[0]
     valley_dots = _append(valley_dots, xsize - 1)
     loc_min = np.diff(intens[valley_dots])
     loc_min = (np.array([True, *(loc_min < 0)])) & np.array(([*(loc_min > 0), True]))
-    # eps_threshold = np.finfo(intens.dtype).eps
-    # loc_min = (np.array([True,*(loc_min < -eps_threshold*10)])) & np.array(([*(loc_min > eps_threshold*10),True]))
+
     left_min = _prepend(valley_dots[:-1], -1)[loc_min][:-1] + 1
     right_min = valley_dots[loc_min][1:]
 
-    # Compute max for every peak
-    n_peaks = left_min.size
-    pint_array = np.empty(n_peaks,dtype=np.float64)
-    pmz_array = np.empty(n_peaks,dtype=np.int64)
-    for idx in range(n_peaks):
-        lm = left_min[idx]
-        rm = right_min[idx]
-        pint_array[idx] = np.max(intens[lm:rm])
-        pmz_array[idx] = lm + np.argmax(intens[lm:rm])
+    if resampled_discontiniuous:
+        pmz_array, pint_array, left_min, right_min, non_plaetau_mask  = _compute_max_with_ext_correction(mz, intens, left_min, right_min)
+    else:
+        pmz_array, pint_array = _compute_max(intens, left_min, right_min)
+        non_plaetau_mask = None
 
     # Remove peaks below the height, relative height
     if heightfilter is not None and rel_heightfilter is not None:
@@ -1337,7 +1470,8 @@ def _peakpicker_core(mz: np.ndarray,
                                                                                         right_min, 
                                                                                         SNR_threshold,
                                                                                         noise_mz_width,
-                                                                                        noise_est_iter)
+                                                                                        noise_est_iter,
+                                                                                        non_plaetau_bool = non_plaetau_mask)
     else:
         n_peaks = pint_array.size
         noise_std = np.ones(n_peaks,dtype = np.float64)
@@ -1415,28 +1549,31 @@ def _peakpicker_core(mz: np.ndarray,
                     pmz_array[idx] = pmz_array[idx_next]
                     noise_mean[idx] = noise_mean[idx_next]
                     noise_std[idx] = noise_std[idx_next]
-            # Удаление
-            j_right = j + 1
-            left_min = np.delete(left_min, j_right)
-            right_min = np.delete(right_min, j)
-            pint_array = np.delete(pint_array, j_right)
-            noise_std = np.delete(noise_std, j_right)
-            noise_mean = np.delete(noise_mean, j_right)
-            pmz_array = np.delete(pmz_array, j_right)
+            # Deleting merged peaks data
+            keep_mask = np.ones(n_peaks, dtype=np.bool_)
+            keep_mask[j] = False
+            keep_mask_r = np.ones(n_peaks, dtype=np.bool_)
+            keep_mask_r[j+1] = False
+            
+            left_min = left_min[keep_mask_r]
+            right_min = right_min[keep_mask]
+            pint_array = pint_array[keep_mask_r]
+            noise_std = noise_std[keep_mask_r]
+            noise_mean = noise_mean[keep_mask_r]
+            pmz_array = pmz_array[keep_mask_r]
 
             # Обновляем FWHM-массивы (нужно для адаптивного режима)
-            fwhm_left = np.delete(fwhm_left, j_right)
-            fwhm_right = np.delete(fwhm_right, j)
+            fwhm_left = fwhm_left[keep_mask_r]
+            fwhm_right = fwhm_right[keep_mask]
             n_peaks = left_min.size
 
-
+    # Correcting peak extension size for big peaks
     left_bool = (pmz_array - left_min) > 2
     right_bool = (right_min - pmz_array) > 2
     if left_bool.any():
         left_min[left_bool] += 1
     if right_bool.any():
         right_min[right_bool] -= 1
-    
 
     # compute peaks area
     n_peaks = left_min.size
@@ -1472,3 +1609,103 @@ def _index_to_segment(arr):
         ranges.append((start, end))
     # return np.asarray(ranges, dtype=np.int64)
     return ranges
+
+@njit
+def _compute_max_with_ext_correction(mz: np.ndarray,
+                                    intens: np.ndarray,
+                                    left_min: np.ndarray,
+                                    right_min: np.ndarray):
+    
+    # Compute max for every peak
+    n_peaks = left_min.size
+    pint_array = np.empty(n_peaks,dtype=np.float64)
+    pmz_array = np.empty(n_peaks,dtype=np.int64)
+    non_plaetau_bool = np.ones(mz.size,dtype=np.bool_)
+    for idx in range(n_peaks):
+        lm = left_min[idx]
+        rm = right_min[idx]
+        # pint_array[idx] = np.max(intens[lm:rm])
+        # pmz_array[idx] = lm + np.argmax(intens[lm:rm])
+        
+        max_val = intens[lm]
+        max_idx = lm
+        min_val = intens[lm]
+        dmz = np.zeros(rm - lm, dtype=mz.dtype)
+        # dintens = np.zeros(rm - lm, dtype=intens.dtype) # TODO old
+        gintens = np.zeros(rm - lm, dtype=intens.dtype)
+        count = 0
+
+        for i in range(lm + 1, rm+1):
+            val = intens[i]
+            dmz[count] = mz[i] - mz[i-1]
+            # dintens[count] = val - intens[i-1] # TODO old
+            gintens[count] = (val - intens[i-1])/dmz[count] # TODO experimental
+
+            if val > max_val:
+                max_val = val
+                max_idx = i
+            if val < min_val:
+                min_val = val
+            count += 1
+
+        pint_array[idx] = max_val
+        pmz_array[idx] = max_idx
+        base_peak_threshold = min_val + (max_val - min_val)*0.05
+        
+        # Correcting m/z gaps for big peaks extensions plateau
+        if max_idx - lm > 3:
+            med_left = np.median(dmz[:max_idx-lm+1])
+
+            base_bool = intens[lm:max_idx] < base_peak_threshold
+            left_gintens = gintens[:max_idx-lm]
+
+            plaetau_bool = (left_gintens < np.max(left_gintens)*0.01 ) & base_bool
+            if plaetau_bool.sum() >= 5:
+                non_plaetau_bool[lm:max_idx] = ~plaetau_bool
+
+            gaps_idx = np.where((dmz[:max_idx-lm]/med_left > 3) | plaetau_bool)[0]
+
+            if gaps_idx.size > 0:
+                left_min[idx] = lm + gaps_idx[-1]+1
+
+        if rm - max_idx > 3:
+            med_right = np.median(dmz[max_idx-lm:rm-lm+1])
+
+            right_gintens = gintens[max_idx-lm:rm-lm+1]
+            base_bool = intens[max_idx+1:rm+1] < base_peak_threshold
+            plaetau_bool = (right_gintens > np.min(right_gintens)*0.01 ) & base_bool
+            if plaetau_bool.sum() >= 5:
+                non_plaetau_bool[max_idx+1:rm+1] = ~plaetau_bool
+
+            gaps_idx = np.where((dmz[max_idx-lm:rm-lm+1]/med_right > 3) | plaetau_bool)[0]
+
+            if gaps_idx.size > 0:
+                right_min[idx] = max_idx + gaps_idx[0]
+
+    return pmz_array, pint_array, left_min, right_min, non_plaetau_bool
+
+@njit
+def _compute_max(intens: np.ndarray, 
+                 left_min: np.ndarray, 
+                 right_min: np.ndarray):
+    
+    n_peaks = left_min.size
+    pint_array = np.empty(n_peaks,dtype=np.float64)
+    pmz_array = np.empty(n_peaks,dtype=np.int64)
+    for idx in range(n_peaks):
+        lm = left_min[idx]
+        rm = right_min[idx]
+
+        max_val = intens[lm]
+        max_idx = lm
+
+        for i in range(lm + 1, rm+1):
+            val = intens[i]
+            if val > max_val:
+                max_val = val
+                max_idx = i
+
+
+        pint_array[idx] = max_val
+        pmz_array[idx] = max_idx
+    return pmz_array, pint_array
