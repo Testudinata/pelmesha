@@ -1,7 +1,7 @@
 from pelmesha.cookbook import Configs, PreparedDataSource, PipelineConfigurator, KDEConfigs
 from pelmesha.filling import DataSource
 from pelmesha.dough import Indexator, SliceIndexator
-from pelmesha.kneading import _compute_KDE
+from pelmesha.kneading import _compute_KDE, FWHM_TO_SIGMA_FACTOR
 from pelmesha.utensils import _summerize_kde_mz, _consesusing_peaks, apply_kde_mzcorrection, _frequency_filtration, _consensus_peaks_summary, show_df, _nunique_summary, _index_to_segment, mspeaks_KD
 from sklearn.preprocessing import normalize
 from itertools import pairwise
@@ -95,6 +95,8 @@ class DataSet:
             KDE configs to apply to the added sources. Default ``None``.
         RamGb_limit_usage : int | float, optional
             RAM limit in GB used for batch processing. Default ``2``.
+        rebuild_metadata : bool, optional
+            Force re-creation of the metadata files even if they already exist. Default ``False``.
         """
         self.sources = {}
         self.RamGb_limit_usage = RamGb_limit_usage
@@ -104,9 +106,8 @@ class DataSet:
         self._reference_peaks_weights = None
 
         if sources is not None:
-            self.add_sources(sources, configs, kde_configs, **kwargs)
-            for source in self.sources.values():
-                source._datasource.create_metafile(rebuild_metadata=rebuild_metadata)
+            self.add_sources(sources, configs, kde_configs, rebuild_metadata=rebuild_metadata, **kwargs)
+
         elif sources is None and (configs is not None or kde_configs is not None or kwargs):
             warnings.warn("No sources provided. Configs or KDE configs are skipped. Use add_sources to add sources with configs.")
 
@@ -150,9 +151,11 @@ class DataSet:
                 source._load_kde_configs(kde_configs, **KDEkwargs)
             else:
                 source.update_kde(**KDEkwargs)
-            source._datasource.create_metafile(rebuild_metadata=rebuild_metadata)
+            if rebuild_metadata:
+                source._datasource.create_metafile(rebuild_metadata=True)
+                source._datasource.reload_metadata()
         else:
-            if isinstance(source, [DataSource,str]):
+            if isinstance(source, (DataSource, str)):
                 source = PreparedDataSource(source, configs, kde_configs, rebuild_metadata = rebuild_metadata, **kwargs)
 
         self.reference_source = source
@@ -171,6 +174,7 @@ class DataSet:
                             num_peaks_per_step: int = 5,
                             min_occurence: float = 0.1,
                             return_weight: bool = True,
+                            return_width: bool = True,
                             pdf_fwhm_merge_factor: float = 0.85,
                             allowed_indices: np.ndarray | None = None,
                             allowed_coords: list[dict]| dict | None = None,
@@ -329,6 +333,13 @@ class DataSet:
             .size()
             .astype(float)
         )
+
+        widths = (
+            feature_matrix['FWHM'].
+            groupby(feature_matrix["mz"], observed=True)
+            .median()
+            .astype(float)
+        )
         if weights.empty:
             raise RuntimeError(
                 "No peaks remained after m/z correction for the reference "
@@ -367,12 +378,18 @@ class DataSet:
         print(f'Resulted number of reference peaks: {len(align_list)}')
         if return_weight:
             self._reference_peaks_weights = weights.loc[align_list].to_list()
+        if return_width:
+            self._reference_peaks_width = (widths.loc[align_list].median()/FWHM_TO_SIGMA_FACTOR).item()
+            print(f'Resulted reference peaks width: {self._reference_peaks_width:.3g}')
         self._reference_peaks = align_list
+
+
     def set_align_peaks_from_ref(self,
                                 samples: list[str] | None = None,
                                 rois: str | list[str] = None,
                                 sample_rois_map: dict[str, list[str]] | None = None,
-                                set_weights: bool = True):
+                                set_weights: bool = True,
+                                set_width: bool = True):
         """
         Assign the stored reference peaks (and optionally their weights) to
         the selected samples/ROIs as alignment targets.
@@ -416,7 +433,10 @@ class DataSet:
             datasource.update(rois = rois, align_peaks = self._reference_peaks)
             if set_weights and self._reference_peaks_weights is not None:
                 datasource.update(rois = rois, align_pweights = self._reference_peaks_weights)
+            if set_width and self._reference_peaks_width is not None:
+                datasource.update(rois = rois, align_width = self._reference_peaks_width)
         self.save_all_reference_configs()
+
     @property
     def reference_file_path(self): 
         """Path to the reference data file used for reference peak list generation."""
@@ -445,7 +465,7 @@ class DataSet:
     #################################################
     # Sources methods                               #
     #################################################
-    def add_sources(self, source, config = None, kde_configs = None, extensions = None, **kwargs):
+    def add_sources(self, source, config = None, kde_configs = None, extensions = None, rebuild_metadata = False, **kwargs):
         """
         Add one or more data sources to the DataSet.
 
@@ -466,6 +486,8 @@ class DataSet:
         extensions : list[str] | None, optional
             File extensions to search for when *source* is a directory.
             If ``None``, uses the module default supported extensions.
+        rebuild_metadata : bool, optional
+            Force re-creation of the metadata files even if they already exist. Default ``False``.
 
         Raises
         ------
@@ -479,16 +501,16 @@ class DataSet:
         if isinstance(source, dict):
             for path, cfg in source.items():
                 if os.path.isdir(path):
-                    self.add_sources_from_paths([path],extensions,cfg)
+                    self.add_sources_from_paths([path], extensions, cfg, rebuild_metadata=rebuild_metadata)
                 else:
-                    self._add_single_source(path, cfg)
+                    self._add_single_source(path, cfg, rebuild_metadata=rebuild_metadata)
         elif isinstance(source, (list, tuple)):
-            self.add_sources_from_paths(source,extensions,config, kde_configs, **kwargs) 
+            self.add_sources_from_paths(source,extensions,config, kde_configs, rebuild_metadata, **kwargs) 
         elif isinstance(source, str):
             if os.path.isdir(source):
-                self.add_sources_from_paths([source],extensions,config, kde_configs, **kwargs)
+                self.add_sources_from_paths([source],extensions,config, kde_configs, rebuild_metadata, **kwargs)
             else:
-                self._add_single_source(source, config, kde_configs, **kwargs)
+                self._add_single_source(source, config, kde_configs, rebuild_metadata, **kwargs)
         else:
             raise TypeError(f"Unsupported source type: {type(source)}")
 
@@ -501,7 +523,7 @@ class DataSet:
         self.add_sources(source, config, kde_configs, extensions)
         return self
 
-    def _add_single_source(self, path, config = None, kde_configs = None, **kwargs):
+    def _add_single_source(self, path, config = None, kde_configs = None, rebuild_metadata = False, **kwargs):
         """Internal: add a single source with duplicate protection."""
         if not os.path.exists(path):
             raise FileNotFoundError(f"Source path does not exist: {path}")
@@ -510,7 +532,7 @@ class DataSet:
         if folder_name != sample_name:
             sample_name = folder_name + "_" + sample_name
 
-        source = DataSource(path, RamGb_limit_usage = self.RamGb_limit_usage)
+        source = DataSource(path, rebuild_metadata=rebuild_metadata, RamGb_limit_usage = self.RamGb_limit_usage)
         if any(ds.file_path == source.file_path for ds in self.sources.values()):
             warnings.warn(f"File '{source.file_path}' has already been added to DataSet. Source re-adding with configs")
         elif sample_name in self.sources:
@@ -552,7 +574,7 @@ class DataSet:
             return config
         return {}
 
-    def add_sources_from_paths(self, path_list, extensions = None, config = None, kde_configs = None, **kwargs):
+    def add_sources_from_paths(self, path_list, extensions = None, config = None, kde_configs = None, rebuild_metadata = False, **kwargs):
         """
         Search directories for data files with given extensions and add them as sources.
 
@@ -589,9 +611,9 @@ class DataSet:
 
         for path in found_paths:
             try:
-                self._add_single_source(path, config, kde_configs, **kwargs)
+                self._add_single_source(path, config, kde_configs, rebuild_metadata=rebuild_metadata, **kwargs)
             except (ValueError, FileNotFoundError) as e:
-                warnings.warn(f"Skipping {path}: {e}")
+                warnings.warn(f"Skipping {path}: {type(e).__name__} {e}")
 
     
     def save_configs(self): 
@@ -2758,7 +2780,6 @@ class Pipeline:
                 # Randomizer: pick a random sample and ROI first, then a random peak that
                 # is guaranteed to exist within that ROI's filtered data, so the later mz
                 # query can never run empty (fixes ValueError: high <= 0 from randint(0, 0)).
-                
                 rand_ds_name_list = set(feature_matrix[filter_bool].index.get_level_values(0)) & set(sample_rois_map.keys())
                 rand_ds_name = np.random.choice(list(rand_ds_name_list))
                 rand_ds = datasources[rand_ds_name]
@@ -2785,6 +2806,10 @@ class Pipeline:
                         rand_spec = feature_matrix.loc[(rand_ds_name, rand_roi)].query("mz == @peak_mz")['spectra_ind']
                     rand_spec = np.random.choice(rand_spec)
                 elif isinstance(draw_borders, (tuple, list)) and len(draw_borders) == 2:
+                    if not isinstance(draw_borders[0], numbers.Number) and not isinstance(draw_borders[1], numbers.Number):
+                        warnings.warn(
+                            f"Invalid draw_borders={draw_borders} (expected scalar, tuple or list of length 2)"
+                        )
                     draw_mz_borders = draw_borders
                     rand_spec = feature_matrix.sort_index().loc[(rand_ds_name, rand_roi)].index.get_level_values('spectra_ind').tolist()
                     while not rand_spec:
@@ -2793,6 +2818,7 @@ class Pipeline:
                         rand_roi = sample_rois[rand_roi_int]
                         rand_spec = feature_matrix.loc[(rand_ds_name, rand_roi)]['spectra_ind']
                     rand_spec = np.random.choice(rand_spec)
+
                 else:
                     raise ValueError(
                         f"Invalid draw_borders={draw_borders} (expected scalar, tuple or list of length 2)"
@@ -2935,6 +2961,20 @@ class Pipeline:
             idxs = rmeta["idxroi"]
         # Get per-ROI PipelineConfigurator pipeline functions and its configs from PreparedDataSource
         roi_configs = self.roi_configs[roi]
+        # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
+        import sys as _sys
+        try:
+            _step_cfg = roi_configs.get_step_configs("process")
+            _step_methods = getattr(_step_cfg, "configs", {}).get("methods", {})
+            _sfn = getattr(roi_configs, "_step_func_names", None)
+            print(f"[DBG pipeline] roi={roi} | roi_configs_type={type(roi_configs).__name__} "
+                  f"| full_methods.Baseline.keys={list(((getattr(roi_configs,'configs',{}) or {}).get('methods') or {}).get('Baseline', {}).keys())} "
+                  f"| _step_func_names['process']={sorted(_sfn.get('process', [])) if _sfn else 'N/A'} "
+                  f"| step_cfg.methods.Baseline.keys={list(_step_methods.get('Baseline', {}).keys())}",
+                  file=_sys.stderr)
+        except Exception as _e:
+            print(f"[DBG pipeline] roi={roi} get_step_configs FAILED: {type(_e).__name__}: {_e}", file=_sys.stderr)
+        # ---- END TEMP DIAGNOSTIC LOGGING ----
         preprocess_function = roi_configs._preprocess_function
         
         mz = None
@@ -3154,6 +3194,23 @@ class Pipeline:
         for n, (_mz, raw_intensity) in enumerate(batch_iter):
             _mz, proc_intensity = process_function(_mz, raw_intensity, proc_configs, **internal_proc_configs)
             peaklists[n] = peakpick_function(_mz, np.asarray(proc_intensity, dtype=dtypeconv).squeeze(), idxs_list[n], peakpick_configs, **internal_peakpick_configs)
+
+        # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
+        import sys as _sys
+        _info = []
+        for _k, _v in peaklists.items():
+            if _v is None:
+                _info.append(f"spectra_ind={idxs_list[_k]} -> None (no peaks)")
+            else:
+                _info.append(f"spectra_ind={idxs_list[_k]} -> ndarray shape={np.shape(_v)} dtype={np.asarray(_v).dtype}")
+        print(f"[DBG _peakpick_wrapper] batch spectra={len(peaklists)} "
+              f"| none_count={sum(1 for v in peaklists.values() if v is None)} "
+              f"| unique_shapes={sorted({tuple(np.asarray(v).shape) for v in peaklists.values()})}",
+              file=_sys.stderr)
+        for _line in _info:
+            print(f"[DBG _peakpick_wrapper] {_line}", file=_sys.stderr)
+        # ---- END TEMP DIAGNOSTIC LOGGING ----
+
         return np.vstack(tuple(peaklists.values()))
     
     @staticmethod

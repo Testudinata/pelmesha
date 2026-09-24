@@ -3487,10 +3487,14 @@ class PreparedDataSource():
             :class:`DataSource` instance or path to a data-source file.
         """
         if isinstance(datasource, str):
-            datasource = DataSource(datasource,rebuild_metadata)
+            datasource = DataSource(datasource, rebuild_metadata=rebuild_metadata)
+        elif rebuild_metadata:
+            # Existing DataSource object: rebuild the metadata file and refresh
+            # the in-memory metadata state so it matches the new file on disk.
+            datasource.create_metafile(rebuild_metadata=True)
+            datasource.reload_metadata()
 
         self._datasource = datasource
-        datasource.create_metafile(rebuild_metadata = rebuild_metadata)
         # Get ROI names from the datasource metadata
         roi_names: list[str] = list(datasource.roi_metadata.index)
         

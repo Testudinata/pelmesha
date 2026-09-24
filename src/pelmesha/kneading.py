@@ -1,4 +1,6 @@
 import numpy as np
+from numpy.polynomial.polynomial import polyval
+from numpy.polynomial import Polynomial
 import math
 import os
 import warnings
@@ -52,13 +54,31 @@ def preprocess_configuration_base(
     internal_configs['process'] = {}
     resampled_mz = resample_mz_scale(*mz_range, **preprocess_configs['resample_mz_scale'])
     internal_configs['process']['resampled_mz'] = resampled_mz
-    internal_configs['process']['mz_discrete_coeffs'] = datasource.roi_metadata.loc[roi,'discret_coeffs']
+    discret_coeffs = datasource.roi_metadata.loc[roi,'discret_coeffs']
+    internal_configs['process']['mz_discrete_coeffs'] = discret_coeffs
+
+    align_peaks = configs['msalign']['align_peaks']
+    if align_peaks is not None:
+        if resampled_mz is not None:
+            internal_configs['process']['align_resolution_delimeter'] = resampled_mz[1] - resampled_mz[0]
+        elif len(discret_coeffs) == 1:
+            internal_configs['process']['align_resolution_delimeter'] = discret_coeffs[0]
+        else:
+            internal_configs['process']['align_resolution_delimeter'] = polyval(min(align_peaks), discret_coeffs)
 
     baseline_algo = configs.configs.get('methods', None)
     if baseline_algo:
         baseline_algo = baseline_algo.get('Baseline', None)
         if baseline_algo:
             baseline_algo = next(iter(baseline_algo))
+    if __debug__:
+        # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
+        import sys as _sys
+        _full_methods = configs.configs.get('methods') or {}
+        print(f"[DBG preproc] roi={roi} baseline_algo={baseline_algo!r} "
+            f"| methods.Baseline keys={list((_full_methods.get('Baseline') or {}).keys())}",
+            file=_sys.stderr)
+        # ---- END TEMP DIAGNOSTIC LOGGING ----
     if baseline_algo:
         if datasource.dcont:
             internal_configs['process']['Baseliner'] = getattr(Baseline(datasource.get_mz(rmeta['idxroi'].ravel()[0]), **configs['Baseline'], assume_sorted = True), baseline_algo)
@@ -115,6 +135,7 @@ def process_spectra_base(
     resampled_mz = internal_configs.get('resampled_mz', None)
     baseline_algo = internal_configs.get('Baseliner', None)
     mz_discrete_coeffs = internal_configs.get('mz_discrete_coeffs', None)
+    align_resolution_delimeter = internal_configs.get('align_resolution_delimeter', None)
 
     smooth_configs = configs.get('smoothing', {})
     msalign_configs = configs.get('msalign', {})
@@ -130,6 +151,28 @@ def process_spectra_base(
     
     # BaselineCorrection step
     if baseline_algo is not None:
+        if __debug__:
+            # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
+            import sys as _sys
+            _base_cfg = getattr(configs, "configs", None)
+            _full_methods = _base_cfg.get("methods", {}) if isinstance(_base_cfg, dict) else None
+            _sfn = getattr(configs, "_step_func_names", None)
+            print(f"[DBG proc] baseline_algo={baseline_algo!r} ({type(baseline_algo).__name__}) "
+                f"| configs_type={type(configs).__name__} "
+                f"| full_methods_Baseline_keys={list((_full_methods or {}).get('Baseline', {}).keys()) if _full_methods else 'N/A'} "
+                f"| _step_func_names['process']={sorted(_sfn.get('process', [])) if _sfn else 'N/A'}",
+                file=_sys.stderr)
+            try:
+                _bl = configs['Baseline']
+                print(f"[DBG proc] configs['Baseline'] OK: {dict(_bl)}", file=_sys.stderr)
+            except Exception as _e:
+                print(f"[DBG proc] configs['Baseline'] FAILED: {type(_e).__name__}: {_e}", file=_sys.stderr)
+            try:
+                _asls = configs['asls']
+                print(f"[DBG proc] configs['asls'] OK: {dict(_asls)}", file=_sys.stderr)
+            except Exception as _e:
+                print(f"[DBG proc] configs['asls'] FAILED: {type(_e).__name__}: {_e}", file=_sys.stderr)
+            # ---- END TEMP DIAGNOSTIC LOGGING ----
 
         if isinstance(baseline_algo, str):
             if baseline_algo == 'asls': #Hack just for setting default params by automatic
@@ -146,6 +189,10 @@ def process_spectra_base(
         mz = resampled_mz
     # Aligning step
     if msalign_configs.get('align_peaks', None) is not None:
+        if (msalign_configs.get('align_resolution', "auto") == "auto") and (align_resolution_delimeter is not None):
+            msalign_configs['align_resolution'] = msalign_configs['align_width']*msalign_configs['align_ratio']/align_resolution_delimeter
+        else:
+            msalign_configs['align_resolution'] = 100
         intensity = msalign(mz, intensity, **msalign_configs)
 
     return mz, intensity
@@ -174,6 +221,20 @@ def peakpicking_base(
     np.ndarray
         The peak picking result.
     """
+    if __debug__:
+        # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
+        import sys as _sys
+        _sfn = getattr(configs, "_step_func_names", None)
+        print(f"[DBG peakpick] configs_type={type(configs).__name__} "
+            f"| _step_func_names['peakpick']={sorted(_sfn.get('peakpick', [])) if _sfn else 'N/A'} "
+            f"| configs.functions.keys={list(getattr(configs, 'configs', {}).get('functions', {}).keys())}",
+            file=_sys.stderr)
+        try:
+            _pk = configs['peakpicker']
+            print(f"[DBG peakpick] configs['peakpicker'] OK: keys={list(_pk.keys())}", file=_sys.stderr)
+        except Exception as _e:
+            print(f"[DBG peakpick] configs['peakpicker'] FAILED: {type(_e).__name__}: {_e}", file=_sys.stderr)
+        # ---- END TEMP DIAGNOSTIC LOGGING ----
     # Get the config dict for the peakpicker function.
     configs = configs['peakpicker']  # Directly get the config dict for the peakpicker function.
     return peakpicker(mz, 
@@ -198,7 +259,7 @@ def msalign(
     array: np.ndarray,
     align_peaks: List | None = None, # if None - return array
     align_method: str = "pchip",
-    align_width: float = 10,
+    align_width: float = 1,
     align_ratio: float = 2.5,
     align_resolution: int = 100,
     align_iterations: int = 5,
@@ -242,7 +303,7 @@ def msalign(
     align_pweights: list (optional)
         list of weights associated with the list of peaks. Must be the same length as list of peaks
     align_width : float (optional)
-        width of the gaussian peak in separation units. Default: 10
+        width of the gaussian peak in separation units. Default: 1
     align_ratio : float (optional)
         scaling value that determines the size of the window around every alignment peak. The synthetic signal is
         compared to the input signal within these regions. Default: 2.5
@@ -257,7 +318,7 @@ def msalign(
         The maximum allowed shift values in the m/z axis. If `align_by_index` or `only_shift` is set to True, 
         these shifts are measured in data points (indices) instead. Default: [-0.95, 0.95].
     only_shift : bool
-        determines if signal should be shifted (True) or rescaled (False). Default: True
+        determines if signal should be shifted (True) or rescaled (False). Default: False
     return_shifts : bool
         decide whether shift parameter `shift_opt` should also be returned. Default: False
     align_by_index : bool
@@ -518,8 +579,8 @@ def peakpicker(mz: np.ndarray,
                                                                                                   resampled_discontiniuous)
     n_peaks = pmz.size
     if n_peaks == 0:
-        return None
-    props["spectra_ind"] = np.ones(n_peaks, dtype=int) * spectra_ind
+        return np.empty((0, len(headers)), dtype=np.float64)
+    props["spectra_ind"] = np.ones(n_peaks, dtype=np.float64) * spectra_ind
     props["mz"] = pmz
     props["Intensity"] = pint
     if return_areas:
@@ -833,7 +894,7 @@ def add_zero_points_to_peaks(mz: np.ndarray,
     """
     Add zero points to peaks
     """
-    mz_discretion_model = np.poly1d(mz_discret_coeffs)
+    mz_discretion_model = Polynomial(mz_discret_coeffs)
 
     diff_mz = np.diff(mz)
     mz_discr = mz_discretion_model(mz[:-1])
@@ -931,7 +992,7 @@ def _compute_KDE(peaklist: pd.DataFrame,
         summed peak-density values.
     """
     FWHM2sigma = FWHM_TO_SIGMA_FACTOR/5
-    mz_model = np.poly1d(discret_coeffs)
+    mz_model = Polynomial(discret_coeffs)
     if peaklist.empty:
         warnings.warn("Peak list is empty, returning empty arrays for peaks PDF")
         return np.array([]), np.array([])
@@ -946,7 +1007,21 @@ def _compute_KDE(peaklist: pd.DataFrame,
         peaklist.loc[:,'KD_bandwidth'] = mz_model(peaklist['mz'])*bwc
     else:
         peaklist.loc[:,'KD_bandwidth'] = KD_bandwidth*bwc
-    KD_data = split_pdtable_by_peaks_gap(peaklist, split_mz_min = split_mz_min, split_peaks_min = split_peaks_min)
+    KD_data = split_pdtable_by_peaks_gap(peaklist, 
+                                         split_mz_min = split_mz_min, 
+                                         split_peaks_min = split_peaks_min)
+
+    if __debug__:
+        eps = np.finfo(np.float64).eps
+
+        for (mz_a, bw_a), (mz_b, bw_b) in zip(KD_data[:-1], KD_data[1:]):
+            seg_a_max = mz_a[-1] + 6.0 * bw_a[-1]   # правый край сетки сегмента A
+            seg_b_min = mz_b[0] - 6.0 * bw_b[0]     # левый край сетки сегмента B
+            scale = max(abs(seg_a_max), abs(seg_b_min), 1.0)
+            assert seg_a_max <= seg_b_min + eps * scale, \
+                f"Сетки сегментов пересекаются: segA_max={seg_a_max:.16g} > segB_min={seg_b_min:.16g} + {eps*scale:.2g}"
+            
+            assert len(mz_a) > 1 and len(mz_b) > 1, f"Сетки сегментов должны быть длиннее 1 {mz_a}, {mz_b}"  
     n_segments = len(KD_data) 
     assert peaklist['mz'].count() == sum( len(t[0]) for t in KD_data)
     X_plot = [None] * n_segments
@@ -961,9 +1036,8 @@ def _compute_KDE(peaklist: pd.DataFrame,
         raise ValueError('Unknown KDE function')
     partial_worker = partial(segment_probability_distribution, KDE_func, KD_kernel, discret_coeffs)
     with Pool(cpu_num) as p:
-        Last_segment_max_mz = 0
-        for n, (X_plot_segment, Y_plot_segment) in enumerate(tqdm(p.imap_unordered(partial_worker,KD_data), total = len(KD_data), unit = 'segment', desc = 'Peak PDF calculation')):
-            assert Last_segment_max_mz < X_plot_segment.min() #TODO удалить при выкладывании
+        for n, (X_plot_segment, Y_plot_segment) in enumerate(tqdm(p.imap_unordered(partial_worker, KD_data), total = len(KD_data), unit = 'segment', desc = 'Peak PDF calculation')):
+            
             X_plot[n] = X_plot_segment
             Y_plot[n] = Y_plot_segment
             # Y_plot[plot_slice] += result
@@ -1001,7 +1075,7 @@ def segment_probability_distribution(KDE_func, KD_kernel, mz_discret_coeffs, KD_
     mz, KD_bandwidth = KD_data
     segment_min = mz[0] - KD_bandwidth[0]*6
     segment_max = mz[-1] + KD_bandwidth[-1]*6
-    min_dist = np.poly1d(mz_discret_coeffs)(mz).min()
+    min_dist = polyval(mz, mz_discret_coeffs).min()
     if KDE_func.__name__ == 'FFTKDE':
         KD_bandwidth = np.median(KD_bandwidth)
     X_plot_segment = _set_KDE_X_plot(segment_min, segment_max, min_dist = min_dist)

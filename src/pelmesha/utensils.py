@@ -313,6 +313,8 @@ def split_pdtable_by_peaks_gap(pd_table, split_peaks_min = 25, split_mz_min = 10
                 left_idx = borders_idx[n]
             else:
                 current_sum += mz_bin_diff
+        if not borders_idx_corrected:
+            borders_idx_corrected.append((borders_idx[0], borders_idx[-1]))
         if borders_idx_corrected[-1][1] < borders_idx[-1]:
             borders_idx_corrected.append((left_idx, borders_idx[-1]))
         borders_idx = borders_idx_corrected
@@ -367,7 +369,7 @@ def _set_KDE_X_plot(plot_start, plot_end, min_dist):
         X_plot = np.linspace(plot_start,plot_end,num_of_dots)
         diffs = np.diff(X_plot)
         if num_of_dots<=1:
-            raise AssertionError("Cannot get uniform data for KDE. See logs for info")
+            raise AssertionError("Cannot get uniform data for KDE.")
     return X_plot
 
 def del_hdf5(hdf5_path):
@@ -892,7 +894,7 @@ def _frequency_filtration(series: pd.Series,
 
     threshold = countf
     if countf_rel is not None:
-        rel_threshold = countf_rel * series.size
+        rel_threshold = countf_rel * series.index.unique().size
         threshold = (
             rel_threshold
             if threshold is None

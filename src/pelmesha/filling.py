@@ -1,9 +1,9 @@
-import itertools
 import os
 import re
-import sys
 
 import numpy as np
+from numpy.polynomial.polynomial import polyval
+from numpy.polynomial import Polynomial
 from h5py import File
 import pandas as pd 
 import xarray as xr
@@ -61,7 +61,16 @@ class DataSource:
                     setattr(self, attr_name, attr)
     
         # Выгрузка метаданных
-        self.meta_file_path = os.path.join(os.path.dirname(self.file_path),'raw_pelmesha',sample_name + '_ingredients.hdf5')
+        self.reload_metadata()
+
+    def reload_metadata(self):
+        """
+        Re-read metadata and ROI metadata from the ``<sample_name>_ingredients.hdf5`` file.
+
+        Refreshes the in-memory ``metadata`` / ``roi_metadata`` state after the metadata
+        file has been rebuilt on disk (``rebuild_metadata=True``).
+        """
+        self.meta_file_path = os.path.join(os.path.dirname(self.file_path),'raw_pelmesha',self.sample_name + '_ingredients.hdf5')
         if not os.path.exists(self.meta_file_path):
             raise FileNotFoundError("Metadata file not found")
         with File(self.meta_file_path,"r") as hdf5:
@@ -643,7 +652,8 @@ class DataSource:
                 if mz_range is None:
                     mz_min, mz_max = self.roi_metadata['mz_range'][roi]
                 discret_coeffs = self.roi_metadata.loc[roi, 'discret_coeffs']
-                mz_discretion_model = np.poly1d(discret_coeffs)
+                # mz_discretion_model = np.poly1d(discret_coeffs)
+                mz_discretion_model = Polynomial(discret_coeffs)
                 mz_scale = [mz_min]
                 mz_end = mz_min
                 while mz_end <= mz_max:
@@ -805,7 +815,7 @@ class DataSource:
                         remainder = []
                     # else:   
                         # idxs_batches.append(np.array([idx_start, idx + 1]))
-                    idxs_batches.append(np.array([idx_start, idx + 1]))
+                    idxs_batches.append(np.array([idx_start, idx]))
                     idx_start = idx
                     length_usage = 0
                 else:
@@ -1043,7 +1053,7 @@ class BaseLoader(ABC):
         :type mz_range: tuple or None
         :type draw: bool
 
-        :return: Polynomial coefficients (highest degree first).
+        :return: Polynomial coefficients.
         :rtype: np.ndarray
         """
         n_med = 75
@@ -1058,30 +1068,41 @@ class BaseLoader(ABC):
         else:
             mz_min, mz_max = self.get_mz_range(idxs)
         for mz in self.get_mz_stream(idxs):
-            mz_vander = np.vander(mz[:-1], nsize_matrix)
+            diff_mz = np.diff(mz)
+            d_size = diff_mz.size
+            if d_size <= 7:
+                continue
+            d_med = max(min(n_med, int(d_size*0.1)),7)
+            d_med -= (d_med % 2 == 0)
+            
+            diff_mz = medfilt(diff_mz, int(d_med))
+            mz_vander = np.vander(mz[:-1], nsize_matrix, increasing = True)
             sum_XTX += mz_vander.T @ mz_vander
-            sum_XTy += mz_vander.T @ medfilt(np.diff(mz),n_med)
+            sum_XTy += mz_vander.T @ diff_mz
         discret_coeffs = np.linalg.solve(sum_XTX, sum_XTy)
 
         #перепроверка на равномерность дискретизации шкалы
-        mz_discret = np.poly1d(discret_coeffs)(np.linspace(mz_min, mz_max, 100000))
+        mz_discret = polyval(np.linspace(mz_min, mz_max, 100000), discret_coeffs)
         discret_mean = np.mean(mz_discret)
         discret_std = np.std(mz_discret,ddof=1)
         if discret_std/discret_mean < 0.10: # Коэффициент ковариации
-            discret_coeffs = np.linalg.solve(sum_XTX[degree:,:1], sum_XTy[:1])
+            discret_coeffs = np.linalg.solve(sum_XTX[:1, degree:], sum_XTy[degree:])     # discret_coeffs = np.linalg.solve(sum_XTX[degree:,:1], sum_XTy[:1])
+
 
         if draw:
             plt.figure(figsize = (25,4))
             plt.plot(mz[:-1], medfilt(np.diff(mz),n_med))
-            plt.plot(mz[:-1], np.poly1d(discret_coeffs)(mz[:-1]))
+            # plt.plot(mz[:-1], np.poly1d(discret_coeffs)(mz[:-1]))
+            plot_mz_discret = polyval(mz[:-1], discret_coeffs)
+            plt.plot(mz[:-1],plot_mz_discret )
             plt.ylabel('m/z discretion')
-            difference = medfilt(np.diff(mz),n_med) - np.poly1d(discret_coeffs)(mz[:-1]) 
+            difference = medfilt(np.diff(mz),n_med) - plot_mz_discret 
             difference_plus = difference.copy()
             difference_minus = difference.copy()
             difference_plus[difference < 0] = 0
             difference_minus[difference > 0] = 0
-            plt.fill_between(mz[:-1], np.poly1d(discret_coeffs)(mz[:-1]), np.poly1d(discret_coeffs)(mz[:-1]) + difference_plus, color='orange', alpha=0.15)
-            plt.fill_between(mz[:-1], np.poly1d(discret_coeffs)(mz[:-1]), np.poly1d(discret_coeffs)(mz[:-1]) + difference_minus, where=(difference <= 0), color='blue', alpha=0.15)
+            plt.fill_between(mz[:-1], plot_mz_discret, plot_mz_discret + difference_plus, color='orange', alpha=0.15)
+            plt.fill_between(mz[:-1], plot_mz_discret, plot_mz_discret + difference_minus, where=(difference <= 0), color='blue', alpha=0.15)
             
             plt.legend(["median filtered m/z discretization example", "m/z discretization regression", 'Filter > Fit' , 'Filter < Fit'])
             plt.xlabel('m/z')

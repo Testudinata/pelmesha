@@ -25,10 +25,10 @@ class Aligner:
         array: ty.Optional[np.ndarray],
         peaks: ty.Iterable[float],
         method: str = "pchip",
-        width: float = 0.1,
+        width: float = 1,
         ratio: float = 2.5,
         resolution: int = 100,
-        iterations: int = 3,
+        iterations: int = 5,
         grid_steps: int = 20,
         shift_range: ty.Optional[ty.Tuple[int, int]] = None,
         weights: ty.Optional[ty.List[float]] = None,
@@ -69,7 +69,7 @@ class Aligner:
         weights: list (optional)
             list of weights associated with the list of peaks. Must be the same length as list of peaks
         width : float (optional)
-            width of the gaussian peak in separation units. Default: 10
+            width of the gaussian peak in separation units. Default: 1
         ratio : float (optional)
             scaling value that determines the size of the window around every alignment peak. The synthetic signal is
             compared to the input signal within these regions. Default: 2.5
@@ -239,7 +239,7 @@ class Aligner:
             raise ValueError("Number of weights does not match the number of peaks.")
         self._weights = np.asarray(value)
 
-    def _initialize(self):
+    def _initialize(self): # TODO сделать индивидуальные width?
         """Prepare dataset for alignment"""
         # check that values for gaussian_width are valid
         gaussian_widths = np.zeros((self.n_peaks, 1))
