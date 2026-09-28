@@ -1816,10 +1816,10 @@ class Drawer():
             leg = ["Probability density function"]
             plt.xlim(mz_borders)
             
-            quered_peaklists = peaklists.query("mz>=@mz_borders[0] and mz<=@mz_borders[1]")
-            quered_peaklists['uncor_mz'] = quered_peaklists['mz'].copy()
+            queried_peaklists = peaklists.query("mz>=@mz_borders[0] and mz<=@mz_borders[1]")
+            queried_peaklists['uncor_mz'] = queried_peaklists['mz'].copy()
 
-            corrected_peaklists = apply_kde_mzcorrection(quered_peaklists,
+            corrected_peaklists = apply_kde_mzcorrection(queried_peaklists,
                                                         kde_mz, 
                                                         kde_density, 
                                                         pdf_fwhm_merge_factor)
@@ -2271,7 +2271,7 @@ class Drawer():
             color_cycle = plt.gca()._get_lines.get_next_color()
             mask_bin = (mz_cl == t)
             if mask_bin.any():
-                axes.scatter(uncor_cl[mask_bin], y_row_cl[mask_bin] + 0.5, edgecolors=color_cycle, linewidths=1, c=ppm_cl[mask_bin], cmap=colormap, alpha=0.75, norm=norm, s = 18)
+                axes.scatter(uncor_cl[mask_bin], y_row_cl[mask_bin] + 0.5, edgecolors=color_cycle, linewidths=0.75, c=ppm_cl[mask_bin], cmap=colormap, alpha=0.6, norm=norm, s = 16)
 
             mask_bin = (mz_f == t)
             if mask_bin.any():
@@ -2636,7 +2636,7 @@ class Pipeline:
                         fill_values = 0.0,
                         free_cpus: int = 1,
                         save_path: str = None,
-                        draw_borders: float = 2.5,
+                        draw_borders: float | tuple | list = 2.5,
                         draw: bool = True,
                         show_stats: bool = True, 
                         local_roi_idx: bool = True,
@@ -2678,8 +2678,11 @@ class Pipeline:
             Number of CPUs to leave free (default 1).
         save_path : str | None, optional
             Path to save the feature matrix as Parquet (default None).
-        draw_borders : float, optional
-            m/z window used when drawing the correction results (default 2.5).
+        draw_borders : float | tuple | list, optional
+            m/z window(s) used when drawing the correction results: a scalar
+            width around a random filtered peak, a single ``(low_border, high_border)`` pair,
+            or a sequence of ``(low_border, high_border)`` pairs drawn one after another from
+            the same source data (default 2.5).
         draw : bool, optional
             Whether to draw the m/z correction verification plot
             (default True).
@@ -2775,18 +2778,46 @@ class Pipeline:
                 dupl_stats = pd.concat([dupl_stats, dupl_stats_filtration],axis=1, keys=["before filtration", "after filtration"])
         
         if draw:
+            # The filter mask is reused below and right after the draw block, so
+            # make sure it exists even when no frequency filtration was requested.
+            if not countf and not countf_rel:
+                filter_bool = np.ones(len(feature_matrix), dtype=bool)
+
             peaks_num = filter_bool.sum()
             if peaks_num > 0:
-                # Randomizer: pick a random sample and ROI first, then a random peak that
-                # is guaranteed to exist within that ROI's filtered data, so the later mz
-                # query can never run empty (fixes ValueError: high <= 0 from randint(0, 0)).
+                # ------------------------------------------------------------------
+                # Normalize `draw_borders` into a list of (mz_lo, mz_hi) windows:
+                #   * a scalar                 -> one window around a random peak;
+                #   * (lo, hi) pair of numbers -> a single explicit window;
+                #   * [(lo, hi), ...]          -> several windows drawn one after
+                #                                another from the same source data.
+                # ------------------------------------------------------------------
+                borders_kind = 'peak' if isinstance(draw_borders, numbers.Number) else 'pairs'
+                if borders_kind == 'pairs':
+                    if (isinstance(draw_borders, (tuple, list))
+                            and len(draw_borders) == 2
+                            and all(isinstance(b, numbers.Number) for b in draw_borders)):
+                        draw_borders_list = [tuple(map(float, draw_borders))]
+                    elif (isinstance(draw_borders, (tuple, list)) and draw_borders
+                          and all(isinstance(b, (tuple, list)) and len(b) == 2
+                                  and all(isinstance(x, numbers.Number) for x in b)
+                                  for b in draw_borders)):
+                        draw_borders_list = [tuple(map(float, b)) for b in draw_borders]
+                    else:
+                        raise ValueError(
+                            f"Invalid draw_borders={draw_borders!r} (expected a scalar, "
+                            "a tuple/list of length 2, or a sequence of tuples/lists "
+                            "of length 2)"
+                        )
+
+                # Randomizer: pick a random sample and ROI once; every window below
+                # is drawn from the very same source data (feature_matrix/kde/filter).
                 rand_ds_name_list = set(feature_matrix[filter_bool].index.get_level_values(0)) & set(sample_rois_map.keys())
                 rand_ds_name = np.random.choice(list(rand_ds_name_list))
                 rand_ds = datasources[rand_ds_name]
 
-                sample_rois = sample_rois_map[rand_ds_name]
-                rand_roi_int = np.random.randint(0, len(sample_rois))
-                rand_roi = sample_rois[rand_roi_int]
+                sample_rois = list(sample_rois_map[rand_ds_name])
+                rand_roi = np.random.choice(sample_rois)
 
                 roi_filtered = feature_matrix[filter_bool].sort_index().loc[(rand_ds_name, rand_roi)]
                 if roi_filtered.empty:
@@ -2794,61 +2825,80 @@ class Pipeline:
                         f"No filtered peaks for sample={rand_ds_name!r}, roi={rand_roi!r}; "
                         "cannot draw a random peak"
                     )
-                rand_num = np.random.randint(0, roi_filtered.shape[0])
-                if isinstance(draw_borders, numbers.Number):                    
-                    peak_mz = roi_filtered['mz'].values[rand_num]
-                    draw_mz_borders = (peak_mz - draw_borders, peak_mz + draw_borders)
-                    rand_spec = feature_matrix.sort_index().loc[(rand_ds_name, rand_roi)].query("mz == @peak_mz").index.get_level_values('spectra_ind').tolist()
-                    while not rand_spec:
-                        del sample_rois[rand_roi_int]
-                        rand_roi_int = np.random.randint(0, len(sample_rois))
-                        rand_roi = sample_rois[rand_roi_int]
-                        rand_spec = feature_matrix.loc[(rand_ds_name, rand_roi)].query("mz == @peak_mz")['spectra_ind']
-                    rand_spec = np.random.choice(rand_spec)
-                elif isinstance(draw_borders, (tuple, list)) and len(draw_borders) == 2:
-                    if not isinstance(draw_borders[0], numbers.Number) and not isinstance(draw_borders[1], numbers.Number):
-                        warnings.warn(
-                            f"Invalid draw_borders={draw_borders} (expected scalar, tuple or list of length 2)"
-                        )
-                    draw_mz_borders = draw_borders
-                    rand_spec = feature_matrix.sort_index().loc[(rand_ds_name, rand_roi)].index.get_level_values('spectra_ind').tolist()
-                    while not rand_spec:
-                        del sample_rois[rand_roi_int]
-                        rand_roi_int = np.random.randint(0, len(sample_rois))
-                        rand_roi = sample_rois[rand_roi_int]
-                        rand_spec = feature_matrix.loc[(rand_ds_name, rand_roi)]['spectra_ind']
-                    rand_spec = np.random.choice(rand_spec)
 
-                else:
+                # Scalar case: centre the window on a random peak that is guaranteed
+                # to exist within the selected ROI's filtered data, so the later m/z
+                # query can never run empty (fixes ValueError: high <= 0 from randint(0, 0)).
+                if borders_kind == 'peak':
+                    rand_num = np.random.randint(0, roi_filtered.shape[0])
+                    peak_mz = float(roi_filtered['mz'].values[rand_num])
+                    draw_borders_list = [(peak_mz - draw_borders, peak_mz + draw_borders)]
+
+                # Pre-sort once and reuse for every window instead of re-sorting
+                # inside each spectrum query.
+                feature_matrix_sorted = feature_matrix.sort_index()
+
+                def _spectrum_candidates(roi_name):
+                    roi_matrix = feature_matrix_sorted.loc[(rand_ds_name, roi_name)]
+                    if borders_kind == 'peak':
+                        mask = roi_matrix['mz'] == peak_mz
+                        return roi_matrix.index[mask].get_level_values('spectra_ind').tolist()
+                    return roi_matrix.index.get_level_values('spectra_ind').tolist()
+
+                # Spectrum holding the chosen peak (scalar case) or any spectrum of
+                # the ROI; fall back to other ROIs of the sample when none exists.
+                spec_candidates = _spectrum_candidates(rand_roi)
+                while not spec_candidates and sample_rois:
+                    sample_rois.remove(rand_roi)
+                    rand_roi = np.random.choice(sample_rois)
+                    spec_candidates = _spectrum_candidates(rand_roi)
+                if not spec_candidates:
                     raise ValueError(
-                        f"Invalid draw_borders={draw_borders} (expected scalar, tuple or list of length 2)"
+                        f"No spectra found for sample={rand_ds_name!r} with "
+                        f"draw_borders={draw_borders!r}"
                     )
-                fig, (axes_prob, axes_diff) = plt.subplots(2,1, sharex = True, figsize = (25,16))
-                axes_prob = Drawer.draw_mzcorrection(feature_matrix, kde_mz, kde_density, draw_mz_borders = draw_mz_borders, countf_rel=countf_rel, countf=countf, filter_mz_mask = filter_bool, flipped_kde_density = True, axes = axes_prob )
-                graphs, leg = axes_prob.get_legend_handles_labels()
-                axes_spectrum = axes_prob.twinx()
-                legend1 = axes_spectrum.legend(graphs, leg, loc = 'upper left',framealpha=0.95)
-                # axes.plot(*exampled_datasource.get_mean_spectrum(roi,mz_range = mz_borders), color="r",alpha=0.85)
+                rand_spec = np.random.choice(spec_candidates)
 
-                axes_spectrum.set_ylabel("Intensity")
-                axes_spectrum.add_artist(legend1)
+                # ------------------- draw every m/z window sequentially -------------------
+                for mz_borders in draw_borders_list:
+                    fig, (axes_prob, axes_diff) = plt.subplots(2, 1, sharex=True, figsize=(25, 16))
+                    axes_prob = Drawer.draw_mzcorrection(
+                        feature_matrix, kde_mz, kde_density,
+                        draw_mz_borders=mz_borders, countf_rel=countf_rel, countf=countf,
+                        filter_mz_mask=filter_bool, flipped_kde_density=True, axes=axes_prob,
+                    )
+                    graphs, leg = axes_prob.get_legend_handles_labels()
+                    axes_spectrum = axes_prob.twinx()
+                    legend1 = axes_spectrum.legend(graphs, leg, loc='upper left', framealpha=0.95)
+                    axes_spectrum.set_ylabel("Intensity")
+                    axes_spectrum.add_artist(legend1)
 
-                axes_spectrum.plot(*rand_ds.get_mean_spectrum(rand_roi,mz_range = draw_mz_borders), color="r",alpha=0.85)
-                leg_twin=[f'Mean spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}']
-                legend2 = axes_spectrum.legend(leg_twin, loc = 'upper right')
-                Drawer(rand_ds).audit_processing(rand_roi, draw_mz_borders, rand_spec, axes = axes_spectrum, configs_path = rand_ds.configs_path)
-                ylim_min, ylim_max = axes_spectrum.get_ylim() 
-                limit = max(abs(ylim_min), abs(ylim_max))
-                axes_spectrum.set_ylim( (-limit, limit) )
-                legend2 = axes_spectrum.get_legend()
-                legend2.get_texts()[1].set_text(f'Raw mass spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}, N{rand_spec}')
-                legend2.get_texts()[2].set_text(f'Processed mass spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}, N{rand_spec}' )
+                    axes_spectrum.plot(*rand_ds.get_mean_spectrum(rand_roi, mz_range=mz_borders), color="r", alpha=0.85)
+                    axes_spectrum.legend([f'Mean spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}'], loc='upper right')
+                    Drawer(rand_ds).audit_processing(
+                        rand_roi, mz_borders, rand_spec, axes=axes_spectrum,
+                        configs_path=rand_ds.configs_path,
+                    )
+                    ylim_min, ylim_max = axes_spectrum.get_ylim()
+                    limit = max(abs(ylim_min), abs(ylim_max))
+                    axes_spectrum.set_ylim((-limit, limit))
+                    legend2 = axes_spectrum.get_legend()
+                    legend2.get_texts()[1].set_text(f'Raw mass spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}, N{rand_spec}')
+                    legend2.get_texts()[2].set_text(f'Processed mass spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}, N{rand_spec}')
 
-
-                Drawer._draw_mass_difference_map(feature_matrix, kde_mz=kde_mz, kde_density=kde_density, uncor_col = 'uncorrected_mz', filter_mz_mask = filter_bool, draw_mz_borders=draw_mz_borders, axes = axes_diff)
-                fig.subplots_adjust(hspace=0)
-                plt.setp(axes_prob.get_xticklabels(), visible=False)
-                plt.show()
+                    Drawer._draw_mass_difference_map(
+                        feature_matrix,
+                        kde_mz=kde_mz,
+                        kde_density=kde_density,
+                        uncor_col='uncorrected_mz',
+                        filter_mz_mask=filter_bool,
+                        draw_mz_borders=mz_borders,
+                        axes=axes_diff,
+                        pdf_fwhm_merge_factor=pdf_fwhm_merge_factor,
+                    )
+                    fig.subplots_adjust(hspace=0)
+                    plt.setp(axes_prob.get_xticklabels(), visible=False)
+                    plt.show()
 
             else:
                 print(f"No peaks after filtration with countf_rel={countf_rel} and countf={countf}")
@@ -2886,6 +2936,7 @@ class Pipeline:
             feature_matrix = feature_matrix.merge(coords, left_index=True, right_index=True)
 
         if save_path is not None:
+            save_path = os.path.abspath(save_path)
             dirpath = os.path.dirname(save_path)
             os.makedirs(dirpath, exist_ok=True)
             if not save_path.endswith('.parquet'):
@@ -2961,20 +3012,21 @@ class Pipeline:
             idxs = rmeta["idxroi"]
         # Get per-ROI PipelineConfigurator pipeline functions and its configs from PreparedDataSource
         roi_configs = self.roi_configs[roi]
-        # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
-        import sys as _sys
-        try:
-            _step_cfg = roi_configs.get_step_configs("process")
-            _step_methods = getattr(_step_cfg, "configs", {}).get("methods", {})
-            _sfn = getattr(roi_configs, "_step_func_names", None)
-            print(f"[DBG pipeline] roi={roi} | roi_configs_type={type(roi_configs).__name__} "
-                  f"| full_methods.Baseline.keys={list(((getattr(roi_configs,'configs',{}) or {}).get('methods') or {}).get('Baseline', {}).keys())} "
-                  f"| _step_func_names['process']={sorted(_sfn.get('process', [])) if _sfn else 'N/A'} "
-                  f"| step_cfg.methods.Baseline.keys={list(_step_methods.get('Baseline', {}).keys())}",
-                  file=_sys.stderr)
-        except Exception as _e:
-            print(f"[DBG pipeline] roi={roi} get_step_configs FAILED: {type(_e).__name__}: {_e}", file=_sys.stderr)
-        # ---- END TEMP DIAGNOSTIC LOGGING ----
+        if __debug__:
+            # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
+            import sys as _sys
+            try:
+                _step_cfg = roi_configs.get_step_configs("process")
+                _step_methods = getattr(_step_cfg, "configs", {}).get("methods", {})
+                _sfn = getattr(roi_configs, "_step_func_names", None)
+                print(f"[DBG pipeline] roi={roi} | roi_configs_type={type(roi_configs).__name__} "
+                    f"| full_methods.Baseline.keys={list(((getattr(roi_configs,'configs',{}) or {}).get('methods') or {}).get('Baseline', {}).keys())} "
+                    f"| _step_func_names['process']={sorted(_sfn.get('process', [])) if _sfn else 'N/A'} "
+                    f"| step_cfg.methods.Baseline.keys={list(_step_methods.get('Baseline', {}).keys())}",
+                    file=_sys.stderr)
+            except Exception as _e:
+                print(f"[DBG pipeline] roi={roi} get_step_configs FAILED: {type(_e).__name__}: {_e}", file=_sys.stderr)
+            # ---- END TEMP DIAGNOSTIC LOGGING ----
         preprocess_function = roi_configs._preprocess_function
         
         mz = None
@@ -3194,22 +3246,22 @@ class Pipeline:
         for n, (_mz, raw_intensity) in enumerate(batch_iter):
             _mz, proc_intensity = process_function(_mz, raw_intensity, proc_configs, **internal_proc_configs)
             peaklists[n] = peakpick_function(_mz, np.asarray(proc_intensity, dtype=dtypeconv).squeeze(), idxs_list[n], peakpick_configs, **internal_peakpick_configs)
-
-        # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
-        import sys as _sys
-        _info = []
-        for _k, _v in peaklists.items():
-            if _v is None:
-                _info.append(f"spectra_ind={idxs_list[_k]} -> None (no peaks)")
-            else:
-                _info.append(f"spectra_ind={idxs_list[_k]} -> ndarray shape={np.shape(_v)} dtype={np.asarray(_v).dtype}")
-        print(f"[DBG _peakpick_wrapper] batch spectra={len(peaklists)} "
-              f"| none_count={sum(1 for v in peaklists.values() if v is None)} "
-              f"| unique_shapes={sorted({tuple(np.asarray(v).shape) for v in peaklists.values()})}",
-              file=_sys.stderr)
-        for _line in _info:
-            print(f"[DBG _peakpick_wrapper] {_line}", file=_sys.stderr)
-        # ---- END TEMP DIAGNOSTIC LOGGING ----
+        if __debug__:
+            # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
+            import sys as _sys
+            _info = []
+            for _k, _v in peaklists.items():
+                if _v is None:
+                    _info.append(f"spectra_ind={idxs_list[_k]} -> None (no peaks)")
+                else:
+                    _info.append(f"spectra_ind={idxs_list[_k]} -> ndarray shape={np.shape(_v)} dtype={np.asarray(_v).dtype}")
+            print(f"[DBG _peakpick_wrapper] batch spectra={len(peaklists)} "
+                f"| none_count={sum(1 for v in peaklists.values() if v is None)} "
+                f"| unique_shapes={sorted({tuple(np.asarray(v).shape) for v in peaklists.values()})}",
+                file=_sys.stderr)
+            for _line in _info:
+                print(f"[DBG _peakpick_wrapper] {_line}", file=_sys.stderr)
+            # ---- END TEMP DIAGNOSTIC LOGGING ----
 
         return np.vstack(tuple(peaklists.values()))
     

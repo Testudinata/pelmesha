@@ -1036,9 +1036,10 @@ class BaseLoader(ABC):
             min_mz = min(min_mz, mz[0])
             max_mz = max(max_mz, mz[-1])
         return (min_mz, max_mz)
-    
+    # def get_mz_discretization(self,)
     def get_mz_discretion_coeffs(self, idxs, degree = 3, mz_range = None, draw = True):
         """
+        LEGACY IN FUTURE. new function ``get_mz_discretization``
         Fit polynomial coefficients describing the m/z discretisation step size.
 
         Uses a least-squares regression on the median-filtered m/z differences.
