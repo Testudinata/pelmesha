@@ -464,7 +464,7 @@ def mspeaks_KD_legacy(X, Y,oversegmentationfilter=None,peaklocation=1, return_pk
         return np.array((pkX, X[left_min], X[right_min], val_max))
     return np.array((pkX, X[left_min], X[right_min]))
 
-@njit
+@njit(cache=True)
 def mspeaks_KD(X: np.ndarray, 
                 Y: np.ndarray, 
                 peaklocation: float = 1, 
@@ -941,21 +941,21 @@ def show_df(dataframe, title=""):
         print(dataframe)
 
         
-@njit
+@njit(cache=True)
 def _prepend(arr, number):
     result = np.empty(len(arr) + 1, dtype=arr.dtype)
     result[0] = number
     result[1:] = arr
     
     return result
-@njit
+@njit(cache=True)
 def _append(arr, number):
     result = np.empty(len(arr) + 1, dtype=arr.dtype)
     result[:-1] = arr
     result[-1] = number
     return result
 
-@njit
+@njit(cache=True)
 def _snr_filter(mz: np.ndarray[float],
                 intens: np.ndarray[float],
                 pmz_array: np.ndarray[float], 
@@ -1136,7 +1136,7 @@ def _snr_filter(mz: np.ndarray[float],
     noise_mean = noise_mean[k]
     return pmz_array, pint_array, left_min, right_min, noise_std, noise_mean
 
-@njit
+@njit(cache=True)
 def _peaks_snr_window(mz: np.ndarray[float],
                      noise_bool: np.ndarray[bool],
                      pext_left: int,
@@ -1204,7 +1204,7 @@ def _peaks_snr_window(mz: np.ndarray[float],
     
     return sl_left, sl_right
 
-@njit
+@njit(cache=True)
 def _snr_window_stats(intens: np.ndarray[float],
                        noise_bool: np.ndarray[bool],
                        pext_left: int,
@@ -1280,7 +1280,7 @@ def _snr_window_stats(intens: np.ndarray[float],
     var = ((sum_sq - sum_ * mean) / (count_local - 1)) # ddof = 1
     std = np.sqrt(var) if var > 0 else np.inf
     return mean, std
-@njit
+@njit(cache=True)
 def _fwhm_interp(mz: np.ndarray[float],
                  intens: np.ndarray[float],
                  pmz_array: np.ndarray[float], 
@@ -1342,7 +1342,7 @@ def _fwhm_interp(mz: np.ndarray[float],
         )
     return fwhm_left, fwhm_right
 
-@njit
+@njit(cache=True)
 def _peakpicker_core(mz: np.ndarray,
                     intens: np.ndarray,
                     heightfilter: float | None = None,
@@ -1612,7 +1612,7 @@ def _index_to_segment(arr):
     # return np.asarray(ranges, dtype=np.int64)
     return ranges
 
-@njit
+@njit(cache=True)
 def _compute_max_with_ext_correction(mz: np.ndarray,
                                     intens: np.ndarray,
                                     left_min: np.ndarray,
@@ -1686,7 +1686,7 @@ def _compute_max_with_ext_correction(mz: np.ndarray,
 
     return pmz_array, pint_array, left_min, right_min, non_plaetau_bool
 
-@njit
+@njit(cache=True)
 def _compute_max(intens: np.ndarray, 
                  left_min: np.ndarray, 
                  right_min: np.ndarray):
