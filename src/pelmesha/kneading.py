@@ -71,14 +71,7 @@ def preprocess_configuration_base(
         baseline_algo = baseline_algo.get('Baseline', None)
         if baseline_algo:
             baseline_algo = next(iter(baseline_algo))
-    if __debug__:
-        # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
-        import sys as _sys
-        _full_methods = configs.configs.get('methods') or {}
-        print(f"[DBG preproc] roi={roi} baseline_algo={baseline_algo!r} "
-            f"| methods.Baseline keys={list((_full_methods.get('Baseline') or {}).keys())}",
-            file=_sys.stderr)
-        # ---- END TEMP DIAGNOSTIC LOGGING ----
+   
     if baseline_algo:
         if datasource.dcont:
             internal_configs['process']['Baseliner'] = getattr(Baseline(datasource.get_mz(rmeta['idxroi'].ravel()[0]), **configs['Baseline'], assume_sorted = True), baseline_algo)
@@ -151,28 +144,6 @@ def process_spectra_base(
     
     # BaselineCorrection step
     if baseline_algo is not None:
-        if __debug__:
-            # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
-            import sys as _sys
-            _base_cfg = getattr(configs, "configs", None)
-            _full_methods = _base_cfg.get("methods", {}) if isinstance(_base_cfg, dict) else None
-            _sfn = getattr(configs, "_step_func_names", None)
-            print(f"[DBG proc] baseline_algo={baseline_algo!r} ({type(baseline_algo).__name__}) "
-                f"| configs_type={type(configs).__name__} "
-                f"| full_methods_Baseline_keys={list((_full_methods or {}).get('Baseline', {}).keys()) if _full_methods else 'N/A'} "
-                f"| _step_func_names['process']={sorted(_sfn.get('process', [])) if _sfn else 'N/A'}",
-                file=_sys.stderr)
-            try:
-                _bl = configs['Baseline']
-                print(f"[DBG proc] configs['Baseline'] OK: {dict(_bl)}", file=_sys.stderr)
-            except Exception as _e:
-                print(f"[DBG proc] configs['Baseline'] FAILED: {type(_e).__name__}: {_e}", file=_sys.stderr)
-            try:
-                _asls = configs['asls']
-                print(f"[DBG proc] configs['asls'] OK: {dict(_asls)}", file=_sys.stderr)
-            except Exception as _e:
-                print(f"[DBG proc] configs['asls'] FAILED: {type(_e).__name__}: {_e}", file=_sys.stderr)
-            # ---- END TEMP DIAGNOSTIC LOGGING ----
 
         if isinstance(baseline_algo, str):
             if baseline_algo == 'asls': #Hack just for setting default params by automatic
@@ -221,20 +192,6 @@ def peakpicking_base(
     np.ndarray
         The peak picking result.
     """
-    if __debug__:
-        # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
-        import sys as _sys
-        _sfn = getattr(configs, "_step_func_names", None)
-        print(f"[DBG peakpick] configs_type={type(configs).__name__} "
-            f"| _step_func_names['peakpick']={sorted(_sfn.get('peakpick', [])) if _sfn else 'N/A'} "
-            f"| configs.functions.keys={list(getattr(configs, 'configs', {}).get('functions', {}).keys())}",
-            file=_sys.stderr)
-        try:
-            _pk = configs['peakpicker']
-            print(f"[DBG peakpick] configs['peakpicker'] OK: keys={list(_pk.keys())}", file=_sys.stderr)
-        except Exception as _e:
-            print(f"[DBG peakpick] configs['peakpicker'] FAILED: {type(_e).__name__}: {_e}", file=_sys.stderr)
-        # ---- END TEMP DIAGNOSTIC LOGGING ----
     # Get the config dict for the peakpicker function.
     configs = configs['peakpicker']  # Directly get the config dict for the peakpicker function.
     return peakpicker(mz, 
@@ -929,10 +886,14 @@ def reduce_signal_to_zero(mz: np.ndarray,
     """
     Reduce signal to zero
     """
-    artefacts_bool = np.zeros(len(mz), dtype=bool)
-    for distortion in mz_segments_to_zero:
-        artefacts_bool = artefacts_bool | ((mz > distortion[0]) & (mz < distortion[1]))
-        ints[artefacts_bool] = 0
+    # artefacts_bool = np.zeros(len(mz), dtype=bool)
+    # for distortion in mz_segments_to_zero:
+    #     artefacts_bool |= ((mz > distortion[0]) & (mz < distortion[1]))
+    # ints[artefacts_bool] = 0
+    for start, end in mz_segments_to_zero:
+        idx_start = np.searchsorted(mz, start, side='right')
+        idx_end = np.searchsorted(mz, end, side='left')
+        ints[idx_start:idx_end] = 0 
     return mz, ints
 
 def _compute_KDE(peaklist: pd.DataFrame,
@@ -1011,7 +972,7 @@ def _compute_KDE(peaklist: pd.DataFrame,
                                          split_mz_min = split_mz_min, 
                                          split_peaks_min = split_peaks_min)
 
-    if __debug__:
+    if __debug__: # TODO В тест
         eps = np.finfo(np.float64).eps
 
         for (mz_a, bw_a), (mz_b, bw_b) in zip(KD_data[:-1], KD_data[1:]):
@@ -1023,7 +984,7 @@ def _compute_KDE(peaklist: pd.DataFrame,
             
             assert len(mz_a) > 1 and len(mz_b) > 1, f"Сетки сегментов должны быть длиннее 1 {mz_a}, {mz_b}"  
     n_segments = len(KD_data) 
-    assert peaklist['mz'].count() == sum( len(t[0]) for t in KD_data)
+    assert peaklist['mz'].count() == sum( len(t[0]) for t in KD_data) # TODO В тест
     X_plot = [None] * n_segments
     Y_plot = [None] * n_segments
     

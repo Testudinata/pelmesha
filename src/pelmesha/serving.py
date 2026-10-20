@@ -829,8 +829,11 @@ class DataSet:
                         draw: bool = True,
                         show_stats: bool = True,
                         save_path: str = None,
-                        local_roi_idx: bool = True,
+                        save_binning_rule: bool = False,
+                        binning_rule_save_path: str | None = None,
+                        local_roi_idx: bool = False,
                         merge_with_coords: bool = False) -> pd.DataFrame:
+        # TODO перейти на hvlplot для big data отрисовки точек вместо plt, после замены с работой в поларс
         """
         Generate feature matrix from peak lists.
         
@@ -863,7 +866,20 @@ class DataSet:
         free_cpus : int, optional
             Number of CPUs to leave free (default 1).
         save_path : str, optional
-            Path to save feature matrix (default None).
+            Path to save feature matrix (default None). When coordinates are
+            not merged into the matrix, ``<dataset_stem>_coordinates.parquet``
+            containing only the rows present in the final dataset is saved
+            next to it.
+        save_binning_rule : bool, optional
+            Whether to save the binning-rule table (``peak_mz``,
+            ``bin_left_edge``, ``bin_right_edge``, ``pdf_y``) next to the
+            feature matrix file (default True). Only applies when
+            ``save_path`` is given.
+        binning_rule_save_path : str | None, optional
+            Explicit path for the binning-rule table. When ``None``, it is
+            derived from ``save_path`` as
+            ``<dataset_stem>_binning_rule.parquet`` in the same directory
+            (default None).
         
         Returns
         -------
@@ -886,6 +902,8 @@ class DataSet:
                                        draw = draw,
                                        show_stats = show_stats,
                                        save_path = save_path,
+                                       save_binning_rule = save_binning_rule,
+                                       binning_rule_save_path = binning_rule_save_path,
                                        local_roi_idx = local_roi_idx,
                                        merge_with_coords = merge_with_coords)
 
@@ -1253,6 +1271,21 @@ class DataSet:
             rows.append(row)
         return headers, rows, alignments
 
+    def _summary(self) -> str:
+        """
+        One-line summary of the DataSet contents.
+
+        Reports the total number of registered files (sources) and the
+        total number of ROIs summed across all of them.
+
+        Returns
+        -------
+        str
+            E.g. ``"DataSet: 3 files, 11 ROIs"``.
+        """
+        total_rois = sum(len(source.rois) for source in self.sources.values())
+        return f"DataSet: {len(self.sources)} files, {total_rois} ROIs"
+
     def __repr__(self):
         """
         Text-table representation of the DataSet for the console.
@@ -1267,7 +1300,7 @@ class DataSet:
             A plain-text table with ``|`` separators.
         """
         if not self.sources:
-            return "DataSet (empty)"
+            return "DataSet (empty): 0 files, 0 ROIs"
 
         headers, rows, alignments = self._generate_table_data()
 
@@ -1300,7 +1333,7 @@ class DataSet:
                     parts.append(cell.ljust(col_widths[i]))
             lines.append(" | ".join(parts))
 
-        return "\n".join(lines)
+        return f"{self._summary()}\n\n" + "\n".join(lines)
 
     def _repr_html_(self):
         """
@@ -1320,7 +1353,7 @@ class DataSet:
             A valid HTML ``<table>`` element as a single string.
         """
         if not self.sources:
-            return "<i>DataSet (empty)</i>"
+            return "<i>DataSet (empty): 0 files, 0 ROIs</i>"
 
         headers, rows, alignments = self._generate_table_data()
 
@@ -1331,6 +1364,9 @@ class DataSet:
         num_idx  = col_map.get("Mass spectra number")
 
         html = [
+            '<div style="font-family: sans-serif; font-size: 13px; '
+            'margin-bottom: 6px;">'
+            f'{self._escape_html(self._summary())}</div>',
             '<table style="border-collapse: collapse; '
             'font-family: sans-serif; font-size: 13px;">'
         ]
@@ -2096,7 +2132,7 @@ class Drawer():
             ``spectra_ind`` is used if present, otherwise the feature-matrix
             row position.
         n_px : int, optional
-            Number of pixels along the m/z axis (default 1500).
+            Number of pixels along the m/z axis (default 15000).
         ppm_vmin, ppm_vmax : float | None, optional
             ppm range mapped onto the colormap. When ``None`` a symmetric
             range based on the 98th percentile of |ppm| is used.
@@ -2169,14 +2205,10 @@ class Drawer():
         y_label = y_axis.names
         # if any(isinstance(y, tuple) for y in y_axis):
         #     y_axis = np.asaray([zip(y_label, idx) for idx in pd.unique(y_axis)])
-            
+
         try:
             if isinstance(getattr(y_axis, "index", y_axis), pd.MultiIndex):
-                # Объединяем уровни мультииндекса в понятные текстовые строки, например "sample_1_roi_0"
-                y_axis_str = [
-                    "_".join(str(item) for item in row) for row in y_axis
-                ]
-                y_values, y_inv = np.unique(y_axis_str, return_inverse=True)
+                y_inv, y_values = pd.factorize(y_axis, sort=True)
             else:
                 y_values, y_inv = np.unique(y_axis.to_numpy(dtype=float),
                                             return_inverse=True)
@@ -2184,16 +2216,17 @@ class Drawer():
             # n_y = int(y_values.max()) + 1
 
         except (TypeError, ValueError):
-            y_values, y_inv = np.unique(y_axis.astype(str).to_numpy(),
-                                        return_inverse=True)
-        y_row = y_inv.astype(np.intp)
+
+            y_inv, y_values = pd.factorize(y_axis, sort=True)
+        # y_row = y_inv.astype(np.intp)
+        y_row = np.asarray(y_inv, dtype=np.intp)
         n_y = int(y_row.max()) + 1
-        if n_y * n_px > 50_000_000:
-            warnings.warn(
-                f"The mass difference map raster is large ({n_y} x {n_px} pixels). "
-                "Consider passing `y_axis='spectra_ind'`, a narrower "
-                "`draw_mz_borders` or a smaller `n_px`."
-            )
+        # if n_y * n_px > 50_000_000:
+        #     warnings.warn(
+        #         f"The mass difference map raster is large ({n_y} x {n_px} pixels). "
+        #         "Consider passing `y_axis='spectra_ind'`, a narrower "
+        #         "`draw_mz_borders` or a smaller `n_px`."
+        #     )
 
         # ------------------------- ppm scale & colormap -------------------------
         finite_ppm = ppm[np.isfinite(ppm)]
@@ -2246,11 +2279,21 @@ class Drawer():
         # axes.set_ylim(y_lo, y_hi)
         axes.set_ylim(0, float(n_y))
         
-        if n_y <= 20000:
-            step = max(1, n_y // 10)
-            tick_rows = np.arange(0, n_y, step)
-            axes.set_yticks(tick_rows + 0.5)
-            axes.set_yticklabels([f"{y_values[i]:g}" if not isinstance(y_values[i], (str, np.str_)) else y_values[i] for i in tick_rows])
+        # if n_y <= 20000:
+        step = max(1, n_y // 10)
+        tick_rows = np.arange(0, n_y, step)
+        axes.set_yticks(tick_rows + 0.5)
+        def _ylab(v):
+            if isinstance(v, (str, np.str_)):
+                return v
+            if isinstance(v, tuple):
+                return " ".join(str(x) for x in v)
+            try:
+                return f"{v:g}"
+            except (TypeError, ValueError):
+                return str(v)
+        axes.set_yticklabels([_ylab(y_values[i]) for i in tick_rows])
+            # axes.set_yticklabels([f"{y_values[i]:g}" if not isinstance(y_values[i], (str, np.str_)) else y_values[i] for i in tick_rows])
 
 
         # Bins from the KDE peak list (peaklist_with_edges): a solid vertical
@@ -2267,9 +2310,16 @@ class Drawer():
         uncor_f = uncor[~filter_mz_mask]
         y_row_f = y_row[~filter_mz_mask]
         ppm_f = ppm[~filter_mz_mask]
+
+
+        bin_idx = np.searchsorted(true_mz, mz_cl)
+        axes.set_prop_cycle(None)
         for i, (t, le, re_) in enumerate(zip(true_mz, left_bin_edge, right_bin_edge)):
-            color_cycle = plt.gca()._get_lines.get_next_color()
-            mask_bin = (mz_cl == t)
+            mask_bin = (bin_idx == i)
+        # for i, (t, le, re_) in enumerate(zip(true_mz, left_bin_edge, right_bin_edge)):
+            color_cycle = axes._get_lines.get_next_color()
+            # mask_bin = (mz_cl == t)
+
             if mask_bin.any():
                 axes.scatter(uncor_cl[mask_bin], y_row_cl[mask_bin] + 0.5, edgecolors=color_cycle, linewidths=0.75, c=ppm_cl[mask_bin], cmap=colormap, alpha=0.6, norm=norm, s = 16)
 
@@ -2293,8 +2343,8 @@ class Drawer():
 
             # True (corrected) m/z centre of every bin.
 
-            axes.axvline(t, color=color_cycle, lw=2, ls="-", alpha=0.7, zorder=3)
-            axes.axvline(t, color="w", lw=0.5, ls="-", alpha=0.7, zorder=4)
+            axes.axvline(t, color=color_cycle, lw=2, ls="-", alpha=0.5, zorder=3)
+            axes.axvline(t, color="w", lw=0.5, ls="-", alpha=0.5, zorder=4)
 
         # Static legend entries: bin-edge lines and the ppm fill of markers.
         edge_handle, = axes.plot([], [], color="w", lw=0.75, ls="--", alpha=0.45)
@@ -2305,7 +2355,7 @@ class Drawer():
         legend_labels.append("Marker fill: ppm deviation (colorbar)")
 
         axes.set_xlabel("m/z")
-        axes.set_ylabel(y_label if y_label is not None else "Spectra")
+        axes.set_ylabel(" ".join(y_label) if y_label is not None else "Spectra")
 
         axes.minorticks_on()
         axes.legend(legend_handles, legend_labels, loc="upper left",
@@ -2636,10 +2686,12 @@ class Pipeline:
                         fill_values = 0.0,
                         free_cpus: int = 1,
                         save_path: str = None,
+                        save_binning_rule: bool = True,
+                        binning_rule_save_path: str | None = None,
                         draw_borders: float | tuple | list = 2.5,
                         draw: bool = True,
-                        show_stats: bool = True, 
-                        local_roi_idx: bool = True,
+                        show_stats: bool = True,
+                        local_roi_idx: bool = False,
                         merge_with_coords: bool = False) -> pd.DataFrame:
         """
         Build the feature matrix across all sources of a DataSet.
@@ -2678,6 +2730,19 @@ class Pipeline:
             Number of CPUs to leave free (default 1).
         save_path : str | None, optional
             Path to save the feature matrix as Parquet (default None).
+            Alongside it, when coordinates are not merged into the matrix,
+            ``<dataset_stem>_coordinates.parquet`` is saved containing only
+            the rows present in the final dataset.
+        save_binning_rule : bool, optional
+            Whether to save the binning-rule table (``peak_mz``,
+            ``bin_left_edge``, ``bin_right_edge``, ``pdf_y``) next to the
+            feature matrix file (default True). Only applies when
+            ``save_path`` is given.
+        binning_rule_save_path : str | None, optional
+            Explicit path for the binning-rule table. When ``None``, it is
+            derived from ``save_path`` as
+            ``<dataset_stem>_binning_rule.parquet`` in the same directory
+            (default None).
         draw_borders : float | tuple | list, optional
             m/z window(s) used when drawing the correction results: a scalar
             width around a random filtered peak, a single ``(low_border, high_border)`` pair,
@@ -2690,7 +2755,7 @@ class Pipeline:
             Whether to show the statistics of the m/z correction
             (default True).
         local_roi_idx : bool, optional
-            Whether to use local (per-ROI) spectrum indices (default True).
+            Whether to use local (per-ROI) spectrum indices (default False).
         merge_with_coords : bool, optional
             Whether to merge the coordinates into the feature matrix
             (default False).
@@ -2716,7 +2781,6 @@ class Pipeline:
         for sample, rois in sample_rois_map.items():
             datasource = datasources[sample]
             if os.path.exists(datasource.peaks_density_path):
-
                 with File(datasource.peaks_density_path, 'r') as f:
                     for roi in rois: 
                         roi_kde_mz = f[roi]['mz'][:]
@@ -2729,6 +2793,7 @@ class Pipeline:
 
         kde_mz, kde_density = _summerize_kde_mz(kde_mz_list, kde_density_list)
 
+        # Correcting peaks m/z values in the dataset
         multiindex_keys = []
         feature_matrix = []
         for sample, rois in sample_rois_map.items():
@@ -2738,9 +2803,9 @@ class Pipeline:
                 for roi in rois:
                     multiindex_keys.append((sample, roi))
                     peaklists = datasource.peaklists(roi).set_index('spectra_ind',drop = True)
-                    if not local_roi_idx:
+                    if local_roi_idx:
                         idx_map = Indexator(datasource.roi_metadata.loc[roi, 'idxroi'])
-                        idx_map = dict(zip(range(idx_map.count), idx_map))
+                        idx_map = dict(zip(idx_map,range(idx_map.count)))
                         peaklists.index = peaklists.index.map(idx_map)
                     feature_matrix.append(peaklists)
             else:
@@ -2749,13 +2814,21 @@ class Pipeline:
         feature_matrix = pd.concat(feature_matrix, keys=multiindex_keys, names = ['sample', 'roi'])
         if draw:
             feature_matrix['uncorrected_mz'] = feature_matrix['mz'].copy()
+
         if show_stats:
             nunique_stats.append(_nunique_summary(feature_matrix['mz'].droplevel('spectra_ind'),'before correction'))
-        feature_matrix = apply_kde_mzcorrection(feature_matrix, 
-                                                kde_mz, 
+
+        _save_binning_rule = bool(((save_path is not None) and save_binning_rule) or (binning_rule_save_path is not None))
+
+        feature_matrix = apply_kde_mzcorrection(feature_matrix,
+                                                kde_mz,
                                                 kde_density,
-                                                pdf_fwhm_merge_factor, 
-                                                cpu_num)
+                                                pdf_fwhm_merge_factor,
+                                                cpu_num,
+                                                return_binning_rule=_save_binning_rule)
+        if _save_binning_rule:
+            feature_matrix, binning_rule = feature_matrix
+            
         if show_stats:
             nunique_stats.append(_nunique_summary(feature_matrix['mz'].droplevel('spectra_ind'),'after correction'))
 
@@ -2771,17 +2844,18 @@ class Pipeline:
             if show_stats:
                 nunique_stats.append(_nunique_summary(feature_matrix['mz'].loc[filter_bool].droplevel('spectra_ind'),'after filtration'))
                 # Duplicates recounting with merging
-                dupl_stats_filtration = _consensus_peaks_summary(feature_matrix['mz'])
+                dupl_stats_filtration = _consensus_peaks_summary(feature_matrix['mz'].loc[filter_bool])
                 all_columns = dupl_stats.columns.union(dupl_stats_filtration.columns)
                 dupl_stats = dupl_stats.reindex(columns=all_columns, fill_value=0)
                 dupl_stats_filtration = dupl_stats_filtration.reindex(columns=all_columns, fill_value=0)
                 dupl_stats = pd.concat([dupl_stats, dupl_stats_filtration],axis=1, keys=["before filtration", "after filtration"])
         
+        else:
+            # No frequency filtration requested: keep every row. The mask is
+            # reused below (stats/draw) and right after the draw block.
+            filter_bool = np.ones(len(feature_matrix), dtype=bool)
+
         if draw:
-            # The filter mask is reused below and right after the draw block, so
-            # make sure it exists even when no frequency filtration was requested.
-            if not countf and not countf_rel:
-                filter_bool = np.ones(len(feature_matrix), dtype=bool)
 
             peaks_num = filter_bool.sum()
             if peaks_num > 0:
@@ -2858,6 +2932,13 @@ class Pipeline:
                         f"draw_borders={draw_borders!r}"
                     )
                 rand_spec = np.random.choice(spec_candidates)
+                # feature_matrix stores LOCAL (per-ROI) spectrum indices when
+                # local_roi_idx=True, but audit_processing/_draw_raw expect GLOBAL
+                # indices; convert back so the drawn spectra match the labeled ROI.
+                if local_roi_idx:
+                    idx_map = Indexator(rand_ds.roi_metadata.loc[rand_roi, 'idxroi'])
+                    local_to_global = dict(zip(range(idx_map.count), idx_map))
+                    rand_spec = local_to_global[rand_spec]
 
                 # ------------------- draw every m/z window sequentially -------------------
                 for mz_borders in draw_borders_list:
@@ -2869,11 +2950,23 @@ class Pipeline:
                     )
                     graphs, leg = axes_prob.get_legend_handles_labels()
                     axes_spectrum = axes_prob.twinx()
-                    legend1 = axes_spectrum.legend(graphs, leg, loc='upper left', framealpha=0.95)
                     axes_spectrum.set_ylabel("Intensity")
+
+                    mean_mz, mean_intens = rand_ds.get_mean_spectrum(rand_roi, mz_range=mz_borders)
+                    if len(mean_mz) == 0:
+                        # No raw peaks inside this m/z window (rare for randomly
+                        # chosen windows): nothing meaningful to overlay, skip it.
+                        plt.close(fig)
+                        continue
+                    axes_spectrum.plot(mean_mz, mean_intens, color="r", alpha=0.85)
+
+                    # First-axis legend: create it BEFORE the spectra legend so the
+                    # later axes.legend() calls (mean spectrum + _draw) do not remove
+                    # it, and pin it to a high z-order so it renders on top of data.
+                    legend1 = axes_spectrum.legend(graphs, leg, loc='upper left', framealpha=0.95)
+                    legend1.set_zorder(10)
                     axes_spectrum.add_artist(legend1)
 
-                    axes_spectrum.plot(*rand_ds.get_mean_spectrum(rand_roi, mz_range=mz_borders), color="r", alpha=0.85)
                     axes_spectrum.legend([f'Mean spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}'], loc='upper right')
                     Drawer(rand_ds).audit_processing(
                         rand_roi, mz_borders, rand_spec, axes=axes_spectrum,
@@ -2885,6 +2978,8 @@ class Pipeline:
                     legend2 = axes_spectrum.get_legend()
                     legend2.get_texts()[1].set_text(f'Raw mass spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}, N{rand_spec}')
                     legend2.get_texts()[2].set_text(f'Processed mass spectrum. Sample: {rand_ds_name}, ROI: {rand_roi}, N{rand_spec}')
+                    if legend2 is not None:
+                        legend2.set_zorder(10)
 
                     Drawer._draw_mass_difference_map(
                         feature_matrix,
@@ -2913,10 +3008,7 @@ class Pipeline:
             nunique_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique peaks', c, '') for c in nunique_stats.columns] )
             dupl_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique consensus peaks', *c) for c in dupl_stats.columns] )
             show_df(pd.concat([nunique_stats, dupl_stats], axis=1), 'Peaks statistics')
-        # if draw:
-        #     rand_num = np.random.randint(0,feature_matrix[filter_bool].shape[0])
-        #     col_idx = feature_matrix.columns.get_loc("mz")
-        #     peak_mz = feature_matrix.iat[rand_num, col_idx]
+ 
   
         if pivot_values is not None:
             feature_matrix = feature_matrix.pivot_table(index= [name for name in feature_matrix.index.names if name is not None], 
@@ -2939,13 +3031,43 @@ class Pipeline:
             save_path = os.path.abspath(save_path)
             dirpath = os.path.dirname(save_path)
             os.makedirs(dirpath, exist_ok=True)
+            file_name = os.path.splitext(os.path.basename(save_path))[0]
             if not save_path.endswith('.parquet'):
                 save_path += '.parquet'
             feature_matrix.to_parquet(save_path)
             if not merge_with_coords:
-                coords.to_parquet(os.path.join(dirpath, 'coordinates.parquet'))
+                coords = coords.loc[coords.index.isin(feature_matrix.index)]
+                coords.to_parquet(os.path.join(dirpath, file_name + '_coordinates.parquet'))
+
+            if _save_binning_rule:
+                if binning_rule_save_path is None:
+                    binning_rule_save_path = os.path.join(dirpath,
+                                                          file_name + '_binning_rule.parquet')
+                else:
+                    binning_rule_save_path = os.path.abspath(binning_rule_save_path)
+                    if not binning_rule_save_path.endswith('.parquet'):
+                        binning_rule_save_path += '.parquet'
+                br_dirpath = os.path.dirname(binning_rule_save_path)
+                if br_dirpath:
+                    os.makedirs(br_dirpath, exist_ok=True)
+                # Keep only the bins whose peak centres correspond exactly to
+                # the columns of the final feature matrix (the countf /
+                # countf_rel frequency filtration has already been applied).
+                # This makes the rule reusable for mapping new data into the
+                # same feature set without creating new features.
+                if pivot_values is not None:
+                    if feature_matrix.columns.nlevels > 1:
+                        final_mz_values = feature_matrix.columns.get_level_values('mz').dropna().unique()
+                    else:
+                        final_mz_values = feature_matrix.columns.dropna().unique()
+                else:
+                    final_mz_values = feature_matrix['mz'].dropna().unique()
+                binning_rule = binning_rule[binning_rule['peak_mz'].isin(final_mz_values)]
+                binning_rule = binning_rule.sort_values('peak_mz').reset_index(drop=True)
+                binning_rule.to_parquet(binning_rule_save_path)
+                print(f"Binning rule table saved to {binning_rule_save_path}")
                 
-            with open(os.path.join(dirpath, 'aggregation_configs.yaml'), 'w', encoding='utf-8') as f:
+            with open(os.path.join(dirpath, file_name + '_aggregation_configs.yaml'), 'w', encoding='utf-8') as f:
                 sample_dict = {}
                 for sample, roi in multiindex_keys:
                     sample_dict[sample] = sample_dict.get(sample, []) + [roi]
@@ -2956,7 +3078,8 @@ class Pipeline:
                            'pivoting values': pivot_values, 
                            'fill values on pivoting': fill_values, 
                            'merge_with_coords': merge_with_coords, 
-                           'local_roi_idx': local_roi_idx}, f, allow_unicode=True, sort_keys=False)
+                           'local_roi_idx': local_roi_idx,
+                           'pdf_fwhm_merge_factor': pdf_fwhm_merge_factor}, f, allow_unicode=True, sort_keys=False)
         # if draw:
         #     draw_mz_borders = (peak_mz - draw_borders, peak_mz + draw_borders)
             # Drawer._draw_datasets_mzcorrection(dataset, kde_mz, kde_density, sample_rois_map = sample_rois_map, draw_mz_borders = draw_mz_borders, countf_rel=countf_rel, countf=countf, duplicates_drop=duplicates_drop, cpu_num=cpu_num)
@@ -3012,21 +3135,6 @@ class Pipeline:
             idxs = rmeta["idxroi"]
         # Get per-ROI PipelineConfigurator pipeline functions and its configs from PreparedDataSource
         roi_configs = self.roi_configs[roi]
-        if __debug__:
-            # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
-            import sys as _sys
-            try:
-                _step_cfg = roi_configs.get_step_configs("process")
-                _step_methods = getattr(_step_cfg, "configs", {}).get("methods", {})
-                _sfn = getattr(roi_configs, "_step_func_names", None)
-                print(f"[DBG pipeline] roi={roi} | roi_configs_type={type(roi_configs).__name__} "
-                    f"| full_methods.Baseline.keys={list(((getattr(roi_configs,'configs',{}) or {}).get('methods') or {}).get('Baseline', {}).keys())} "
-                    f"| _step_func_names['process']={sorted(_sfn.get('process', [])) if _sfn else 'N/A'} "
-                    f"| step_cfg.methods.Baseline.keys={list(_step_methods.get('Baseline', {}).keys())}",
-                    file=_sys.stderr)
-            except Exception as _e:
-                print(f"[DBG pipeline] roi={roi} get_step_configs FAILED: {type(_e).__name__}: {_e}", file=_sys.stderr)
-            # ---- END TEMP DIAGNOSTIC LOGGING ----
         preprocess_function = roi_configs._preprocess_function
         
         mz = None
@@ -3246,22 +3354,6 @@ class Pipeline:
         for n, (_mz, raw_intensity) in enumerate(batch_iter):
             _mz, proc_intensity = process_function(_mz, raw_intensity, proc_configs, **internal_proc_configs)
             peaklists[n] = peakpick_function(_mz, np.asarray(proc_intensity, dtype=dtypeconv).squeeze(), idxs_list[n], peakpick_configs, **internal_peakpick_configs)
-        if __debug__:
-            # ---- TEMP DIAGNOSTIC LOGGING (remove after validation) ----
-            import sys as _sys
-            _info = []
-            for _k, _v in peaklists.items():
-                if _v is None:
-                    _info.append(f"spectra_ind={idxs_list[_k]} -> None (no peaks)")
-                else:
-                    _info.append(f"spectra_ind={idxs_list[_k]} -> ndarray shape={np.shape(_v)} dtype={np.asarray(_v).dtype}")
-            print(f"[DBG _peakpick_wrapper] batch spectra={len(peaklists)} "
-                f"| none_count={sum(1 for v in peaklists.values() if v is None)} "
-                f"| unique_shapes={sorted({tuple(np.asarray(v).shape) for v in peaklists.values()})}",
-                file=_sys.stderr)
-            for _line in _info:
-                print(f"[DBG _peakpick_wrapper] {_line}", file=_sys.stderr)
-            # ---- END TEMP DIAGNOSTIC LOGGING ----
 
         return np.vstack(tuple(peaklists.values()))
     

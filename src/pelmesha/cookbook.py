@@ -453,6 +453,14 @@ def _callable_fallback(dumper: yaml.Dumper, data: object) -> yaml.Node:
 
 yaml.add_multi_representer(object, _callable_fallback)
 
+yaml.add_multi_representer(np.floating, lambda d, o: d.represent_float(float(o)))
+yaml.add_multi_representer(np.integer,  lambda d, o: d.represent_int(int(o)))
+yaml.add_multi_representer(np.bool_,    lambda d, o: d.represent_bool(bool(o)))
+def _numpy_array(dumper, obj):
+    # .tolist() yields plain Python lists of native scalars for numeric dtypes
+    return dumper.represent_list(obj.tolist())
+yaml.add_multi_representer(np.ndarray,  _numpy_array)   # any np.array(...)
+
 yaml.add_constructor("!obj", _yaml_to_callable, Loader=yaml.FullLoader)
 yaml.add_constructor("!obj", _yaml_to_callable, Loader=yaml.UnsafeLoader)
 yaml.add_constructor("!obj", _yaml_to_callable, Loader=yaml.Loader)

@@ -676,7 +676,8 @@ def apply_kde_mzcorrection(peaklist: pd.DataFrame,
                            kde_mz: np.ndarray,
                            kde_density: np.ndarray,
                            pdf_fwhm_merge_factor: float = 0.85,
-                           cpu_num: int = 1) -> pd.DataFrame:
+                           cpu_num: int = 1,
+                           return_binning_rule: bool = False) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """Correct the m/z values of the peaks using a KDE density.
 
     Detects peaks in the combined kernel density estimate with
@@ -699,14 +700,20 @@ def apply_kde_mzcorrection(peaklist: pd.DataFrame,
         can be split into two adjacent bins due to numerical or discretization artifacts.
     cpu_num : int, optional
         Number of processes used for the correction. Default ``1``.
+    return_binning_rule : bool, optional
+        If ``True``, additionally return the binning-rule table built from
+        the detected KDE peaks with columns ``peak_mz``, ``bin_left_edge``,
+        ``bin_right_edge`` and ``pdf_y`` (default ``False``).
 
     Returns
     -------
-    pd.DataFrame
+    pd.DataFrame or tuple of pd.DataFrame
         A new peak table with the corrected ``mz`` values (and a ``Density``
-        column when the KDE data include density values).
+        column when the KDE data include density values). When
+        ``return_binning_rule=True``, returns a tuple
+        ``(corrected_peak_table, binning_rule_table)``.
     """
-    Xp, Xl, Xr, _ = mspeaks_KD(kde_mz,kde_density, pdf_fwhm_merge_factor = pdf_fwhm_merge_factor)
+    Xp, Xl, Xr, pdf_y = mspeaks_KD(kde_mz,kde_density, pdf_fwhm_merge_factor = pdf_fwhm_merge_factor)
     mz_sequence = np.sort(peaklist['mz'].unique())
     mz_num = len(mz_sequence)
     if mz_num < cpu_num*3:
@@ -730,6 +737,14 @@ def apply_kde_mzcorrection(peaklist: pd.DataFrame,
     with Pool(cpu_num) as p:
         grftable = p.starmap(Peak_assignment,par_args)
     grftable=pd.concat(grftable)
+    if return_binning_rule:
+        binning_rule = pd.DataFrame({
+            'peak_mz': Xp,
+            'bin_left_edge': Xl,
+            'bin_right_edge': Xr,
+            'pdf_y': pdf_y,
+        })
+        return grftable, binning_rule
     return grftable
 
 def _consesusing_peaks(peaklists: pd.DataFrame):
@@ -774,7 +789,7 @@ def _consesusing_peaks(peaklists: pd.DataFrame):
     base_index = [name for name in peaklists.index.names if name is not None]
     group_keys = base_index + ['spectra_ind', 'mz']
 
-    result = peaklists.groupby(group_keys, as_index=False).agg(dict4drop)
+    result = peaklists.reset_index().groupby(group_keys, as_index=False).agg(dict4drop)
 
     return result.set_index(base_index)
 
@@ -856,33 +871,41 @@ def _nunique_summary(feature_series: pd.Series,
 def _frequency_filtration(series: pd.Series,
                             countf: int | float | None = 10,
                             countf_rel: float | None = None) -> pd.Series:
-    """Filter peaks that occur with a minimum multiplicity.
+    """Build a boolean mask that keeps peaks occurring with a minimum frequency.
 
-    Keeps only the rows whose ``mz`` value appears at least ``countf`` times in
-    ``peaklist``. A relative threshold ``countf_rel`` (a fraction of the total
-    number of rows) may be supplied instead of, or in addition to, the absolute
-    one; when both are given the stricter (larger) threshold wins.
+    The filter is applied **globally by ``m/z`` value**, not per index entry:
+    a given ``m/z`` is either kept in every row where it appears or dropped
+    from all of them. The frequency of an ``m/z`` is the number of distinct
+    index entries (e.g. ``(sample, roi)`` pairs) in which that ``m/z`` was
+    detected; duplicate rows sharing the same index entry *and* the same
+    ``m/z`` count only once.
 
     Parameters
     ----------
-    peaklist : pd.DataFrame
-        Feature matrix that must contain an ``mz`` column.
+    series : pd.Series
+        The ``m/z`` column of the feature matrix. Its index is typically a
+        MultiIndex such as ``('sample', 'roi')``; the index is preserved in the
+        result but does not affect the per-row decision.
     countf : int | float | None, default 10
-        Minimum absolute occurrence count. Ignored when ``None``.
+        Minimum absolute frequency. A row is kept when its ``m/z`` occurs in at
+        least ``countf`` distinct index entries. Ignored when ``None``.
     countf_rel : float | None, default None
-        Minimum occurrence count expressed as a fraction of ``len(peaklist)``.
+        Minimum frequency expressed as a fraction of the number of unique index
+        entries (``series.index.unique().size``). May be given instead of, or
+        in addition to, ``countf``; when both are given the stricter (larger)
+        threshold wins.
 
     Returns
     -------
-    pd.DataFrame
-        A filtered copy of ``peaklist`` with only the original columns. The
-        input frame is never mutated.
+    pd.Series
+        Boolean mask aligned with ``series.index``: ``True`` where the row's
+        ``m/z`` frequency meets the threshold, ``False`` otherwise. Rows with a
+        NaN ``m/z`` are dropped (their mask value is ``False``).
 
     Raises
     ------
     ValueError
-        If ``countf`` is negative, if ``countf_rel`` is not within ``(0, 1]``,
-        or if ``peaklist`` has no ``mz`` column.
+        If ``countf`` is negative, or if ``countf_rel`` is not within ``(0, 1]``.
     """
     if countf is not None and countf < 0:
         raise ValueError(f"countf must be >= 0, got {countf!r}")
@@ -890,8 +913,11 @@ def _frequency_filtration(series: pd.Series,
         raise ValueError(f"countf_rel must be in (0, 1], got {countf_rel!r}")
 
     if countf is None and countf_rel is None:
+        # No threshold requested: keep every row.
         return pd.Series(True, index=series.index)
 
+    # Resolve the effective threshold: the absolute ``countf``, or ``countf_rel``
+    # as a fraction of the number of unique index entries; the stricter one wins.
     threshold = countf
     if countf_rel is not None:
         rel_threshold = countf_rel * series.index.unique().size
@@ -900,18 +926,22 @@ def _frequency_filtration(series: pd.Series,
             if threshold is None
             else max(threshold, rel_threshold)
         )
-    
+
+    # Count how many distinct index entries (e.g. (sample, roi)) contain each
+    # m/z value. drop_duplicates() collapses rows that share the same index
+    # entry AND the same m/z, so duplicates within one entry count only once.
     target_col = series.name if series.name is not None else "value"
     working_series = series if series.name is not None else series.rename(target_col)
-    # Count occurrences of each m/z and keep rows meeting the threshold. When counting unqiue peaks - ignoring duplicates
     counts = (
-        working_series.reset_index()
-        .drop_duplicates()[target_col]
-        .value_counts())
-    
+        working_series.reset_index()   # MultiIndex -> regular columns
+        .drop_duplicates()             # one row per (index entry, m/z) pair
+        [target_col]                   # keep only the m/z column
+        .value_counts()                # global frequency of each m/z value
+    )
+
+    # Map each row's m/z value to its global frequency (lookup by value; the
+    # index is only carried along), then keep the rows meeting the threshold.
     peaklist_counts = series.map(counts)
-    # return peaklist.loc[
-    #     peaklist_with_counts["count"] >= threshold]
     return peaklist_counts >= threshold
 
 def show_df(dataframe, title=""):
@@ -1401,10 +1431,10 @@ def _peakpicker_core(mz: np.ndarray,
     # the two arrays stay length-aligned; mismatched domains make the downstream
     # kernels (SNR windows, FWHM, area) index a shorter array and can stall or
     # crash a worker process under multiprocessing.
-    
+    float_threshold = np.finfo(intens.dtype).eps * 10.0
     if resampled_discontiniuous:
         
-        float_threshold = np.finfo(intens.dtype).eps * 10.0
+
         non_zero_plaetau_mask = intens > float_threshold
         valley_dots = np.abs(intens[1:] - intens[:-1]) > float_threshold
 

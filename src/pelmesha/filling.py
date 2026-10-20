@@ -645,7 +645,13 @@ class DataSource:
                 batch_intens.append(intens)
 
             values, counts = np.unique(np.concatenate(batch_mz, axis=0), return_counts=True)
-            if len(values[counts > 1])/len(values) < 0.33: # TODO Понять бы зачем это написано, есть ли в этом смысл и не является ли чем-то потенциальным для ошибок  
+            if len(values) == 0:
+                # No m/z points inside the requested window across the pilot batch
+                # (e.g. a narrow draw window that contains no raw peaks). Return
+                # empty arrays so callers can detect "no data in this window"
+                # instead of crashing on the division by zero below.
+                return np.array([]), np.array([])
+            if len(values[counts > 1])/len(values) < 0.33: # TODO Понять бы зачем это написано, есть ли в этом смысл и не является ли чем-то потенциальным для ошибок
                 # Если общих точек дискретизации m/z, которые совпадают хотя бы раз со всех масс спектров пробного батча,
                 #  менее 33%, то считаем, что полученные данные с орбитрепа.
                 roi = self._get_roi(self._normalize_indices(pilot_batch))
@@ -768,7 +774,7 @@ class DataSource:
             remainder_count = 0
             
             for idx in idxs:
-                assert idx.size == 2 # TODO del
+                assert idx.size == 2 # TODO del or create test
                 segment_size = idx[1]-idx[0]
                 if remainder:
                     if remainder_count+segment_size >= chunk_size:
@@ -1036,7 +1042,61 @@ class BaseLoader(ABC):
             min_mz = min(min_mz, mz[0])
             max_mz = max(max_mz, mz[-1])
         return (min_mz, max_mz)
-    # def get_mz_discretization(self,)
+    def get_mz_discretization(self, idxs, degree = 3, mz_range = None, draw = True):
+        n_med = 75
+        nsize_matrix = degree + 1
+        sum_XTX = np.zeros((nsize_matrix, nsize_matrix))
+        sum_XTy = np.zeros(nsize_matrix)
+        if self.dcont: #Достаточно одного спектра
+            start_idx = idxs[0][0]
+            idxs = Indexator([start_idx, start_idx+1])
+        if mz_range:
+            mz_min, mz_max = mz_range
+        else:
+            mz_min, mz_max = self.get_mz_range(idxs)
+        
+        for mz in self.get_mz_stream(idxs):
+            diff_mz = np.diff(mz)
+            d_size = diff_mz.size
+            if d_size <= 7:
+                continue
+            d_med = max(min(n_med, int(d_size*0.1)),7)
+            d_med -= (d_med % 2 == 0)
+            
+            diff_mz = medfilt(diff_mz, int(d_med))
+            
+            # x,c =
+            mz_vander = np.vander(mz[:-1], nsize_matrix, increasing = True)
+            sum_XTX += mz_vander.T @ mz_vander
+            sum_XTy += mz_vander.T @ diff_mz
+        discret_coeffs = np.linalg.solve(sum_XTX, sum_XTy)
+
+        #перепроверка на равномерность дискретизации шкалы
+        mz_discret = polyval(np.linspace(mz_min, mz_max, 100000), discret_coeffs)
+        discret_mean = np.mean(mz_discret)
+        discret_std = np.std(mz_discret,ddof=1)
+        if discret_std/discret_mean < 0.10: # Коэффициент ковариации
+            discret_coeffs = np.linalg.solve(sum_XTX[:1, degree:], sum_XTy[degree:])     # discret_coeffs = np.linalg.solve(sum_XTX[degree:,:1], sum_XTy[:1])
+
+
+        if draw:
+            plt.figure(figsize = (25,4))
+            plt.plot(mz[:-1], medfilt(np.diff(mz),n_med))
+            plot_mz_discret = polyval(mz[:-1], discret_coeffs)
+            plt.plot(mz[:-1],plot_mz_discret )
+            plt.ylabel('m/z discretion')
+            difference = medfilt(np.diff(mz),n_med) - plot_mz_discret 
+            difference_plus = difference.copy()
+            difference_minus = difference.copy()
+            difference_plus[difference < 0] = 0
+            difference_minus[difference > 0] = 0
+            plt.fill_between(mz[:-1], plot_mz_discret, plot_mz_discret + difference_plus, color='orange', alpha=0.15)
+            plt.fill_between(mz[:-1], plot_mz_discret, plot_mz_discret + difference_minus, where=(difference <= 0), color='blue', alpha=0.15)
+            
+            plt.legend(["median filtered m/z discretization example", "m/z discretization regression", 'Filter > Fit' , 'Filter < Fit'])
+            plt.xlabel('m/z')
+        return discret_coeffs
+        
     def get_mz_discretion_coeffs(self, idxs, degree = 3, mz_range = None, draw = True):
         """
         LEGACY IN FUTURE. new function ``get_mz_discretization``
@@ -1712,6 +1772,15 @@ class loader_cdf(BaseLoader):
         return metadata, roi_metadata, specdata
 
     def get_spectrum_sizes(self, idxs = None):
+        """
+        Return the number of points in each spectrum.
+
+        :param idxs: Indexes of spectra to retrieve.
+        :type idxs: int, np.ndarray, SliceIndexator, optional
+
+        :return: List of spectrum sizes.
+        :rtype: list
+        """
         if isinstance(idxs, (np.ndarray, SliceIndexator)):
             if isinstance(idxs, np.ndarray):
                 idxs = SliceIndexator(idxs)
@@ -1720,7 +1789,7 @@ class loader_cdf(BaseLoader):
                 spec_lengths.extend(self.source['point_count'].values[idx_slice])
             return spec_lengths
         elif isinstance(idxs, int):
-            return [idxs]
+            return [self.source['point_count'][idxs].item()]
         else:
             raise ValueError("Invalid index type")
 
