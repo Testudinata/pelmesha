@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     from pelmesha.cookbook import Configs
 
 FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2))  # Conversion factor from FWHM to sigma.
+_HEADERS = ["spectra_ind", "mz", "Intensity", "Area", "SNR",
+                "FWHM", "PextL", "PextR", "Noise", "Mean noise"]
+
 ###########################################
 #   Base pipeline functions               #
 ###########################################
@@ -74,29 +77,29 @@ def preprocess_configuration_base(
    
     if baseline_algo:
         if datasource.dcont:
-            internal_configs['process']['Baseliner'] = getattr(Baseline(datasource.get_mz(rmeta['idxroi'].ravel()[0]), **configs['Baseline'], assume_sorted = True), baseline_algo)
+            internal_configs['process']['Baseliner'] = getattr(Baseline(datasource.get_mz(rmeta['idxroi'].ravel()[0]), 
+                                                                        **configs['Baseline'], 
+                                                                        assume_sorted = True), 
+                                                                        baseline_algo)
         else:
             internal_configs['process']['Baseliner'] = baseline_algo
 
     
     # Configure headers conditionally based on processing flags 
-    if configs['peakpicker']["SNR_threshold"] and configs['peakpicker']["return_areas"]:
-        headers_list = ["spectra_ind", "mz", "Intensity", "Area", "SNR",  
-                        "PextL", "PextR", "FWHM", "Noise", "Mean noise"]
-        
-    elif configs['peakpicker']["SNR_threshold"]:
-        headers_list = ["spectra_ind", "mz", "Intensity", "SNR",  
-                        "PextL", "PextR", "FWHM", "Noise", "Mean noise"]
-    elif configs['peakpicker']["return_areas"]:
-        headers_list = ["spectra_ind", "mz", "Intensity", "Area",  
-                        "PextL", "PextR", "FWHM"]
-    else: 
-        headers_list = ["spectra_ind", "mz", "Intensity",  
-                        "PextL", "PextR", "FWHM"]
+    headers_list = _build_headers(configs['peakpicker']["return_areas"],
+                                 configs['peakpicker']["SNR_threshold"])
 
     internal_configs['peakpick'] = {"headers": headers_list}
-    internal_configs['peakpick']['resampled_discontiniuous'] = not datasource.dcont and resampled_mz is not None
+    internal_configs['peakpick']['resampled_discontinuous'] = not datasource.dcont and resampled_mz is not None
     return resampled_mz, headers_list, internal_configs
+
+def _build_headers(return_areas, snr_threshold):
+    available = {"spectra_ind", "mz", "Intensity", "PextL", "PextR", "FWHM"}
+    if return_areas:
+        available.add("Area")
+    if snr_threshold is not None:
+        available |= {"SNR", "Noise", "Mean noise"}
+    return [h for h in _HEADERS if h in available]
 
 def process_spectra_base(
     mz: np.ndarray,
@@ -197,7 +200,7 @@ def peakpicking_base(
     return peakpicker(mz, 
                       intensity, 
                       idx,
-                      resampled_discontiniuous = internal_configs['resampled_discontiniuous'],
+                      resampled_discontinuous = internal_configs['resampled_discontinuous'],
                       headers = internal_configs['headers'],
                       **configs)
 
@@ -348,26 +351,53 @@ def resample_mz_scale(mz_min: float,
     
 ### Smoothing
 def smoothing(y: np.ndarray, 
-              smooth_algo: str = None, 
+              smooth_algo: str = "GA", 
               smooth_window: int = 7, 
               smooth_cycles: int = 1) -> np.ndarray:
-    """Smoothing function.
+    """Smooth a 1-D array.
+
+    Applies one of the supported smoothing algorithms to `y`, repeating
+    the procedure `smooth_cycles` times (each pass smooths the result of
+    the previous one). An even window is automatically incremented by 1
+    so that it stays odd — this preserves symmetry around the central
+    sample for the window-based methods (MA, SG).
 
     Parameters
     ----------
     y : np.ndarray
-        Array to be smoothed.
+        1-D array of values (e.g., a time series).
     smooth_algo : str, optional
-        Smoothing algorithm. Default is 'None'.
+        Smoothing algorithm. Supported values:
+
+        - `'MA'` — moving average via convolution, with edge padding
+          (`mode='edge'`) so the output keeps the input length;
+        - `'GA'` — Gaussian filter (scipy `gaussian_filter1d`,
+          `mode='mirror'`);
+        - `'SG'` — Savitzky–Golay filter (`savgol_filter`,
+          `polyorder=3`, `mode='mirror'`).
+
+        If an unrecognized value is passed, a warning is printed and
+        the input array is returned unchanged. Default is `'GA'`.
     smooth_window : int, optional
-        Window size. Default is 7.
+        Smoothing window size in samples. For `MA` and `SG` the window
+        is forced to be odd: an even value is incremented by 1. Also
+        serves as the characteristic width for the Gaussian filter
+        (sigma is fixed at 1.0). Default is 7.
     smooth_cycles : int, optional
-        Number of cycles. Default is 1.
+        Number of consecutive applications of the algorithm. Values
+        greater than 1 produce stronger smoothing at the cost of more
+        feature blurring. Default is 1.
 
     Returns
     -------
     np.ndarray
-        Smoothed array.
+        A smoothed copy of `y`.
+
+    Examples
+    --------
+    >>> y = np.array([1.0, 5.0, 2.0, 8.0, 3.0, 7.0, 4.0])
+    >>> smoothing(y, smooth_algo='MA', smooth_window=3)
+    array([...])  # smoothed series of the same length
     """
     if len(y) == 0:
         return np.array([])
@@ -421,8 +451,8 @@ def _savgol(y, window, cycles, order=3):
 def peakpicker(mz: np.ndarray,
                intens: np.ndarray,
                spectra_ind: int,
-               fwhm_filter: float | tuple[float, float] | list[float, float]
-                          | np.ndarray[float, float] | None = None,
+               fwhm_min: float | None = None,
+               fwhm_max: float | None = None,
                fwhm_merge_factor: float | None = None,
                heightfilter: float | None = None,
                rel_heightfilter: float | None = None,
@@ -431,10 +461,8 @@ def peakpicker(mz: np.ndarray,
                SNR_threshold: float | None = 3.5,
                noise_mz_width: float = 9.0,
                return_areas: bool = True,
-               resampled_discontiniuous: bool = False,
-               headers: list[str] = ["spectra_ind", "mz", "Intensity", "Area",
-                                     "SNR", "FWHM", "PextL", "PextR",
-                                     "Noise", "Mean noise"]
+               resampled_discontinuous: bool = False,
+               headers: list[str] | tuple[str] = _HEADERS
                ) -> np.ndarray:
     """Detect and characterise peaks in a profile mass spectrum.
 
@@ -526,14 +554,15 @@ def peakpicker(mz: np.ndarray,
                                                                                                   intens,
                                                                                                   heightfilter,
                                                                                                   rel_heightfilter,
-                                                                                                  fwhm_filter,
+                                                                                                  fwhm_min,
+                                                                                                  fwhm_max,
                                                                                                   SNR_threshold,
                                                                                                   noise_mz_width,
                                                                                                   fwhm_merge_factor,
                                                                                                   peaklocation,
                                                                                                   return_areas,
                                                                                                   noise_est_iter,
-                                                                                                  resampled_discontiniuous)
+                                                                                                  resampled_discontinuous)
     n_peaks = pmz.size
     if n_peaks == 0:
         return np.empty((0, len(headers)), dtype=np.float64)
@@ -549,7 +578,8 @@ def peakpicker(mz: np.ndarray,
     props["PextL"] = pext_left
     props["PextR"] = pext_right
     props["FWHM"] = pfwhm
-    return np.column_stack([props[header] for header in headers])
+    # headers = [h for h in headers if h in props]
+    return np.column_stack([props[h] for h in headers])
 
 def peakpicker_legacy(mz,
               intens,
@@ -738,7 +768,6 @@ def peakpicker_legacy(mz,
             right_min = np.delete(right_min, j)
             props["FWHML"] = np.delete(props["FWHML"], j + 1)
             props["FWHMR"] = np.delete(props["FWHMR"], j)
-            ## New TODO: Test
             stack_j = np.vstack((j,j+1))
             pos_peak_oversegmentation = pos_peak[stack_j]
             val_max_oversegmentation = val_max[stack_j]
@@ -963,28 +992,17 @@ def _compute_KDE(peaklist: pd.DataFrame,
             mz_discret = mz_model(peaklist['mz'])
             
             low_band_bool = peaklist['KD_bandwidth'] < mz_discret
+            # TODO мутация входного пиклиста - weak point. При переходе на поларс - сама решится, но не забыть об этом
             peaklist.loc[low_band_bool,'KD_bandwidth'] = (mz_discret[low_band_bool]*bwc).astype(peaklist['KD_bandwidth'].dtype)
     elif KD_bandwidth == "mz_discret":
-        peaklist.loc[:,'KD_bandwidth'] = mz_model(peaklist['mz'])*bwc
+        peaklist.loc[:,'KD_bandwidth'] = mz_model(peaklist['mz'])*bwc 
     else:
         peaklist.loc[:,'KD_bandwidth'] = KD_bandwidth*bwc
     KD_data = split_pdtable_by_peaks_gap(peaklist, 
                                          split_mz_min = split_mz_min, 
                                          split_peaks_min = split_peaks_min)
 
-    if __debug__: # TODO В тест
-        eps = np.finfo(np.float64).eps
-
-        for (mz_a, bw_a), (mz_b, bw_b) in zip(KD_data[:-1], KD_data[1:]):
-            seg_a_max = mz_a[-1] + 6.0 * bw_a[-1]   # правый край сетки сегмента A
-            seg_b_min = mz_b[0] - 6.0 * bw_b[0]     # левый край сетки сегмента B
-            scale = max(abs(seg_a_max), abs(seg_b_min), 1.0)
-            assert seg_a_max <= seg_b_min + eps * scale, \
-                f"Сетки сегментов пересекаются: segA_max={seg_a_max:.16g} > segB_min={seg_b_min:.16g} + {eps*scale:.2g}"
-            
-            assert len(mz_a) > 1 and len(mz_b) > 1, f"Сетки сегментов должны быть длиннее 1 {mz_a}, {mz_b}"  
     n_segments = len(KD_data) 
-    assert peaklist['mz'].count() == sum( len(t[0]) for t in KD_data) # TODO В тест
     X_plot = [None] * n_segments
     Y_plot = [None] * n_segments
     

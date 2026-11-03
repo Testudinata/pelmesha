@@ -76,6 +76,7 @@ class DataSet:
                  kde_configs: dict[str,KDEConfigs] | KDEConfigs | str = None,
                  RamGb_limit_usage: float = 2,
                  rebuild_metadata: bool = False,
+                 draw_mz_discretization: bool = False,
                  **kwargs):
         """
         Initialize a DataSet instance.
@@ -97,16 +98,21 @@ class DataSet:
             RAM limit in GB used for batch processing. Default ``2``.
         rebuild_metadata : bool, optional
             Force re-creation of the metadata files even if they already exist. Default ``False``.
+        draw_mz_discretization : bool, optional
+            Whether to draw the interpolation result of the m/z scale
+            discretization while (re)building metadata. Default ``False``.
         """
         self.sources = {}
         self.RamGb_limit_usage = RamGb_limit_usage
+        self.draw_mz_discretization = draw_mz_discretization
         self._reference_file_path = None
         self.reference_source: PreparedDataSource = None
         self._reference_peaks = None
         self._reference_peaks_weights = None
 
         if sources is not None:
-            self.add_sources(sources, configs, kde_configs, rebuild_metadata=rebuild_metadata, **kwargs)
+            self.add_sources(sources, configs, kde_configs, rebuild_metadata=rebuild_metadata,
+                             draw_mz_discretization=draw_mz_discretization, **kwargs)
 
         elif sources is None and (configs is not None or kde_configs is not None or kwargs):
             warnings.warn("No sources provided. Configs or KDE configs are skipped. Use add_sources to add sources with configs.")
@@ -122,6 +128,7 @@ class DataSet:
                              configs: PipelineConfigurator | dict[str, PipelineConfigurator] | None = None,
                              kde_configs: KDEConfigs | dict[str, KDEConfigs] | None = None,
                              rebuild_metadata: bool = False,
+                             draw_mz_discretization: bool = False,
                              **kwargs):
         """
         Set the reference source used to generate the reference peak list.
@@ -138,6 +145,9 @@ class DataSet:
             Processing configs to apply. Default ``None``.
         kde_configs : KDEConfigs | dict[str, KDEConfigs] | None, optional
             KDE configs to apply. Default ``None``.
+        draw_mz_discretization : bool, optional
+            Whether to draw the interpolation result of the m/z scale
+            discretization while (re)building metadata. Default ``False``.
         **kwargs
             Additional keyword arguments forwarded to config resolution.
         """
@@ -152,11 +162,12 @@ class DataSet:
             else:
                 source.update_kde(**KDEkwargs)
             if rebuild_metadata:
-                source._datasource.create_metafile(rebuild_metadata=True)
+                source._datasource.create_metafile(rebuild_metadata=True, draw=draw_mz_discretization)
                 source._datasource.reload_metadata()
         else:
             if isinstance(source, (DataSource, str)):
-                source = PreparedDataSource(source, configs, kde_configs, rebuild_metadata = rebuild_metadata, **kwargs)
+                source = PreparedDataSource(source, configs, kde_configs, rebuild_metadata = rebuild_metadata,
+                                            draw_mz_discretization=draw_mz_discretization, **kwargs)
 
         self.reference_source = source
 
@@ -465,7 +476,8 @@ class DataSet:
     #################################################
     # Sources methods                               #
     #################################################
-    def add_sources(self, source, config = None, kde_configs = None, extensions = None, rebuild_metadata = False, **kwargs):
+    def add_sources(self, source, config = None, kde_configs = None, extensions = None, rebuild_metadata = False,
+                    draw_mz_discretization: bool = False, **kwargs):
         """
         Add one or more data sources to the DataSet.
 
@@ -488,6 +500,9 @@ class DataSet:
             If ``None``, uses the module default supported extensions.
         rebuild_metadata : bool, optional
             Force re-creation of the metadata files even if they already exist. Default ``False``.
+        draw_mz_discretization : bool, optional
+            Whether to draw the interpolation result of the m/z scale
+            discretization while (re)building metadata. Default ``False``.
 
         Raises
         ------
@@ -501,16 +516,21 @@ class DataSet:
         if isinstance(source, dict):
             for path, cfg in source.items():
                 if os.path.isdir(path):
-                    self.add_sources_from_paths([path], extensions, cfg, rebuild_metadata=rebuild_metadata)
+                    self.add_sources_from_paths([path], extensions, cfg, rebuild_metadata=rebuild_metadata,
+                                                draw_mz_discretization=draw_mz_discretization)
                 else:
-                    self._add_single_source(path, cfg, rebuild_metadata=rebuild_metadata)
+                    self._add_single_source(path, cfg, rebuild_metadata=rebuild_metadata,
+                                            draw_mz_discretization=draw_mz_discretization)
         elif isinstance(source, (list, tuple)):
-            self.add_sources_from_paths(source,extensions,config, kde_configs, rebuild_metadata, **kwargs) 
+            self.add_sources_from_paths(source,extensions,config, kde_configs, rebuild_metadata,
+                                        draw_mz_discretization=draw_mz_discretization, **kwargs)
         elif isinstance(source, str):
             if os.path.isdir(source):
-                self.add_sources_from_paths([source],extensions,config, kde_configs, rebuild_metadata, **kwargs)
+                self.add_sources_from_paths([source],extensions,config, kde_configs, rebuild_metadata,
+                                            draw_mz_discretization=draw_mz_discretization, **kwargs)
             else:
-                self._add_single_source(source, config, kde_configs, rebuild_metadata, **kwargs)
+                self._add_single_source(source, config, kde_configs, rebuild_metadata,
+                                        draw_mz_discretization=draw_mz_discretization, **kwargs)
         else:
             raise TypeError(f"Unsupported source type: {type(source)}")
 
@@ -523,7 +543,8 @@ class DataSet:
         self.add_sources(source, config, kde_configs, extensions)
         return self
 
-    def _add_single_source(self, path, config = None, kde_configs = None, rebuild_metadata = False, **kwargs):
+    def _add_single_source(self, path, config = None, kde_configs = None, rebuild_metadata = False,
+                           draw_mz_discretization: bool = False, **kwargs):
         """Internal: add a single source with duplicate protection."""
         if not os.path.exists(path):
             raise FileNotFoundError(f"Source path does not exist: {path}")
@@ -532,7 +553,8 @@ class DataSet:
         if folder_name != sample_name:
             sample_name = folder_name + "_" + sample_name
 
-        source = DataSource(path, rebuild_metadata=rebuild_metadata, RamGb_limit_usage = self.RamGb_limit_usage)
+        source = DataSource(path, rebuild_metadata=rebuild_metadata, RamGb_limit_usage = self.RamGb_limit_usage,
+                            draw_mz_discretization=draw_mz_discretization)
         if any(ds.file_path == source.file_path for ds in self.sources.values()):
             warnings.warn(f"File '{source.file_path}' has already been added to DataSet. Source re-adding with configs")
         elif sample_name in self.sources:
@@ -542,7 +564,8 @@ class DataSet:
                 f"Please, rename file name '{sample_name}' or folder '{folder_name}'"
             )
         resolved_config = self._resolve_config(config)
-        source = PreparedDataSource(source, resolved_config, kde_configs, **kwargs)
+        source = PreparedDataSource(source, resolved_config, kde_configs,
+                                    draw_mz_discretization=draw_mz_discretization, **kwargs)
         self.sources[sample_name] = source
 
     @staticmethod
@@ -574,7 +597,8 @@ class DataSet:
             return config
         return {}
 
-    def add_sources_from_paths(self, path_list, extensions = None, config = None, kde_configs = None, rebuild_metadata = False, **kwargs):
+    def add_sources_from_paths(self, path_list, extensions = None, config = None, kde_configs = None,
+                               rebuild_metadata = False, draw_mz_discretization: bool = False, **kwargs):
         """
         Search directories for data files with given extensions and add them as sources.
 
@@ -611,7 +635,8 @@ class DataSet:
 
         for path in found_paths:
             try:
-                self._add_single_source(path, config, kde_configs, rebuild_metadata=rebuild_metadata, **kwargs)
+                self._add_single_source(path, config, kde_configs, rebuild_metadata=rebuild_metadata,
+                                        draw_mz_discretization=draw_mz_discretization, **kwargs)
             except (ValueError, FileNotFoundError) as e:
                 warnings.warn(f"Skipping {path}: {type(e).__name__} {e}")
 
@@ -1949,7 +1974,7 @@ class Drawer():
         filter_mz_mask & feature_matrix["mz"].between(draw_mz_borders[0], draw_mz_borders[1]), 
         "mz"].sort_values().unique()
         for peak in Peaks_list:
-            # assert peak in excluded_peaks_list 
+             
             temp_query = feature_matrix.query("mz == @peak")
             color = plt.gca()._get_lines.get_next_color()
             peak_dot, = plt.plot([peak],[0],'|', markersize=12,alpha=1, color = color, mew =3)
@@ -2053,7 +2078,7 @@ class Drawer():
             
             if y_axis == 'coords':
                 coords = self.datasource.get_coords(idxs = r)
-                peaklists = peaklists.merge(coords, how = "left", left_on="spectra_ind", right_index=True) # TODO Попробовать срезать feature_matrix и остальные вещи где-то здесь по границам mz
+                peaklists = peaklists.merge(coords, how = "left", left_on="spectra_ind", right_index=True)
                 peaklists.set_index(list(coords.columns), inplace=True)
             else:
                 peaklists.set_index("spectra_ind", inplace=True)

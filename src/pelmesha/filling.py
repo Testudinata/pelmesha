@@ -31,7 +31,8 @@ class DataSource:
     Both continuous and discontinuous data are supported.
     """
 
-    def __init__(self, path, rebuild_metadata = False, RamGb_limit_usage = 2):
+    def __init__(self, path, rebuild_metadata = False, RamGb_limit_usage = 2,
+                 draw_mz_discretization: bool = False):
         """
         Initialize a data source.
 
@@ -44,6 +45,9 @@ class DataSource:
             already exists. Default ``False``.
         RamGb_limit_usage : int or float, optional
             RAM limit in GB used for batch processing. Default ``2``.
+        draw_mz_discretization : bool, optional
+            Whether to draw the interpolation result of the m/z scale
+            discretization while (re)building metadata. Default ``False``.
         """
 
         self.Ramcap = RamGb_limit_usage * (1024**3)
@@ -53,7 +57,8 @@ class DataSource:
         if folder_name != sample_name:
             sample_name = folder_name + "_" + sample_name
         self.sample_name = sample_name
-        self.loader = DataManager().get_loader(path)(path, rebuild_metadata = rebuild_metadata) # Composition pattern
+        self.loader = DataManager().get_loader(path)(path, rebuild_metadata = rebuild_metadata,
+                                                      draw_mz_discretization=draw_mz_discretization) # Composition pattern
         for attr_name in dir(self.loader):
             if not attr_name.startswith('_'): # Игнорируем приватные методы
                 attr = getattr(self.loader, attr_name)
@@ -273,7 +278,24 @@ class DataSource:
         return "".join(table.get(c, c) for c in str(text))
 
     def _normalize_indices(self, idxs):
+        """
+        Normalize various index input types into a uniform array of index segments.
 
+        Accepts ``None`` (uses all ROI segments), :class:`Indexator`,
+        :class:`SliceIndexator`, a ROI name (``str``), ``slice``, ``int``,
+        ``float``, ``list``/``tuple``, or a raw :class:`np.ndarray`. A flat
+        1-D array is reshaped into a single ``[start, stop)`` segment.
+
+        Parameters
+        ----------
+        idxs : None, str, slice, int, float, list, tuple, np.ndarray, Indexator or SliceIndexator
+            Indices to normalize.
+
+        Returns
+        -------
+        np.ndarray
+            Array of index segments with shape ``(n, 2)``.
+        """
         if idxs is None:
             idxs = np.concatenate(self.roi_metadata['idxroi'].to_numpy())
         elif isinstance(idxs, (Indexator, SliceIndexator)):
@@ -483,6 +505,26 @@ class DataSource:
     def get_coords(self,
                    idxs: np.ndarray | SliceIndexator | Indexator | int | None,
                    extract = None):
+        """
+        Load coordinate columns for the given spectra as a table.
+
+        Reads the pre-extracted coordinate datasets (e.g. ``x``, ``y``, ``z``
+        or retention time) from the metadata HDF5 file and returns them with
+        the spectrum index as the DataFrame index.
+
+        Parameters
+        ----------
+        idxs : np.ndarray, SliceIndexator, Indexator, int or None
+            Spectrum indices or index segments.
+        extract : list of str, optional
+            Coordinate names to load. If ``None``, all stored coordinates are
+            loaded.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Coordinates indexed by ``spectra_ind``.
+        """
         idxs = self._normalize_indices(idxs)
 
         with File(self.meta_file_path,"r") as hdf5:
@@ -545,7 +587,7 @@ class DataSource:
     def get_mean_spectrum(self,
                           roi = None,
                           idxs = None, 
-                          mz_range = None) -> tuple: #TODO Добавить сохранение если обрабатывается весь рои по всему диапазону. Всё равно он неизменен
+                          mz_range = None) -> tuple:
         """
         Compute the mean (average) mass spectrum over the specified indices.
 
@@ -774,7 +816,7 @@ class DataSource:
             remainder_count = 0
             
             for idx in idxs:
-                assert idx.size == 2 # TODO del or create test
+                
                 segment_size = idx[1]-idx[0]
                 if remainder:
                     if remainder_count+segment_size >= chunk_size:
@@ -828,7 +870,7 @@ class DataSource:
                     length_usage += spectrum_sizes[n]
                 idx_last = idx
             
-            if length_usage != 0:
+            if length_usage != 0 or idx_start <= idx_last:
                 
                 if remainder:
                     idxs_batches.append(np.vstack(remainder))
@@ -844,7 +886,6 @@ class DataSource:
             total = sum(e - s for s, e in idxs)
             if total == 0 or min_batches <= 1:
                 return np.asarray(idxs, dtype=np.int64)
-
             # 2. Накопленные точки на границах сегментов
             cum = [0]
             for s, e in idxs:
@@ -889,7 +930,7 @@ class DataSource:
                 # Продвигаем seg_j: если сегмент end_j исчерпан — следующий
                 seg_j = end_j + 1 if end >= idxs[end_j][1] else end_j
             idxs_batches = result
-        assert Indexator(np.vstack(idxs_batches)).count == Indexator(idxs).count, f' Пропали спектры! На выходе {Indexator(np.vstack(idxs_batches)).count} != на входе {Indexator(idxs).count}' # TODO delete
+        
         return idxs_batches
 
     def _default_save_path(self, suffix = "", prefix = "") -> str:
@@ -919,12 +960,29 @@ class DataSource:
         return os.path.join(dir_path, f"{prefix}{name}{suffix}")
     
     def peaklists(self, roi):
+        """
+        Load the peak list of a ROI as a DataFrame.
+
+        Reads the pre-computed peak lists (``peaklists.hdf5``) for the given
+        ROI and returns them with the spectrum index converted to ``int``.
+
+        Parameters
+        ----------
+        roi : str
+            ROI name.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Peak list including a ``spectra_ind`` column.
+        """
         with File(self.peaklists_path, "r") as f:
             peaklists = f[roi][:]
             headers = f[roi].attrs['Column headers']
         return pd.DataFrame(peaklists, columns= headers).astype({"spectra_ind": int})
     @property
     def configs_path(self):
+        """Path to the processing recipe YAML file, or ``None`` if it does not exist."""
         path = self._default_save_path('processing_recipe.yaml')
         return path if os.path.exists(path) else None
     @property
@@ -948,6 +1006,7 @@ class DataSource:
         return path
     @property
     def rois(self) -> list[str]:
+        """Names of all ROIs defined for this data source."""
         return list(self.roi_metadata.index)
     @property
     def close(self):
@@ -1043,6 +1102,29 @@ class BaseLoader(ABC):
             max_mz = max(max_mz, mz[-1])
         return (min_mz, max_mz)
     def get_mz_discretization(self, idxs, degree = 3, mz_range = None, draw = True):
+        """
+        Fit polynomial coefficients describing the m/z discretisation step size.
+
+        Uses a least-squares regression on the median-filtered m/z differences.
+        This is the current implementation of the legacy
+        :meth:`get_mz_discretion_coeffs`.
+
+        Parameters
+        ----------
+        idxs : np.ndarray
+            Index segments to use for fitting.
+        degree : int, optional
+            Polynomial degree for the fit. Default ``3``.
+        mz_range : tuple or None, optional
+            Optional ``(mz_min, mz_max)`` to restrict the fitting range.
+        draw : bool, optional
+            If ``True``, display a diagnostic plot. Default ``True``.
+
+        Returns
+        -------
+        np.ndarray
+            Polynomial coefficients.
+        """
         n_med = 75
         nsize_matrix = degree + 1
         sum_XTX = np.zeros((nsize_matrix, nsize_matrix))
@@ -1218,7 +1300,14 @@ class BaseLoader(ABC):
 ###################### IMZML
 
 class loader_imzml_rust(BaseLoader):
-    def __init__(self, file_path, rebuild_metadata=False):
+    """
+    Loader for imzML mass spectrometry imaging data (Rust-backed parser).
+
+    Automatically detects whether the data is continuous or
+    discontinuous and selects the appropriate loading strategy.
+    """
+    def __init__(self, file_path, rebuild_metadata=False, draw_mz_discretization: bool = False):
+
         self.file_path = file_path
         source = rust_ImzMLParser(file_path)
         # Назначение функции подгрузки в зависимости от континуальности данных
@@ -1230,7 +1319,7 @@ class loader_imzml_rust(BaseLoader):
         else:
             self.dcont = False
         #     self.get_batch = self._get_batch_discont
-        self.create_metafile(rebuild_metadata=rebuild_metadata)
+        self.create_metafile(rebuild_metadata=rebuild_metadata, draw=draw_mz_discretization)
 
     @cached_property
     def source(self):
@@ -1443,7 +1532,19 @@ class loader_imzml(BaseLoader):
     Automatically detects whether the data is continuous (TOF) or discontinuous (Orbitrap)
     and selects the appropriate batch-loading strategy.
     """
-    def __init__(self, file_path, rebuild_metadata = False):
+    def __init__(self, file_path, rebuild_metadata = False, draw_mz_discretization: bool = False):
+        """
+        Initialize the imzML loader.
+
+        Parameters
+        ----------
+        file_path : str
+            Path to the imzML file.
+        rebuild_metadata : bool, optional
+            If ``True``, force re-creation of the metadata file. Default ``False``.
+        draw_mz_discretization : bool, optional
+            Whether to draw the m/z discretization diagnostic plots. Default ``False``.
+        """
         self.file_path = file_path
         source = ImzMLParser(file_path)
         # Назначение функции подгрузки в зависимости от континуальности данных 
@@ -1455,7 +1556,9 @@ class loader_imzml(BaseLoader):
         else:
             self.dcont = False
             # self.get_batch = self._get_batch_discont
-        self.create_metafile(rebuild_metadata = rebuild_metadata)
+        self.create_metafile(rebuild_metadata = rebuild_metadata, 
+                             draw=draw_mz_discretization)
+
     @cached_property
     def source(self):
         return ImzMLParser(self.file_path)
@@ -1551,6 +1654,20 @@ class loader_imzml(BaseLoader):
         return roi_list, roi_idx, np.vstack(poslog_specdata)
     
     def get_mz_stream(self, idxs = None):
+        """
+        Lazily yield the m/z scales of multiple spectra.
+
+        Parameters
+        ----------
+        idxs : iterable or None, optional
+            Spectrum indices. If ``None``, all spectra are used.
+
+        Yields
+        ------
+        np.ndarray
+            The m/z scale of each spectrum (the shared continuous scale for
+            continuous data).
+        """
         if idxs is None:
             idxs = range(len(self.source.mzLengths))
         if self.dcont:
@@ -1560,25 +1677,96 @@ class loader_imzml(BaseLoader):
             for idx in idxs:
                 yield self.source.getspectrum(idx)[0]
     def get_intensities_stream(self, idxs):
+        """
+        Lazily yield the intensity arrays of multiple spectra.
+
+        Parameters
+        ----------
+        idxs : iterable
+            Spectrum indices.
+
+        Yields
+        ------
+        np.ndarray
+            The intensity array of each spectrum.
+        """
         for idx in idxs:
             yield self.source.getspectrum(idx)[1]
     
     def get_spectrum(self, idx):
+        """
+        Load a single mass spectrum.
+
+        Parameters
+        ----------
+        idx : int
+            Spectrum index.
+
+        Returns
+        -------
+        tuple
+            ``(mz_array, intensity_array)``.
+        """
         return self.source.getspectrum(idx)
     
     def get_mz(self, idx = None):
+        """
+        Return the m/z scale of a single spectrum.
+
+        For continuous data the shared scale is returned regardless of ``idx``.
+
+        Parameters
+        ----------
+        idx : int or None, optional
+            Spectrum index. Only used for discontinuous data.
+
+        Returns
+        -------
+        np.ndarray
+            The m/z scale.
+        """
         if self.dcont:
             return self.mz_scale_cont
         else:
             return self.source.getspectrum(idx)[0]
         
     def get_intensity(self, idx):
+        """
+        Return the intensity array of a single spectrum.
+
+        Parameters
+        ----------
+        idx : int
+            Spectrum index.
+
+        Returns
+        -------
+        np.ndarray
+            The intensity array.
+        """
         return self.source.getspectrum(idx)[1]
     # #future    
     # def get_batch(self, idxs):
     #     """Заглушка от @abstractmethod, get_batch назначится динамически после __init__"""
     #     pass
-    def get_metadata(self, draw = True): 
+    def get_metadata(self, draw = True):
+        """
+        Extract metadata, ROI metadata, and coordinates from the imzML source.
+
+        Reads the ``_info.txt``/``_poslog.txt`` companion files when available;
+        otherwise falls back to the coordinates stored inside the imzML file.
+
+        Parameters
+        ----------
+        draw : bool, optional
+            If ``True``, display the m/z discretization diagnostic plots.
+            Default ``True``.
+
+        Returns
+        -------
+        tuple
+            ``(metadata, roi_metadata, specdata)`` dicts.
+        """
         metadata = {}
         roi_metadata = {}
         specdata = {}
@@ -1633,6 +1821,24 @@ class loader_imzml(BaseLoader):
         return metadata, roi_metadata, specdata
 
     def get_spectrum_sizes(self, idxs = None) -> list:
+        """
+        Return the number of data points of the given spectra.
+
+        Parameters
+        ----------
+        idxs : int, np.ndarray, SliceIndexator or None, optional
+            Spectrum indices. If ``None``, all spectra are used.
+
+        Returns
+        -------
+        list
+            List of spectrum sizes.
+
+        Raises
+        ------
+        ValueError
+            If ``idxs`` has an unsupported type.
+        """
         if idxs is None:
             return self.source.mzLengths
         else:
@@ -1648,23 +1854,60 @@ class loader_imzml(BaseLoader):
             else:
                 raise ValueError("Invalid index type")
     def _get_physical_coordinates(self, idxs):
+        """
+        Lazily yield the physical (x, y) coordinates of the given spectra.
+
+        Parameters
+        ----------
+        idxs : iterable
+            Spectrum indices.
+
+        Yields
+        ------
+        np.ndarray
+            The physical coordinate of each spectrum.
+        """
         for idx in idxs:
             yield self.source.get_physical_coordinates(idx)
 class loader_hdf5(BaseLoader):
+    """
+    Loader for HDF5-based data sources (placeholder, not yet implemented).
+    """
     pass
 
-class loader_mzxml(BaseLoader): # TODO дописать.
+class loader_mzxml(BaseLoader):
+    """
+    Loader for mzXML data sources (placeholder, not yet implemented).
+    """
     pass
 
 
-class loader_cdf(BaseLoader): 
-    def __init__(self, file_path, rebuild_metadata = False):
+class loader_cdf(BaseLoader):
+    """
+    Loader for NetCDF/CDF mass spectrometry data.
+
+    CDF data is always treated as discontinuous; the metadata (ROIs, m/z
+    ranges, discretization coefficients) is read from the CDF file itself.
+    """
+    def __init__(self, file_path, rebuild_metadata = False, draw_mz_discretization: bool = False):
+        """
+        Initialize the CDF loader.
+
+        Parameters
+        ----------
+        file_path : str
+            Path to the CDF file.
+        rebuild_metadata : bool, optional
+            If ``True``, force re-creation of the metadata file. Default ``False``.
+        draw_mz_discretization : bool, optional
+            Whether to draw the m/z discretization diagnostic plots. Default ``False``.
+        """
         self.file_path = file_path
         source = xr.open_dataset(self.file_path)
         # фактически данные изначально всегда неконтинуальные
         self.dcont = False
 
-        self.create_metafile(rebuild_metadata=rebuild_metadata)  # фактически метаданные находятся в самом cdf
+        self.create_metafile(rebuild_metadata=rebuild_metadata, draw=draw_mz_discretization)  # фактически метаданные находятся в самом cdf
     @cached_property
     def source(self):
         return xr.open_dataset(self.file_path)
@@ -1687,6 +1930,19 @@ class loader_cdf(BaseLoader):
         return dots_slice
     
     def get_spectra_stream(self, idxs = None):
+        """
+        Lazily yield the spectra as ``(mz_values, intensity_values)`` tuples.
+
+        Parameters
+        ----------
+        idxs : iterable or None, optional
+            Spectrum indices. If ``None``, all spectra are used.
+
+        Yields
+        ------
+        tuple
+            ``(mz_array, intensity_array)`` for each spectrum.
+        """
         if idxs is None:
             idxs = range(len(self.source['scan_index']))
         for idx in idxs:
@@ -1696,22 +1952,87 @@ class loader_cdf(BaseLoader):
             yield mz_single, intens_single
 
     def get_mz_stream(self, idxs = None):
+        """
+        Lazily yield the m/z values of multiple spectra.
+
+        Parameters
+        ----------
+        idxs : iterable or None, optional
+            Spectrum indices. If ``None``, all spectra are used.
+
+        Yields
+        ------
+        np.ndarray
+            The m/z values of each spectrum.
+        """
         for idx in idxs:
             dots_slice = self._dots_slice(idx)
             yield self.source['mass_values'][dots_slice].values
 
     def get_intensities_stream(self, idxs = None):
+        """
+        Lazily yield the intensity values of multiple spectra.
+
+        Parameters
+        ----------
+        idxs : iterable or None, optional
+            Spectrum indices. If ``None``, all spectra are used.
+
+        Yields
+        ------
+        np.ndarray
+            The intensity values of each spectrum.
+        """
         for idx in idxs:
             dots_slice = self._dots_slice(idx)
             yield self.source['intensity_values'][dots_slice].values
 
     def get_spectrum(self, idx):
+        """
+        Load a single mass spectrum.
+
+        Parameters
+        ----------
+        idx : int
+            Spectrum index.
+
+        Returns
+        -------
+        tuple
+            ``(mz_array, intensity_array)``.
+        """
         return next(self.get_spectra_stream([idx]))
 
     def get_mz(self, idx):
+        """
+        Return the m/z values of a single spectrum.
+
+        Parameters
+        ----------
+        idx : int
+            Spectrum index.
+
+        Returns
+        -------
+        np.ndarray
+            The m/z values.
+        """
         return next(self.get_mz_stream([idx]))
 
     def get_intensity(self, idx):
+        """
+        Return the intensity values of a single spectrum.
+
+        Parameters
+        ----------
+        idx : int
+            Spectrum index.
+
+        Returns
+        -------
+        np.ndarray
+            The intensity values.
+        """
         return next(self.get_intensities_stream([idx]))
     # #future
     # def get_batch(self, idxs):
@@ -1719,6 +2040,24 @@ class loader_cdf(BaseLoader):
     #     yield from self.get_spectra_stream(idxs)
 
     def get_metadata(self, draw=True):
+        """
+        Extract metadata, ROI metadata, and coordinates from the CDF source.
+
+        ROIs are derived from the ``scan_filters`` channel when present,
+        otherwise a single ROI covering all scans is created. Retention time
+        is stored as the coordinate.
+
+        Parameters
+        ----------
+        draw : bool, optional
+            If ``True``, display the m/z discretization diagnostic plots.
+            Default ``True``.
+
+        Returns
+        -------
+        tuple
+            ``(metadata, roi_metadata, specdata)`` dicts.
+        """
         metadata = {}
         roi_metadata = {}
         specdata = {}

@@ -68,3 +68,18 @@ dev = [
     "pyqt6>=6.11.0",
     "pytest>=8.3.5",
 ]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+testpaths = ["tests"]
+python_files = "test_*.py *_test.py"
+python_functions = "test_*"
+addopts = [
+  "-vv",				        # подробный вывод хода теста
+  "--import-mode=importlib",  	# меньше проблем с импортами
+  "--strict-markers" #Отключение тихого игнорирования, если опечатка в маркере
+]
+markers = [
+  'fast: quick tests on synthetic data',
+  'full: full test on deprecated real data (cdf and imzml formats)'
+]

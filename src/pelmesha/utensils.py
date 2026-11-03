@@ -225,63 +225,6 @@ def chunking_datasets(data_objs, min_distance2split, index_names = None):
     merged_data_obj =  pd.concat(data_objs, index_names)
     return split_array_by_num_distance(merged_data_obj, min_distance2split = min_distance2split)
 
-def split_pdtable_by_medfwhm(pd_table, split_peaks_min = 25, split_mz_min = 10): # TODO del if func lower is actual
-    """
-    Split pd.DataFrame table by median FWHM
-    args:
-        array: array to split
-        min_distance2split: minimum distance to split
-        by_column: column to split by
-    returns:
-        batched_array: array split by num distance
-    """
-    
-    mz_sequence = pd_table.sort_values(by="mz")['mz'].unique()
-    pd_table4mask = pd_table['mz'].to_numpy()
-
-    min_distance2split = np.median(pd_table['FWHM']) * FWHM_TO_SIGMA_FACTOR * 12 # min_distance2split is 12 * median(sigma)
-
-    # getting split borders
-    mz_distance_bool = np.diff(mz_sequence) > min_distance2split
-    left_mz = mz_sequence[:-1][mz_distance_bool]
-    right_mz = mz_sequence[1:][mz_distance_bool] 
-    mz_bins = np.concatenate(([mz_sequence[0] - min_distance2split], (left_mz + right_mz)/2, [mz_sequence[-1] + min_distance2split]))
-    mz_bins_diffs = np.diff(mz_bins)
-   
-    # mz_bins correction by min split load 
-    if split_mz_min is not None:
-        # split_mz_min = min_distance2split * split_mz_min # split_mz_min is min_distance2split * split_mz_minl
-        current_sum = 0
-        mz_bins_corrected = [mz_bins[0]]
-        for n, mz_bin_diff in enumerate(mz_bins_diffs,start=1):
-            if (current_sum + mz_bin_diff) > split_mz_min:
-                mz_bins_corrected.append(mz_bins[n])
-                current_sum = 0
-            else:
-                current_sum += mz_bin_diff
-        if mz_bins_corrected[-1] < mz_bins[-1]:
-            mz_bins_corrected.append(mz_bins[-1])
-
-    mz_bins = mz_bins_corrected
-
-    # bathcing pd_table with correction by min number of peaks in batch 
-    mask = np.zeros(len(pd_table4mask), dtype=bool)
-    batched_pd_table = []
-    if split_peaks_min is not None:
-        for mz_bin in pairwise(mz_bins):
-            mask = mask | (pd_table4mask > mz_bin[0]) & (pd_table4mask < mz_bin[1])
-            if sum(mask) > split_peaks_min:
-                batched_pd_table.append(pd_table[mask])
-                mask.fill(0)
-        if mask.any():
-            batched_pd_table.append(pd_table[mask])
-    else:
-        batched_pd_table = [0]*(len(mz_bins) - 1)
-        for n_batch, mz_bin in enumerate(pairwise(mz_bins)):
-            mask = (pd_table4mask > mz_bin[0]) & (pd_table4mask < mz_bin[1])
-            batched_pd_table[n_batch] = pd_table[mask]
-    return batched_pd_table
-
 def split_pdtable_by_peaks_gap(pd_table, split_peaks_min = 25, split_mz_min = 10):
     """
     Split pd.DataFrame table by median FWHM
@@ -504,7 +447,7 @@ def mspeaks_KD(X: np.ndarray,
 
     pX_array, pY_array = _compute_max(Y, left_min, right_min)
 
-    fwhm_left, fwhm_right = _fwhm_interp(X,Y,pX_array,pY_array, left_min, right_min)
+    fwhm= _fwhm_interp(X,Y,pX_array,pY_array, left_min, right_min)
     eps = np.sqrt(np.finfo(np.float64).eps)
 
     if pdf_fwhm_merge_factor is not None: # This is just copy of peak merging by fwhm distance from _peakpicker_core - i 
@@ -513,7 +456,7 @@ def mspeaks_KD(X: np.ndarray,
         # Индексы переразбитых пиков
         j_prealloc = np.empty(n_peaks, dtype=np.int64) # Выносим за цикл while, так как считаем, что почти не затронет памяти, но сэкономит время на создание нового массива в памяти в цикле while
         while True:
-            fwhm_res = (fwhm_right - fwhm_left)*pdf_fwhm_merge_factor
+            fwhm_res = fwhm*pdf_fwhm_merge_factor
             peak_thld = pY_array*peaklocation - eps
             pkX = np.empty(n_peaks, dtype=np.float64)
             
@@ -570,8 +513,7 @@ def mspeaks_KD(X: np.ndarray,
             pX_array = pX_array[keep_mask_r]
 
             # Обновляем FWHM-массивы (нужно для адаптивного режима)
-            fwhm_left = fwhm_left[keep_mask_r]
-            fwhm_right = fwhm_right[keep_mask]
+            fwhm = fwhm[keep_mask_r]
             n_peaks = left_min.size
 
     return X[pX_array], X[left_min], X[right_min], pY_array
@@ -1305,8 +1247,9 @@ def _snr_window_stats(intens: np.ndarray[float],
     var = ((sum_sq - sum_ * mean) / (count_local - 1)) # ddof = 1
     std = np.sqrt(var) if var > 0 else np.inf
     return mean, std
+
 @njit(cache=True)
-def _fwhm_interp(mz: np.ndarray[float],
+def _fwhm_interp_old(mz: np.ndarray[float],
                  intens: np.ndarray[float],
                  pmz_array: np.ndarray[float], 
                  pint_array: np.ndarray[float], 
@@ -1332,12 +1275,9 @@ def _fwhm_interp(mz: np.ndarray[float],
 
     Returns
     -------
-    fwhm_left : np.ndarray (float64)
-        Interpolated m/z where intensity falls to half the apex on the
-        left side, one per peak.
-    fwhm_right : np.ndarray (float64)
-        Interpolated m/z where intensity falls to half the apex on the
-        right side, one per peak.
+    fwhm : np.ndarray (float64)
+        Interpolated m/z FWHM of peaks where intensity falls to half the apex on the
+        left side and right side.
 
     Notes
     -----
@@ -1365,21 +1305,96 @@ def _fwhm_interp(mz: np.ndarray[float],
         fwhm_right[n] = np.interp(
             half_max, intens[pp : rm + 1][::-1], mz[pp : rm + 1][::-1]
         )
-    return fwhm_left, fwhm_right
+    return fwhm_right - fwhm_left
+@njit(cache=True)
+def _fwhm_interp(mz: np.ndarray[float],
+                 intens: np.ndarray[float],
+                 pmz_array: np.ndarray[float], 
+                 pint_array: np.ndarray[float], 
+                 left_min: np.ndarray[int], 
+                 right_min: np.ndarray[int]):
+    """Interpolate the FWHM boundaries of each peak.
+
+    Internal kernel for :func:`peakpicker`. For every peak, finds the m/z
+    positions where the intensity drops to half its apex value on the
+    left and right sides of the peak.
+
+    Parameters
+    ----------
+    mz, intens : np.ndarray (float64)
+        m/z axis and matching intensity profile.
+    pmz_array : np.ndarray (int64)
+        Apex positions of the peaks (indices into ``intens``).
+    pint_array : np.ndarray (float64)
+        Apex intensities, one per peak.
+    left_min, right_min : np.ndarray (int64)
+        Peak-base boundaries (valleys) as indices into ``intens``,
+        such that ``left_min[n] < pmz_array[n] < right_min[n]``.
+
+    Returns
+    -------
+    fwhm : np.ndarray (float64)
+        Interpolated m/z FWHM of peaks where intensity falls to half the apex on the
+        left side and right side.
+
+    Notes
+    -----
+    - Uses linear interpolation (:func:`np.interp`) between the sampled
+      points bracketing the half-maximum level.
+    - The right boundary is interpolated on a reversed window, so the
+      intensity argument is monotonically decreasing.
+    - The FWHM width itself is ``fwhm_right - fwhm_left``; callers
+      compute it rather than this function returning a width directly.
+    - Does not mutate input arrays.
+    """
+    n_peaks = pmz_array.size
+
+    fwhm_left = np.empty(n_peaks, dtype= np.float64)
+    fwhm_right = np.empty(n_peaks, dtype= np.float64)
+    for n in range(n_peaks):
+        pp = pmz_array[n]
+        lm = left_min[n]
+        rm = right_min[n]
+        half = pint_array[n] * 0.5
+
+        # левый склон: от вершины влево до первого пересечения half
+        fwl = mz[lm]                      # fallback: пересечения нет — край окна
+        for i in range(pp - 1, lm - 1, -1):
+            if intens[i] <= half:
+                y0, y1 = intens[i], intens[i + 1]
+                x0, x1 = mz[i], mz[i + 1]
+                t = (half - y0) / (y1 - y0) if y1 != y0 else 0.0
+                fwl = x0 + t * (x1 - x0)
+                break
+        fwhm_left[n] = fwl
+
+        # правый склон: зеркально
+        fwr = mz[rm]
+        for i in range(pp + 1, rm + 1):
+            if intens[i] <= half:
+                y0, y1 = intens[i - 1], intens[i]
+                x0, x1 = mz[i - 1], mz[i]
+                t = (half - y0) / (y1 - y0) if y1 != y0 else 0.0
+                fwr = x0 + t * (x1 - x0)
+                break
+        fwhm_right[n] = fwr
+    return fwhm_right - fwhm_left
+
 
 @njit(cache=True)
 def _peakpicker_core(mz: np.ndarray,
                     intens: np.ndarray,
                     heightfilter: float | None = None,
                     rel_heightfilter: float | None = None,
-                    fwhm_filter: np.ndarray[float] | None = None,
+                    fwhm_min: float | None = None,
+                    fwhm_max: float | None = None,
                     SNR_threshold: float | None = 3.5,
                     noise_mz_width: float = 5,
                     fwhm_merge_factor: float | None = None,
                     peaklocation: float = 1,
                     return_areas: bool = False,
                     noise_est_iter: int = 3,
-                    resampled_discontiniuous: bool = False):
+                    resampled_discontinuous: bool = False):
     """Numba kernel for peak detection. Do not call directly.
 
     Internal implementation of :func:`peakpicker`; inputs are assumed to be
@@ -1391,8 +1406,10 @@ def _peakpicker_core(mz: np.ndarray,
         m/z axis and matching intensity profile.
     spectra_ind : int
         Spectrum index, written into the first column of the output.
-    fwhm_filter : np.ndarray (1 or 2,) or None
-        Peak-width filter; scalar = lower bound, pair = (min, max) range.
+    fwhm_min : float or None
+        Peak-width filter as lower bound.
+    fwhm_max : float or None
+        Peak-width filter as upper bound.
     fwhm_merge_factor : float or None
         Merge peaks closer than ``FWHM * fwhm_merge_factor``.
     heightfilter : float or None
@@ -1410,7 +1427,7 @@ def _peakpicker_core(mz: np.ndarray,
         Width of the noise window (in points when ``discret_coeffs`` is None).
     return_areas : bool
         Whether to compute peak areas.
-    resampled_discontiniuous : bool
+    resampled_discontinuous : bool
         Whether the input arrays are resampled discontiniuous.
 
     Returns
@@ -1432,15 +1449,10 @@ def _peakpicker_core(mz: np.ndarray,
     # kernels (SNR windows, FWHM, area) index a shorter array and can stall or
     # crash a worker process under multiprocessing.
     float_threshold = np.finfo(intens.dtype).eps * 10.0
-    if resampled_discontiniuous:
-        
-
+    if resampled_discontinuous:
         non_zero_plaetau_mask = intens > float_threshold
         valley_dots = np.abs(intens[1:] - intens[:-1]) > float_threshold
-
         non_zero_plaetau_mask[1:-1] = non_zero_plaetau_mask[1:-1] | valley_dots[:-1] | valley_dots[1:]
-
-
         non_zero_plaetau_mask[0] = non_zero_plaetau_mask[1]
         non_zero_plaetau_mask[-1] = non_zero_plaetau_mask[-2]
         intens = intens[non_zero_plaetau_mask]
@@ -1460,7 +1472,7 @@ def _peakpicker_core(mz: np.ndarray,
     left_min = _prepend(valley_dots[:-1], -1)[loc_min][:-1] + 1
     right_min = valley_dots[loc_min][1:]
 
-    if resampled_discontiniuous:
+    if resampled_discontinuous:
         pmz_array, pint_array, left_min, right_min, non_plaetau_mask  = _compute_max_with_ext_correction(mz, intens, left_min, right_min)
     else:
         pmz_array, pint_array = _compute_max(intens, left_min, right_min)
@@ -1504,32 +1516,34 @@ def _peakpicker_core(mz: np.ndarray,
         noise_std = np.ones(n_peaks,dtype = np.float64)
         noise_mean = np.zeros(n_peaks,dtype = np.float64)
     
-    fwhm_left, fwhm_right = _fwhm_interp(mz,intens,pmz_array,pint_array, left_min, right_min)
-   
-    if fwhm_filter is not None:
-        fwhm = (fwhm_right - fwhm_left)
-        if fwhm_filter.size == 2:
-            k = (fwhm >= fwhm_filter[0]) & (fwhm <= fwhm_filter[1])
-        elif fwhm_filter.size == 1:
-            k = (fwhm >= fwhm_filter)
-        else:
-            raise ValueError("fwhmfilter must be a scalar or a tuple of two scalars")
+    fwhm = _fwhm_interp(mz,intens,pmz_array,pint_array, left_min, right_min)
+    if fwhm_min is None and fwhm_max is None:
+        pass  
+    else:
+        
+        k = np.ones(len(fwhm), dtype=np.bool_)
+
+        if fwhm_min is not None:
+            k &= fwhm >= fwhm_min
+
+        if fwhm_max is not None:
+            k &= fwhm <= fwhm_max
+
         pmz_array = pmz_array[k]
         pint_array = pint_array[k]
         left_min = left_min[k]
         right_min = right_min[k]
-        fwhm_left = fwhm_left[k]
-        fwhm_right = fwhm_right[k]
+        fwhm = fwhm[k]
         noise_std = noise_std[k]
         noise_mean = noise_mean[k]
-        
+    
     if fwhm_merge_factor is not None:
         n_peaks = pmz_array.size
         eps = np.sqrt(np.finfo(np.float64).eps)
         # Индексы переразбитых пиков
         j_prealloc = np.empty(n_peaks, dtype=np.int64) # Выносим за цикл while, так как считаем, что почти не затронет памяти, но сэкономит время на создание нового массива в памяти в цикле while
         while True:
-            fwhm_res = (fwhm_right - fwhm_left)*fwhm_merge_factor
+            fwhm_res = fwhm*fwhm_merge_factor
             peak_thld = pint_array*peaklocation - eps
             pkmz = np.empty(n_peaks, dtype=np.float64)
             
@@ -1590,8 +1604,7 @@ def _peakpicker_core(mz: np.ndarray,
             pmz_array = pmz_array[keep_mask_r]
 
             # Обновляем FWHM-массивы (нужно для адаптивного режима)
-            fwhm_left = fwhm_left[keep_mask_r]
-            fwhm_right = fwhm_right[keep_mask]
+            fwhm = fwhm[keep_mask_r]
             n_peaks = left_min.size
 
     # Correcting peak extension size for big peaks
@@ -1623,7 +1636,6 @@ def _peakpicker_core(mz: np.ndarray,
                 x1, x2 = mz_slice[i], mz_slice[i+1]
                 area += (y1 + y2) * (x2 - x1) / 2
             areas[idx] = area
-    fwhm = fwhm_right-fwhm_left
     SNR = (pint_array - noise_mean)/noise_std
     return mz[pmz_array], pint_array, areas, SNR, mz[left_min], mz[right_min], fwhm, noise_std, noise_mean
 

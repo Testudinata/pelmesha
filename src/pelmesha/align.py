@@ -352,9 +352,9 @@ class Aligner:
 
         # return aligned data and shifts
         if self._return_shifts:
-            return self.array_aligned, self.shift_values
+            return self.array_aligned.squeeze(), self.shift_values
         # only return data
-        return self.array_aligned
+        return self.array_aligned.squeeze()
 
     def align(self, shift_opt=None, scale_opt=None):
         """Realign array based on the optimized shift and scale parameters

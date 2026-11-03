@@ -1,19 +1,4 @@
-﻿"""
-Configuration management for mass spectrometry data processing pipelines.
-
-Provides a Pydantic-based configuration system that supports:
-- Flat and nested dict-style access to parameters
-- Automatic validation and type coercion
-- YAML serialization/deserialization
-- Adaptive (m/z-to-dots) parameter conversion
-- Dynamic field computation (headers, baseliner callable)
-- Parameter distribution to function groups
-
-Main class: Configs
-Special classes: PreparedDataSource and PipelineConfigurator
-Supporting classes: AdaptiveParameter
-"""
-from __future__ import annotations
+﻿from __future__ import annotations
 import ast
 import inspect
 import textwrap
@@ -3236,6 +3221,10 @@ class PreparedDataSource():
         :class:`DataSource` instance or path to a data-source file.
         When provided, per-ROI configs are created automatically.
 
+    draw_mz_discretization : bool, optional
+        Whether to draw the interpolation result of the m/z scale
+        discretization while (re)building metadata. Default ``False``.
+
     **kwargs
         Additional parameter overrides forwarded to each ROI's
         :class:`PipelineConfigurator`.
@@ -3254,6 +3243,7 @@ class PreparedDataSource():
                  configs_source: str | PipelineConfigurator | None = None,
                  kde_configs: str | KDEConfigs | None = None,
                  rebuild_metadata: bool = False,
+                 draw_mz_discretization: bool = False,
                  **kwargs):
         #: Path to the source file that was used to load configs.
         self._configs_source_path: str | None = None
@@ -3275,7 +3265,8 @@ class PreparedDataSource():
             self._load(configs_source, **kwargs)
         # --- Link datasource if provided ---
         if datasource is not None:
-            self.set_link(datasource, rebuild_metadata=rebuild_metadata)
+            self.set_link(datasource, rebuild_metadata=rebuild_metadata,
+                          draw_mz_discretization=draw_mz_discretization)
         
         # for compatability with Pipeline methods
 
@@ -3481,9 +3472,10 @@ class PreparedDataSource():
     #  DataSource linking                                                #
     # ------------------------------------------------------------------ #
 
-    def set_link(self, 
-                 datasource: DataSource | str, 
-                 rebuild_metadata: bool = False) -> None:
+    def set_link(self,
+                 datasource: DataSource | str,
+                 rebuild_metadata: bool = False,
+                 draw_mz_discretization: bool = False) -> None:
         """Link this :class:`PreparedDataSource` to a :class:`DataSource`.
 
         Creates per-ROI :class:`PipelineConfigurator` for every ROI found in the
@@ -3495,11 +3487,12 @@ class PreparedDataSource():
             :class:`DataSource` instance or path to a data-source file.
         """
         if isinstance(datasource, str):
-            datasource = DataSource(datasource, rebuild_metadata=rebuild_metadata)
+            datasource = DataSource(datasource, rebuild_metadata=rebuild_metadata,
+                                    draw_mz_discretization=draw_mz_discretization)
         elif rebuild_metadata:
             # Existing DataSource object: rebuild the metadata file and refresh
             # the in-memory metadata state so it matches the new file on disk.
-            datasource.create_metafile(rebuild_metadata=True)
+            datasource.create_metafile(rebuild_metadata=True, draw=draw_mz_discretization)
             datasource.reload_metadata()
 
         self._datasource = datasource
@@ -3663,16 +3656,18 @@ class PreparedDataSource():
     def update_kde(self,
                      params_source: str | None = None,
                     rois: str | list[str] | None = None,
-                   **kwargs) -> None:            
+                   **kwargs) -> None:
         """Update configuration parameters for specific ROI(s).
 
         If *rois* is ``None``, the update is applied to **all** ROIs.
 
         Parameters
         ----------
-        params_source : str or dict or None
-            Path to a YAML file, or a dictionary with parameter overrides.
-            Same format as :meth:`KDEConfigs.update`.
+        params_source : str or None
+            Path to a YAML file with KDE config fields.  The loaded config
+            **replaces** the current one for the target ROI(s), then
+            **kwargs* are applied on top.  Same format as
+            :meth:`KDEConfigs.load_yaml`.
         rois : str or list of str or None
             ROI(s) to update.  ``None`` means all ROIs.
         **kwargs
@@ -3688,7 +3683,9 @@ class PreparedDataSource():
         for roi in targets:
             if roi in self.roi_kde_configs:
                 if params_source is not None:
-                    self.roi_kde_configs[roi].load_yaml(params_source)
+                    # load_yaml is a classmethod returning a NEW instance;
+                    # assign it back instead of discarding it.
+                    self.roi_kde_configs[roi] = self.roi_kde_configs[roi].load_yaml(params_source)
                 self.roi_kde_configs[roi].update(**kwargs)
 
     def delete(self,
