@@ -80,6 +80,7 @@ addopts = [
   "--strict-markers" #Отключение тихого игнорирования, если опечатка в маркере
 ]
 markers = [
-  'fast: quick tests on synthetic data',
-  'full: full test on deprecated real data (cdf and imzml formats)'
+  'filling: quick tests on synthetic data how filling works',
+  'peakpicking: tests on synthetic and real deprecated data how peakpicking works',
+  'kde: tests on real deprecated data how kde grouping works'
 ]

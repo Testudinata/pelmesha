@@ -2,7 +2,7 @@ from pelmesha.cookbook import Configs, PreparedDataSource, PipelineConfigurator,
 from pelmesha.filling import DataSource
 from pelmesha.dough import Indexator, SliceIndexator
 from pelmesha.kneading import _compute_KDE, FWHM_TO_SIGMA_FACTOR
-from pelmesha.utensils import _summerize_kde_mz, _consesusing_peaks, apply_kde_mzcorrection, _frequency_filtration, _consensus_peaks_summary, show_df, _nunique_summary, _index_to_segment, mspeaks_KD
+from pelmesha.utensils import _summerize_kde_mz, _consensing_peaks, apply_kde_mzcorrection, _frequency_filtration, _consensus_peaks_summary, show_df, _nunique_summary, _index_to_segment, mspeaks_KD
 from sklearn.preprocessing import normalize
 from itertools import pairwise
 import pyarrow.parquet as pq
@@ -3027,7 +3027,7 @@ class Pipeline:
 
         feature_matrix = feature_matrix[filter_bool]
         if duplicates_drop:
-            feature_matrix = _consesusing_peaks(feature_matrix)
+            feature_matrix = _consensing_peaks(feature_matrix)
         if show_stats:
             nunique_stats = pd.concat(nunique_stats, axis=1)
             nunique_stats.columns =  pd.MultiIndex.from_tuples( [('Number of unique peaks', c, '') for c in nunique_stats.columns] )

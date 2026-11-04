@@ -689,7 +689,7 @@ def apply_kde_mzcorrection(peaklist: pd.DataFrame,
         return grftable, binning_rule
     return grftable
 
-def _consesusing_peaks(peaklists: pd.DataFrame):
+def _consensing_peaks(peaklists: pd.DataFrame):
     """Merge duplicated peaks into single consensus peaks after m/z correction.
 
     Groups rows by their corrected ``mz`` value (per sample/ROI and spectrum)

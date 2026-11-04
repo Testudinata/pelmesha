@@ -535,10 +535,14 @@ class Configs():
                 f"'methods' must be a dict, got {type(methods).__name__}."
             )
         for cls_name, func_dict in methods.items():
+            # ``None`` marks a deliberately disabled class (e.g. baseline
+            # correction turned off): the pipeline skips the whole step.
+            if func_dict is None:
+                continue
             if not isinstance(func_dict, dict):
                 raise ValueError(
-                    f"methods['{cls_name}'] must be a dict, "
-                    f"got {type(func_dict).__name__}."
+                    f"methods['{cls_name}'] must be a dict or None "
+                    f"(disabled class), got {type(func_dict).__name__}."
                 )
             for method_name, bucket in func_dict.items():
                 if not isinstance(bucket, dict):
@@ -626,7 +630,7 @@ class Configs():
         """
         matches: list[str] = []
         for cls_name, func_dict in methods.items():
-            if name in func_dict:
+            if isinstance(func_dict, dict) and name in func_dict:
                 matches.append(f"{cls_name}.{name}")
 
         if not matches:
@@ -644,13 +648,49 @@ class Configs():
             )
         cls_name, func_name = matches[0].split(".")
         return cls_name, func_name
+    def _split_method_swaps(self,
+                            items: dict[str, Any]) -> tuple[dict[str, str | None], dict[str, Any]]:
+        """Split class-named keys into method swaps/disables and the rest.
+
+        A key that names an entry of ``configs['methods']`` and carries a
+        ``str`` (method swap) or ``None`` (class disable) is extracted; all
+        other items are returned unchanged in the second dict.
+        """
+        methods = self.configs.get("methods", {})
+        swaps: dict[str, str | None] = {}
+        rest: dict[str, Any] = {}
+        for key, value in items.items():
+            if (isinstance(key, str) and key in methods
+                    and isinstance(methods.get(key), (dict, type(None)))
+                    and (value is None or isinstance(value, str))):
+                swaps[key] = value
+            else:
+                rest[key] = value
+        return swaps, rest
+
+    def _apply_method_swaps(self, swaps: dict[str, str | None]) -> None:
+        """Apply method swaps / class disables previously split by
+        :meth:`_split_method_swaps`."""
+        for cls_name, method_name in swaps.items():
+            if method_name is None:
+                self.disable_class(cls_name)
+            else:
+                self.set_method(cls_name, method_name)
+
     def __setitem__(self, key: str | tuple[str, ...], value: Any):
         if isinstance(key, tuple):
             self._set_by_path(list(key), value)
         elif isinstance(key, str) and "." in key:
             self._set_by_path(key.split("."), value)
         else:
-            self._update_flat({key: value})
+            # Class-named keys support the same method-swap / disable
+            # semantics as update(): ``cfg['Baseline'] = 'snip'`` replaces
+            # the method (via set_method), ``cfg['Baseline'] = None``
+            # disables the whole class so the pipeline skips the step.
+            swaps, rest = self._split_method_swaps({key: value})
+            self._apply_method_swaps(swaps)
+            for k, v in rest.items():
+                self._update_flat({k: v})
     def get(self, key: str | tuple[str, ...], default: Any = None) -> dict[str, Any]:
         try:
             return self.__getitem__(key)
@@ -718,6 +758,11 @@ class Configs():
                 )
             if cls_name not in methods:
                 raise KeyError(f"Unknown class '{cls_name}'.")
+            if methods[cls_name] is None:
+                raise KeyError(
+                    f"Class '{cls_name}' is disabled (set to None) - "
+                    f"its processing step is skipped."
+                )
             if func_name not in methods[cls_name]:
                 raise KeyError(
                     f"Unknown method '{cls_name}.{func_name}'."
@@ -751,6 +796,11 @@ class Configs():
             cls_name, func_name = first, second
             if cls_name not in methods:
                 raise KeyError(f"Unknown class '{cls_name}'.")
+            if methods[cls_name] is None:
+                raise KeyError(
+                    f"Class '{cls_name}' is disabled (set to None) - "
+                    f"its processing step is skipped."
+                )
             if func_name not in methods[cls_name]:
                 raise KeyError(
                     f"Unknown method '{cls_name}.{func_name}'."
@@ -768,7 +818,7 @@ class Configs():
             # 2. Collect matching methods
             method_matches: list[str] = []
             for cls_name, func_dict in methods.items():
-                if name in func_dict:
+                if isinstance(func_dict, dict) and name in func_dict:
                     method_matches.append(f"{cls_name}.{name}")
 
             # 3. Collect matching classes
@@ -790,6 +840,11 @@ class Configs():
                     return self._extract_params(methods[cls_name][func_name])
                 # class match - return cls_init_params
                 cls_methods = methods[name]
+                if cls_methods is None:
+                    raise KeyError(
+                        f"Class '{name}' is disabled (set to None) - "
+                        f"its processing step is skipped."
+                    )
                 if len(cls_methods) == 1:
                     func_name = next(iter(cls_methods))
                     fb = cls_methods[func_name]
@@ -840,6 +895,13 @@ class Configs():
         if methods:
             lines.append("  methods:")
             for cls_name, func_dict in methods.items():
+                if func_dict is None:
+                    available = ", ".join(self._available_method_names(cls_name))
+                    lines.append(
+                        f"    {cls_name}: None (disabled - step skipped; "
+                        f"available methods: {available or 'unknown'})"
+                    )
+                    continue
                 lines.append(f"    {cls_name}:")
                 for method_name, bucket in func_dict.items():
                     # Class init params
@@ -1025,6 +1087,64 @@ class Configs():
                 items.append(f"<span>{inner}</span>")
         return " ".join(items)
 
+    def _resolve_class_for_repr(self, cls_name: str) -> type | None:
+        """Best-effort resolution of a config class name to the actual class.
+
+        Looks through ``_function_refs`` first (registered by ``set_method``
+        and the AST extraction of ``PipelineConfigurator``), then falls back
+        to this module's globals (e.g. ``Baseline``).
+        """
+        for ref in self._function_refs.values():
+            if (isinstance(ref, tuple) and len(ref) == 2
+                    and isinstance(ref[1], type)
+                    and ref[1].__name__ == cls_name):
+                return ref[1]
+        candidate = globals().get(cls_name)
+        return candidate if isinstance(candidate, type) else None
+
+    def _available_method_names(self, cls_name: str) -> list[str]:
+        """Public callable method names of *cls_name* (empty if unresolvable)."""
+        cls_obj = self._resolve_class_for_repr(cls_name)
+        if cls_obj is None:
+            return []
+        return [
+            name for name in dir(cls_obj)
+            if not name.startswith("_")
+            and callable(getattr(cls_obj, name, None))
+        ]
+
+    def _render_disabled_class_row(self, cls_name: str) -> tuple[str, str]:
+        """Build a ``(name_html, params_html)`` row for a disabled class.
+
+        The row shows ``None (disabled)`` and lists the methods the class
+        provides; each method name carries a hover tooltip with its
+        docstring, so a replacement method for :meth:`set_method` can be
+        picked directly from the notebook representation.
+        """
+        cls_obj = self._resolve_class_for_repr(cls_name)
+        method_names = self._available_method_names(cls_name)
+        if cls_obj is None or not method_names:
+            return (
+                f"<code>{self._escape_html(cls_name)}</code>",
+                "<i>None (disabled - the processing step is skipped)</i>",
+            )
+        items: list[str] = []
+        for name in method_names:
+            doc = inspect.getdoc(getattr(cls_obj, name)) or ""
+            # First paragraph of the docstring keeps tooltips compact.
+            short = doc.split("\n\n")[0] if doc else "(no docstring)"
+            style = "border-bottom: 1px dashed #888; cursor: help;"
+            items.append(
+                f'<span title="{self._escape_html(short)}" style="{style}">'
+                f'{self._escape_html(name)}</span>'
+            )
+        params_html = (
+            "<i>None (disabled - the processing step is skipped)</i><br>"
+            "<span style=\"font-size: 11px;\">Available methods: "
+            + ",&nbsp;".join(items) + "</span>"
+        )
+        return (f"<code>{self._escape_html(cls_name)}</code>", params_html)
+
     def _repr_html_(self) -> str:
         """Rich HTML summary of the configs for Jupyter Notebook.
 
@@ -1048,6 +1168,9 @@ class Configs():
                          self._render_params_html(params, payload)))
 
         for cls_name, func_dict in methods.items():
+            if func_dict is None:
+                rows.append(self._render_disabled_class_row(cls_name))
+                continue
             for method_name, bucket in func_dict.items():
                 ref = self._lookup_ref(method_name, cls_name)
                 payload = self._load_doc_ref(ref) if ref else None
@@ -1179,6 +1302,16 @@ class Configs():
         if not func_params:
             return
 
+        # --- Method swap / class disable via class-named keys ---
+        # {ClassName: "method"} replaces the class's method (via set_method
+        # with default extraction); {ClassName: None} disables the class so
+        # its processing step is skipped. Dict values keep their existing
+        # "nested params update" semantics.
+        method_swaps, func_params = self._split_method_swaps(func_params)
+        self._apply_method_swaps(method_swaps)
+        if not func_params:
+            return
+
         # --- Full config dict {"methods": ..., "functions": ...} ---
         if "methods" in func_params or "functions" in func_params:
             self._validate_configs_structure(func_params)
@@ -1249,6 +1382,12 @@ class Configs():
         functions = self.configs.get("functions", {})
         for key, value in partial.items():
             if key in methods:
+                if not isinstance(methods[key], dict):
+                    warnings.warn(
+                        f"Class '{key}' is disabled (set to None) - "
+                        f"cannot update its parameters. Ignoring."
+                    )
+                    continue
                 self._update_nested(methods[key], value, f"methods.{key}")
             elif key in functions:
                 self._update_nested(functions[key], value, f"functions.{key}")
@@ -1418,6 +1557,8 @@ class Configs():
         refs: list[tuple[dict[str, Any], str]] = []
 
         for cls_name, func_dict in methods.items():
+            if not isinstance(func_dict, dict):
+                continue
             for func_name, func_bucket in func_dict.items():
                 param_bucket = func_bucket.get("params")
                 if param_bucket is not None and param_name in param_bucket:
@@ -1620,6 +1761,13 @@ class Configs():
 
             second, *tail = rest
 
+            if methods[first] is None:
+                warnings.warn(
+                    f"Class '{first}' is disabled (set to None) - "
+                    f"nothing to delete inside it."
+                )
+                return
+
             if not tail:
                 # Only two parts: "ClassName.method_name" → delete entire method
                 if second not in methods[first]:
@@ -1783,6 +1931,31 @@ class Configs():
                     f"'{func_key}' and the function does not accept "
                     f"**kwargs - ignoring."
                 )
+
+    def disable_class(self, cls_name: str) -> None:
+        """Disable a whole method-provider class (e.g. baseline correction).
+
+        Stores ``configs['methods'][cls_name] = None``. The pipeline runtime
+        treats a ``None`` entry as "skip this processing step" (e.g.
+        ``preprocess_configuration_base`` does not create a baseliner when
+        ``Baseline`` is ``None``). The class can be re-enabled later with
+        :meth:`set_method` (defaults are re-extracted), with
+        ``update({ClassName: "method_name"})``, or with the constructor
+        keyword ``ClassName="method_name"``.
+
+        Parameters
+        ----------
+        cls_name : str
+            Name of the class entry in ``configs['methods']``.
+        """
+        methods = self.configs.setdefault("methods", {})
+        if cls_name not in methods:
+            warnings.warn(
+                f"Class '{cls_name}' not found in configs - ignoring."
+            )
+            return
+        methods[cls_name] = None
+
     def set_method(self,
                    cls: type | str,
                    method_name: str,
@@ -2049,7 +2222,16 @@ class PipelineConfigurator(Configs):
                     f"got {type(configs_source).__name__} - ignoring."
                 )
         if kwargs:
-            self.update(kwargs)
+            # Split method-swap kwargs first: ClassName="method" replaces the
+            # class's method via set_method (defaults are re-extracted);
+            # ClassName=None disables the class so the pipeline skips the
+            # step. All remaining kwargs are applied afterwards as ordinary
+            # parameter overrides (including params of the newly set method).
+            method_swaps, param_kwargs = self._split_method_swaps(kwargs)
+            self._apply_method_swaps(method_swaps)
+
+            if param_kwargs:
+                self.update(param_kwargs)
 
     def _populate_refs_from_items(self, items: list) -> None:
         """Fill ``_function_refs`` from ``_extract_called_functions`` items.
@@ -2118,7 +2300,7 @@ class PipelineConfigurator(Configs):
         # Collect old method names for this class BEFORE parent modifies configs
         old_method_names: set[str] = set()
         methods = self.configs.setdefault("methods", {})
-        if cls_name in methods:
+        if isinstance(methods.get(cls_name), dict):
             old_method_names = set(methods[cls_name].keys())
 
         # Determine which pipeline steps contain the old method names
@@ -2202,7 +2384,8 @@ class PipelineConfigurator(Configs):
         if isinstance(param_name, str) and "." not in param_name:
             # Bare name — could be a class or function
             if param_name in methods:
-                removed_method_names = set(methods[param_name].keys())
+                if isinstance(methods[param_name], dict):
+                    removed_method_names = set(methods[param_name].keys())
             elif param_name in functions:
                 removed_func_names.add(param_name)
         elif isinstance(param_name, (tuple, str)):
@@ -2217,7 +2400,8 @@ class PipelineConfigurator(Configs):
                     removed_method_names.add(param_name.split(".")[1])
                 else:
                     # Deeper path or bare class — collect all method names
-                    removed_method_names = set(methods[first].keys())
+                    if isinstance(methods[first], dict):
+                        removed_method_names = set(methods[first].keys())
             elif first in functions:
                 if isinstance(param_name, tuple) and len(param_name) == 1:
                     removed_func_names.add(first)
@@ -2279,6 +2463,8 @@ class PipelineConfigurator(Configs):
         methods = self.configs.get("methods", {})
         filtered_methods: dict[str, Any] = {}
         for cls_name, func_dict in methods.items():
+            if not isinstance(func_dict, dict):
+                continue
             for method_name in list(func_dict.keys()):
                 if method_name in func_names:
                     if cls_name not in filtered_methods:
