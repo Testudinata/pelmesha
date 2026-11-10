@@ -51,10 +51,15 @@ def preprocess_configuration_base(
     """
     
     preprocess_configs = configs.get_step_configs("preprocess")
-    mz_range = datasource.roi_metadata.loc[roi,'mz_range']
     
     internal_configs = {}
     internal_configs['process'] = {}
+    mz_range = datasource.roi_metadata.loc[roi,'mz_range']
+
+    mz_crop = configs['modify_raw_spectrum'].get('mz_crop_range', None)
+    if mz_crop is not None:
+        mz_range = (max(mz_crop[0], mz_range[0]), min(mz_crop[1], mz_range[1]))   
+
     resampled_mz = resample_mz_scale(*mz_range, **preprocess_configs['resample_mz_scale'])
     internal_configs['process']['resampled_mz'] = resampled_mz
     discret_coeffs = datasource.roi_metadata.loc[roi,'discret_coeffs']
@@ -76,13 +81,14 @@ def preprocess_configuration_base(
             baseline_algo = next(iter(baseline_algo))
    
     if baseline_algo:
-        if datasource.dcont:
-            internal_configs['process']['Baseliner'] = getattr(Baseline(datasource.get_mz(rmeta['idxroi'].ravel()[0]), 
-                                                                        **configs['Baseline'], 
-                                                                        assume_sorted = True), 
-                                                                        baseline_algo)
-        else:
-            internal_configs['process']['Baseliner'] = baseline_algo
+        # if datasource.dcont: # было решено упростить. Так как слишком усложняло гибкость кода (превращая его в спаггети), 
+        #     x = datasource.get_mz(rmeta['idxroi'].ravel()[0])     #а выигрышь во времени был сомнителен
+        #     internal_configs['process']['Baseliner'] = getattr(Baseline(x,
+        #                                                                 **configs['Baseline'], 
+        #                                                                 assume_sorted = True), 
+        #                                                                 baseline_algo)
+        # else:
+        internal_configs['process']['Baseliner'] = baseline_algo
 
     
     # Configure headers conditionally based on processing flags 
@@ -148,13 +154,13 @@ def process_spectra_base(
     # BaselineCorrection step
     if baseline_algo is not None:
 
-        if isinstance(baseline_algo, str):
-            if baseline_algo == 'asls': #Hack just for setting default params by automatic
-                intensity = intensity - Baseline(mz, assume_sorted = True, **configs['Baseline']).asls(intensity, **configs['asls'])[0]
-            else:
-                intensity = intensity - getattr(Baseline(mz, assume_sorted = True,**configs['Baseline']), baseline_algo)(intensity, **configs[baseline_algo])[0]
+        # if isinstance(baseline_algo, str):
+        if baseline_algo == 'asls': #Hack just for setting default params by automatic
+            intensity = intensity - Baseline(mz, assume_sorted = True, **configs['Baseline']).asls(intensity, **configs['asls'])[0]
         else:
-            intensity = intensity - baseline_algo(intensity, **configs[baseline_algo.__name__])[0]
+            intensity = intensity - getattr(Baseline(mz, assume_sorted = True,**configs['Baseline']), baseline_algo)(intensity, **configs[baseline_algo])[0]
+        # else:
+        #     intensity = intensity - baseline_algo(intensity, **configs[baseline_algo.__name__])[0]
 
     
     # Resampling step
@@ -167,7 +173,7 @@ def process_spectra_base(
             msalign_configs['align_resolution'] = msalign_configs['align_width']*msalign_configs['align_ratio']/align_resolution_delimeter
         else:
             msalign_configs['align_resolution'] = 100
-        intensity = msalign(mz, intensity, **msalign_configs)
+        intensity = msalign(mz, intensity, return_shifts=False, **msalign_configs)
 
     return mz, intensity
 
@@ -915,10 +921,8 @@ def reduce_signal_to_zero(mz: np.ndarray,
     """
     Reduce signal to zero
     """
-    # artefacts_bool = np.zeros(len(mz), dtype=bool)
-    # for distortion in mz_segments_to_zero:
-    #     artefacts_bool |= ((mz > distortion[0]) & (mz < distortion[1]))
-    # ints[artefacts_bool] = 0
+    if not ints.flags.writeable:
+        ints = ints.copy()
     for start, end in mz_segments_to_zero:
         idx_start = np.searchsorted(mz, start, side='right')
         idx_end = np.searchsorted(mz, end, side='left')
@@ -931,7 +935,7 @@ def _compute_KDE(peaklist: pd.DataFrame,
                 KD_bandwidth: str | float = 'fwhm',
                 bwc: float = 1.0,
                 KD_kernel: str = 'gaussian',
-                KDE_algo: str| None = None,
+                KDE_algo: str = 'Tree',
                 split_mz_min: float = 10.0,
                 split_peaks_min: int = 25,
                 account_mzscale: bool = True):
@@ -963,9 +967,8 @@ def _compute_KDE(peaklist: pd.DataFrame,
         Default ``1.0``.
     KD_kernel : str, optional
         KDE kernel name. Default ``'gaussian'``.
-    KDE_algo : str or None, optional
-        KDE algorithm: ``'fft'`` or ``'tree'``. If ``None``, ``'tree'`` is
-        used. Default ``None``.
+    KDE_algo : str
+        KDE algorithm: ``'fft'`` or ``'tree'``. Default ``tree``.
     split_mz_min : float, optional
         Minimum m/z gap used to split peaks into separate segments.
         Default ``10.0``.
@@ -1006,7 +1009,6 @@ def _compute_KDE(peaklist: pd.DataFrame,
     X_plot = [None] * n_segments
     Y_plot = [None] * n_segments
     
-    KDE_algo = KDE_algo or 'tree'
     if KDE_algo.lower() == 'fft':# or (len(mz_discret_coeffs) == 1):
         KDE_func = FFTKDE
     elif KDE_algo.lower() == 'tree':

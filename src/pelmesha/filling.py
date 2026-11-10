@@ -62,7 +62,9 @@ class DataSource:
         for attr_name in dir(self.loader):
             if not attr_name.startswith('_'): # Игнорируем приватные методы
                 attr = getattr(self.loader, attr_name)
-                if callable(attr):
+                # Не перекрываем собственные свойства DataSource (например, close)
+                cls_attr = getattr(type(self), attr_name, None)
+                if callable(attr) and not isinstance(cls_attr, property):
                     setattr(self, attr_name, attr)
     
         # Выгрузка метаданных
@@ -1008,10 +1010,9 @@ class DataSource:
     def rois(self) -> list[str]:
         """Names of all ROIs defined for this data source."""
         return list(self.roi_metadata.index)
-    @property
     def close(self):
         """
-        Close the data source.
+        Close the data source, releasing the resources held by the loader.
         """
         self.loader.close()
 
@@ -1025,6 +1026,17 @@ class BaseLoader(ABC):
     subclass cannot be instantiated unless it implements all the abstract
     methods that are specific to its underlying data format.
     """
+    def close(self):
+        """
+        Release the resources held by the loader.
+
+        The base implementation drops the lazily cached ``source`` object so
+        it can be garbage-collected; the next access re-opens it. Loaders
+        holding persistent OS-level file handles (e.g. netCDF) override this
+        to close the handles explicitly first.
+        """
+        self.__dict__.pop('source', None)
+
     def create_metafile(self, draw = True, rebuild_metadata = False, chunk_Mbsize = 10):
         """
         Create or update the metadata HDF5 file (``<sample_name>_ingredients.hdf5``) for the data source.
@@ -1578,6 +1590,8 @@ class loader_imzml(BaseLoader):
         :yields: Tuple ``(mz_array, intensity_array)`` for each spectrum.
         """
         for idx in idxs:
+            # mz, intens = self.source.getspectrum(idx)
+            # yield np.array(mz, copy=True), np.array(intens, copy=True)
             yield self.source.getspectrum(idx)
     # Maybe for future
     # def _get_batch_cont(self, idxs):
@@ -1919,6 +1933,17 @@ class loader_cdf(BaseLoader):
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+
+    def close(self):
+        """
+        Close the underlying netCDF dataset handle and drop the cached source.
+
+        The next access to ``source`` re-opens the file.
+        """
+        source = self.__dict__.get('source')
+        if source is not None:
+            source.close()
+        self.__dict__.pop('source', None)
 
     def _dots_slice(self, idx):
         """Build the slice that selects the data points of a single spectrum."""

@@ -1500,13 +1500,13 @@ class DataSet:
             if isinstance(samples, list):
                 for s in samples:
                     if s in self.sources:
-                        self.sources[s].close()
+                        self.sources[s]._datasource.close()
             else:
                 if samples in self.sources:
-                    self.sources[samples].close()
+                    self.sources[samples]._datasource.close()
         else:
             for s in self.sources.values():
-                s.close()
+                s._datasource.close()
     
 class Drawer():
     def __init__(self, datasource: "str | DataSource | PreparedDataSource"):
