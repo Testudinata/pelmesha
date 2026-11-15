@@ -1,5 +1,13 @@
 '''various utility classes used by the library'''
 import numpy as np
+from typing import Any
+from dataclasses import dataclass, field
+from tqdm.auto import tqdm
+import warnings
+import queue
+import threading
+from multiprocessing import Pool, cpu_count
+from itertools import count
 
 class LinkedList(np.ndarray):
     """
@@ -285,3 +293,262 @@ class SliceIndexator(Indexator):
     def __iter__(self):
         for start, end in self.view(np.ndarray):
             yield slice(start, end)
+
+def _run_with_file_ids(func, file_ids, *args, **kwargs):
+    file_id, roi = file_ids
+    return file_id, roi, func(*args, **kwargs)
+def _skipped_roi_marker(payload):
+    file_id, roi = payload
+    return file_id, roi, None
+
+
+@dataclass(slots=True)
+class PartState:
+    """
+    Support class for MultiProcessorManager with meta and progress bar for each part of the job.
+    """
+    n_batches: int
+    meta: Any = None
+    pbar: Any = None
+
+@dataclass(slots=True)
+class JobState:
+    """
+    Support class for MultiProcessorManager with meta, file writer and process state.
+    """
+    n_parts: int
+    done: int = 0
+    meta: Any = None
+    writer: Any = None
+    parts: dict[Any, PartState] = field(default_factory=dict)
+
+class MultiProcessorManager:
+    """
+    Manager for multi-processor workflows with progress bars.
+    
+    Parameters
+    ----------
+    dataset : DataSet
+        The dataset to process.
+    cpu_count : int
+        The number of CPUs to use.
+    """
+
+    def __init__(self, 
+                 main_bar: tqdm = None,
+                 cpu_count: int = 1):
+        self.cpu_count = cpu_count
+        self.main_pbar = main_bar
+        self.jobs = {}
+        self._jobs_lock = threading.Lock()
+        if cpu_count > 1:
+            self._pool = Pool(self.cpu_count)
+        else:
+            self._pool = None
+        self.batcher = None
+        self._batch_queue = queue.Queue(maxsize = 3)
+
+        self._id_counter = count()
+        self._id_counter_lock = threading.Lock()
+
+        self._cancel = threading.Event()        # emergency termination flag
+        self._batcher_error = None              # excluding from thread
+        self._closed = False                    # double-close protection
+        
+    def __iter__(self):
+        self.batcher.start()
+        if self.cpu_count > 1:
+            for worker, batches in self.batch_generator():
+                yield from self._pool.imap_unordered(worker, batches)
+        else:
+            for partial_function, batch in self.batch_generator(): 
+                for b in batch:
+                    yield partial_function(b) 
+    
+    def _batcher_runner(self, target, args, kwargs):
+        try:
+            target(self, *args, **kwargs)
+        except BaseException as e:
+            self._batcher_error = e
+            self._cancel.set()
+        finally:
+            try:
+                self._batch_queue.put_nowait(None)
+            except queue.Full:
+                pass
+    def set_batching_thread(self, 
+                              batching_function: callable,
+                              *args,
+                              **kwargs):
+        self.batcher = threading.Thread(
+            target=self._batcher_runner, 
+            args=(batching_function, args, kwargs),
+            daemon=True)
+
+    def batch_generator(self):
+        while True:
+            if self._batcher_error is not None:
+                raise RuntimeError("batcher thread failed") from self._batcher_error
+            try:
+                batch = self._batch_queue.get(timeout=0.1)
+            except queue.Empty:
+                if self._batcher_error is not None:
+                    raise RuntimeError("batcher thread failed") from self._batcher_error
+                if self.batcher is None or not self.batcher.is_alive():
+                    break
+                continue
+
+            if batch is None:
+                break            
+            yield batch
+
+    def register_job(self, job_id: int, n_parts: int, meta=None) -> None:
+        with self._jobs_lock:
+            if job_id in self.jobs:
+                raise ValueError(f"job {job_id} already registered")
+            self.jobs[job_id] = JobState(n_parts=n_parts, meta=meta)
+
+    def add_part(self, job_id: int, part_id, n_batches: int, meta: Any = None) -> None:
+        with self._jobs_lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                raise ValueError(f"job {job_id} is not registered")
+            job.parts[part_id] = PartState(
+                n_batches=n_batches, meta=meta
+            )
+
+    def finish_part(self, job_id: int) -> bool:
+        """
+        Finish a part of a job.
+        Returns True if all parts are finished.
+        Calling ONLY in main thread.
+        """
+
+        job = self.jobs.get(job_id)
+        if job is None:
+            return False
+        job.done += 1
+        return job.done == job.n_parts
+    
+    def release_job(self, job_id: int) -> None:
+        job = self.jobs.pop(job_id, None)
+        if job is None:
+            return
+        if job.writer is not None:
+            job.writer.close()
+            job.writer = None
+        for part in job.parts.values():
+            if part.pbar is not None:
+                part.pbar.close()
+                part.pbar = None
+        self.update()
+        
+    def load_journal(self):
+        pass
+    def create_journal(self):
+        pass
+    def add_to_journal(self):
+        pass
+    def delete_journal(self):
+        pass
+    def create_secondary_pbar(self,
+                               job_id,
+                               part_id,
+                               desc: str = "File batches processed", 
+                               unit: str = "batches"):
+        # get free position for bar
+        with tqdm.get_lock():
+            busy = {abs(bar.pos) for bar in tqdm._instances}
+            pos = 0
+            while pos in busy:
+                pos += 1
+        # create secondary progress bar at position "pos"
+        job = self.jobs.get(job_id, None)
+        if job is None:
+            raise ValueError(f"Job {job_id} not found")
+        part = job.parts.get(part_id, None)
+        if part is None:
+            raise ValueError(f"Part {part_id} of job {job_id} not found")
+        pbar = part.pbar
+        if pbar is None or pbar.disable or pbar.n >= pbar.total:
+            if pbar is not None and not pbar.disable:
+                pbar.close()
+            part.pbar = tqdm(total=part.n_batches,
+                             desc=desc,
+                             unit=unit,
+                             leave=False,
+                             position=pos)
+        else:
+            raise ValueError("Secondary progress bar already exists")
+
+    def batch_queue_put(self, item, timeout: float = 0.1) -> bool:
+        while not self._cancel.is_set():
+            try:
+                self._batch_queue.put(item, timeout=timeout)
+                return True
+            except queue.Full:
+                continue
+        return False
+    
+    def get_id(self):
+        if self._cancel.is_set():
+            return None
+        with self._id_counter_lock:
+            return next(self._id_counter)
+        
+    def secondary_pbar_update(self, job_id, part_id, n: int = 1):
+        job = self.jobs.get(job_id)
+        if job is None:
+            return False
+        part = job.parts.get(part_id)
+        if part is None or part.pbar is None:
+            return False
+        pbar = part.pbar
+        pbar.update(n)
+        if pbar.n >= pbar.total:
+            pbar.close()
+            part.pbar = None
+            return True
+        return False
+    
+    def update(self, n: int = 1):
+        if self.main_pbar is None:
+            return
+        main_pbar = self.main_pbar
+        main_pbar.update(n)
+        if main_pbar.n > main_pbar.total:
+            raise ValueError("Main progress exceeded total num of batches") # TODO - пока для дебагинга
+    
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+
+        # Stoping producers
+        self._cancel.set()
+        if self.batcher:
+            self.batcher.join(timeout = 5)
+            if self.batcher.is_alive():
+                warnings.warn("Batcher thread did not stop in 5 s; continuing shutdown")
+
+        # closing all resources in jobs
+        for job in list(self.jobs.values()):
+            if job.writer is not None:
+                job.writer.close()
+                job.writer = None
+            for part in job.parts.values():
+                if part.pbar is not None:
+                    part.pbar.close()
+                    part.pbar = None
+        self.jobs.clear()
+
+        if self.main_pbar:
+            self.main_pbar.close()
+
+        # 3) Closing pool
+        if self._pool is not None:
+            if self._batcher_error is not None:
+                self._pool.terminate()
+            else:
+                self._pool.close()
+            self._pool.join()

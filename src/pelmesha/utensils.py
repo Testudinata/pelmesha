@@ -1086,7 +1086,7 @@ def _snr_filter(mz: np.ndarray[float],
                                                     mz_half,
                                                     xsize)
                 
-                if psl_left[ind] != sl_left and psl_right[ind] != sl_right:
+                if psl_left[ind] != sl_left or psl_right[ind] != sl_right:
                     noise_mean[ind], noise_std[ind] = _snr_window_stats(intens,
                                                                         noise_bool,
                                                                         pext_left,
@@ -1450,6 +1450,10 @@ def _peakpicker_core(mz: np.ndarray,
     # crash a worker process under multiprocessing.
     float_threshold = np.finfo(intens.dtype).eps * 10.0
     if resampled_discontinuous:
+        if intens.size < 2:
+            empty_f64 = np.empty(0, dtype=np.float64)
+            return (empty_f64, empty_f64, empty_f64, empty_f64,
+                    empty_f64, empty_f64, empty_f64, empty_f64, empty_f64)
         non_zero_plaetau_mask = intens > float_threshold
         valley_dots = np.abs(intens[1:] - intens[:-1]) > float_threshold
         non_zero_plaetau_mask[1:-1] = non_zero_plaetau_mask[1:-1] | valley_dots[:-1] | valley_dots[1:]

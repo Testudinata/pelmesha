@@ -14,8 +14,9 @@ from functools import partial
 import pandas as pd
 import matplotlib.pyplot as plt
 from typing import TYPE_CHECKING, Callable
+from pelmesha.dough import MultiProcessorManager
 if TYPE_CHECKING:
-    from pelmesha import PipelineConfigurator, DataSource
+    from pelmesha import PipelineConfigurator, DataSource, DataSet
     from pelmesha.cookbook import Configs
 
 FWHM_TO_SIGMA_FACTOR = 1 / np.sqrt(8 * np.log(2))  # Conversion factor from FWHM to sigma.
@@ -584,7 +585,7 @@ def peakpicker(mz: np.ndarray,
     props["PextL"] = pext_left
     props["PextR"] = pext_right
     props["FWHM"] = pfwhm
-    # headers = [h for h in headers if h in props]
+    headers = [h for h in headers if h in props]
     return np.column_stack([props[h] for h in headers])
 
 def peakpicker_legacy(mz,
@@ -929,7 +930,7 @@ def reduce_signal_to_zero(mz: np.ndarray,
         ints[idx_start:idx_end] = 0 
     return mz, ints
 
-def _compute_KDE(peaklist: pd.DataFrame,
+def _compute_KDE_old(peaklist: pd.DataFrame,
                 discret_coeffs: np.ndarray,
                 cpu_num: int = 1,
                 KD_bandwidth: str | float = 'fwhm',
@@ -1028,6 +1029,141 @@ def _compute_KDE(peaklist: pd.DataFrame,
     X_plot = X_plot[idx_sort] 
     Y_plot = Y_plot[idx_sort]
     return X_plot, Y_plot
+
+
+def _compute_KDE(peaklist: pd.DataFrame,
+                discret_coeffs: np.ndarray,
+                cpu_num: int = 1,
+                KD_bandwidth: str | float = 'fwhm',
+                bwc: float = 1.0,
+                KD_kernel: str = 'gaussian',
+                KDE_algo: str = 'Tree',
+                split_mz_min: float = 10.0,
+                split_peaks_min: int = 25,
+                account_mzscale: bool = True,
+                progress_bar: bool = True):
+    """Compute a kernel density estimate over the peaks of a peak list.
+
+    The peak list is first split into segments separated by large m/z gaps.
+    For every segment, the probability density of the peaks is estimated
+    with a KDE (FFT or tree based) using a bandwidth selected per peak
+    (e.g. derived from its FWHM). When ``account_mzscale`` is enabled, the
+    bandwidth is clamped so that it never falls below the local m/z
+    discretisation step (i.e. the smallest meaningful separation between two
+    neighbouring m/z points is respected). The per-segment densities are
+    then merged into a single m/z vs density grid.
+
+    Parameters
+    ----------
+    peaklist : pd.DataFrame
+        Peak list that must contain ``mz`` and ``FWHM`` columns.
+    discret_coeffs : np.ndarray
+        Polynomial coefficients describing the m/z discretisation step.
+    cpu_num : int, optional
+        Number of processes used for the per-segment density estimation.
+        Default ``1``.
+    KD_bandwidth : str or float, optional
+        Bandwidth selection method (``'fwhm'``, ``'mz_discret'``) or a fixed
+        float value. Default ``'fwhm'``.
+    bwc : float, optional
+        Multiplier applied to the selected/computed bandwidth.
+        Default ``1.0``.
+    KD_kernel : str, optional
+        KDE kernel name. Default ``'gaussian'``.
+    KDE_algo : str
+        KDE algorithm: ``'fft'`` or ``'tree'``. Default ``tree``.
+    split_mz_min : float, optional
+        Minimum m/z gap used to split peaks into separate segments.
+        Default ``10.0``.
+    split_peaks_min : int, optional
+        Minimum number of peaks required per segment. Default ``25``.
+    account_mzscale : bool, optional
+        Whether to account for the m/z discretisation when computing the
+        bandwidth. Default ``True``.
+
+    Returns
+    -------
+    tuple of np.ndarray
+        ``(X_plot, Y_plot)`` — the common m/z grid and the corresponding
+        summed peak-density values.
+    """
+    segments = _prepare_kde_segments(
+        peaklist, discret_coeffs, KD_bandwidth, bwc,
+        account_mzscale, split_mz_min, split_peaks_min,
+    )
+    if not segments:
+        return np.array([]), np.array([])
+    
+    worker = partial(segment_probability_distribution,
+                    _get_kde_func(KDE_algo), KD_kernel, discret_coeffs)
+    Y_buf = {}
+    X_buf = {}
+    if cpu_num > 1:
+        with Pool(cpu_num) as p:
+            for n, (X_plot_segment, Y_plot_segment) in enumerate(tqdm(p.imap_unordered(worker, segments),
+                                                                        total=len(segments), unit="segment",
+                                                                        desc="Peak PDF calculation", disable= not progress_bar)):
+                Y_buf[n] = Y_plot_segment
+                X_buf[n] = X_plot_segment
+            
+    else:
+        for n, (X_plot_segment, Y_plot_segment) in enumerate(tqdm(map(worker, segments),
+                                                                total=len(segments), unit="segment",
+                                                                desc="Peak PDF calculation", disable= not progress_bar)):
+            Y_buf[n] = Y_plot_segment
+            X_buf[n] = X_plot_segment
+
+    return _merge_kde_segments(X_buf, Y_buf)
+
+def _get_kde_func(KDE_algo: str):
+    algo = KDE_algo.lower()
+    if algo == "fft":
+        return FFTKDE
+    if algo == "tree":
+        return TreeKDE
+    raise ValueError("Unknown KDE function")
+
+def _prepare_kde_segments(peaklist,
+                          discret_coeffs,
+                          KD_bandwidth="fwhm",
+                          bwc=1.0,
+                          account_mzscale=True,
+                          split_mz_min=10.0,
+                          split_peaks_min=25):
+    """
+    Preparing peaklist with batching into segments for KDE calculation
+    """
+    if peaklist is None or peaklist.empty:
+        warnings.warn("Peak list is empty, returning empty arrays for peaks PDF")
+        return []
+
+    df = peaklist.copy()          # не мутируем исходный пиклист
+    FWHM2sigma = FWHM_TO_SIGMA_FACTOR / 5
+    mz_model = Polynomial(discret_coeffs)
+
+    if KD_bandwidth == "fwhm":
+        df["KD_bandwidth"] = df["FWHM"] * FWHM2sigma * bwc
+        if account_mzscale:
+            mz_discret = mz_model(df["mz"])
+            low = df["KD_bandwidth"] < mz_discret
+            df.loc[low, "KD_bandwidth"] = (mz_discret[low] * bwc).astype(df["KD_bandwidth"].dtype)
+    elif KD_bandwidth == "mz_discret":
+        df["KD_bandwidth"] = mz_model(df["mz"]) * bwc
+    else:
+        df["KD_bandwidth"] = KD_bandwidth * bwc
+
+    return split_pdtable_by_peaks_gap(
+        df, split_mz_min=split_mz_min, split_peaks_min=split_peaks_min
+    )
+
+def _merge_kde_segments(X_buf, Y_buf):
+    """Склейка результатов сегментов. Порядок не важен — сортируем по X."""
+    if not X_buf or not Y_buf:
+        return np.array([]), np.array([])
+    X = np.hstack(tuple(X_buf.values()))
+    Y = np.hstack(tuple(Y_buf.values()))
+    idx = np.argsort(X)
+    return X[idx], Y[idx]
 
 def segment_probability_distribution(KDE_func, KD_kernel, mz_discret_coeffs, KD_data):
     """Estimate the probability distribution of the peaks of one segment.

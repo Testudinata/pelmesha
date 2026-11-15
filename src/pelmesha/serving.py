@@ -1,7 +1,7 @@
 from pelmesha.cookbook import Configs, PreparedDataSource, PipelineConfigurator, KDEConfigs
 from pelmesha.filling import DataSource
-from pelmesha.dough import Indexator, SliceIndexator
-from pelmesha.kneading import _compute_KDE, FWHM_TO_SIGMA_FACTOR
+from pelmesha.dough import Indexator, SliceIndexator, _run_with_file_ids, _skipped_roi_marker, MultiProcessorManager
+from pelmesha.kneading import _compute_KDE, FWHM_TO_SIGMA_FACTOR, _get_kde_func, _prepare_kde_segments, _merge_kde_segments, segment_probability_distribution
 from pelmesha.utensils import _summerize_kde_mz, _consensing_peaks, apply_kde_mzcorrection, _frequency_filtration, _consensus_peaks_summary, show_df, _nunique_summary, _index_to_segment, mspeaks_KD
 from sklearn.preprocessing import normalize
 from itertools import pairwise
@@ -18,11 +18,15 @@ import yaml
 import warnings
 from functools import partial
 from typing import Callable
-from multiprocessing import Pool, cpu_count
+from multiprocessing import cpu_count
 from tqdm.auto import tqdm
 from h5py import File
 from urllib.parse import quote
-import sys
+from typing import Literal, Callable
+
+
+ProcessType = Literal["process", "peakpick", "alldata"]
+
 
 class DataSet:
     # TODO:
@@ -641,6 +645,14 @@ class DataSet:
                 warnings.warn(f"Skipping {path}: {type(e).__name__} {e}")
 
     
+    def _ensure_not_empty(self) -> None:
+        """Raise if no data sources have been added to the DataSet."""
+        if not self.sources:
+            raise RuntimeError(
+                "DataSet is empty: no data sources have been added. "
+                "Use DataSet.add_sources(...) to add sources before running data processing."
+            )
+
     def save_configs(self): 
         """
         Save the current config for each source to its ``processed_pelmesha/<sample_name>_processing_recipe.yaml`` file.
@@ -719,14 +731,10 @@ class DataSet:
         --------
         Pipeline.process : The underlying processing method.
         """
-        if sample_name is None:
-            sample_name = list(self.sources.keys())
-        elif isinstance(sample_name, str):
-            sample_name = [sample_name]
+        self._ensure_not_empty()
 
-        for sample in sample_name:
-            print(f"Processing SAMPLE {sample}...")
-            Pipeline(self.sources[sample]).process(
+        Pipeline(self).process(
+                sample_name = sample_name,
                 free_cpus=free_cpus,
                 draw=draw,
                 draw_mz_range=draw_mz_range,
@@ -745,8 +753,9 @@ class DataSet:
                 draw: bool = True, 
                 draw_mz_range: tuple[float, float] | None = None,
                 draw_spectrum_idx: int | None = None,
+                draw_max_sources: int| None = 10,
                 Ram_GB_limit: float = 2,
-                h5chunk_size_MB: int = 10,
+                h5chunk_size_MB: int = 1,
                 dtypeconv: np.dtype | str | None = None,
                 **kwargs) -> None:
         """
@@ -778,24 +787,20 @@ class DataSet:
         --------
         Pipeline.process : The underlying processing method.
         """
-        if sample_name is None:
-            sample_name = list(self.sources.keys())
-        elif isinstance(sample_name, str):
-            sample_name = [sample_name]
-
-        for sample in sample_name:
-            print(f"Processing SAMPLE {sample}...")
-            Pipeline(self.sources[sample]).peakpick(allowed_indices = allowed_indices,
-                                                    allowed_coords = allowed_coords,
-                                                    free_cpus=free_cpus,
-                                                    draw=draw,
-                                                    draw_mz_range=draw_mz_range,
-                                                    draw_spectrum_idx=draw_spectrum_idx,
-                                                    Ram_GB_limit=Ram_GB_limit,
-                                                    h5chunk_size_MB=h5chunk_size_MB,
-                                                    dtypeconv=dtypeconv,
-                                                    **kwargs
-                                                )
+        self._ensure_not_empty()
+        Pipeline(self).peakpick(sample_name = sample_name,
+                                allowed_indices = allowed_indices,
+                                allowed_coords = allowed_coords,
+                                free_cpus=free_cpus,
+                                draw=draw,
+                                draw_mz_range=draw_mz_range,
+                                draw_spectrum_idx=draw_spectrum_idx,
+                                draw_max_sources=draw_max_sources,
+                                Ram_GB_limit=Ram_GB_limit,
+                                h5chunk_size_MB=h5chunk_size_MB,
+                                dtypeconv=dtypeconv,
+                                **kwargs
+                            )
     def estimate_peak_density_kde(self, 
                                   sample_name: list | str | None = None,
                                   free_cpus: int = 1,
@@ -827,17 +832,16 @@ class DataSet:
         --------
         Pipeline.process : The underlying processing method.
         """
+        self._ensure_not_empty()
         if sample_name is None:
             sample_name = list(self.sources.keys())
         elif isinstance(sample_name, str):
             sample_name = [sample_name]
 
-        for sample in sample_name:
-            print(f"Estimating peak density for SAMPLE {sample}...")
-            source = self.sources[sample]
-            Pipeline(source).estimate_peak_density_kde(free_cpus=free_cpus,
-                                                       draw=draw,
-                                                       draw_borders=draw_borders)
+        Pipeline(self).estimate_peak_density_kde(sample_name=sample_name,
+                                                free_cpus=free_cpus,
+                                                draw=draw,
+                                                draw_borders=draw_borders)
     
     def feature_matrix(self,
                         samples: list[str] | None = None,
@@ -911,6 +915,7 @@ class DataSet:
         pd.DataFrame
             Feature matrix.
         """
+        self._ensure_not_empty()
         
         return Pipeline.feature_matrix(self,
                                        samples = samples,
@@ -1154,6 +1159,7 @@ class DataSet:
         dtypeconv : numpy.dtype, optional
             If not None, convert the data to the given dtype.
         """
+        self._ensure_not_empty()
         if sources is None:
             sources = list(self.sources.keys())
         if isinstance(sources, str):
@@ -1308,8 +1314,8 @@ class DataSet:
         str
             E.g. ``"DataSet: 3 files, 11 ROIs"``.
         """
-        total_rois = sum(len(source.rois) for source in self.sources.values())
-        return f"DataSet: {len(self.sources)} files, {total_rois} ROIs"
+        self._total_rois = sum(len(source.rois) for source in self.sources.values())
+        return f"DataSet: {len(self.sources)} files, {self._total_rois} ROIs"
 
     def __repr__(self):
         """
@@ -1805,10 +1811,9 @@ class Drawer():
                 if self.prepdata is None:
                     raise ValueError("No processed spectra path or configs to get processed spectrum")
                 else:
-                    pipeline = Pipeline(self.prepdata)
-                    stream = pipeline._multistream_pipeline(Pipeline._alldata_wrapper,r, cpu_num=1, idxs = spectrum_idx)
-                    mz, headers = next(stream)
-                    mz_dict, intensity_dict, peaklist_streamed = next(stream)
+                    mz, headers, worker = Pipeline._prepare_roi_worker(self.prepdata, r, Pipeline._alldata_wrapper, 'alldata')
+                    mz_dict, intensity_dict, peaklist_streamed = worker(spectrum_idx)
+                    
                     mz = mz_dict[spectrum_idx]
                     data_int = intensity_dict[spectrum_idx].squeeze()
                     mz_crop_range  = self.prepdata[r]["modify_raw_spectrum"]["mz_crop_range"]
@@ -2429,7 +2434,7 @@ class AbsoluteFormatter(ticker.ScalarFormatter):
         """
         # Main method: take abs(x) and pass it to the standard parent.
         return super().__call__(abs(x), pos)
-
+    
 class Pipeline:
     """
     Unified orchestrator for running MSI data processing.
@@ -2440,7 +2445,7 @@ class Pipeline:
     whole :class:`DataSet`.
     """
     def __init__(self,
-                 prepdata: "PreparedDataSource"):
+                 dataset: DataSet):
         """
         Initialize a Pipeline for a prepared data source.
 
@@ -2460,17 +2465,15 @@ class Pipeline:
         ValueError
             If *prepdata* is not a :class:`PreparedDataSource`.
         """
-        if isinstance(prepdata, PreparedDataSource):
-            self.prepdata = prepdata
-            self.roi_configs = prepdata.roi_configs
-            self._configs_source_path = prepdata._configs_source_path
-            self._datasource = prepdata._datasource
+        if isinstance(dataset, DataSet):
+            self.ds = dataset
         else:
             raise ValueError(
-                "Provide a PreparedDataSource."
+                "Provide a DataSet object."
             )
 
     def process(self,
+                sample_name: str | list[str] | None = None,
                 allowed_indices: np.ndarray | None = None,
                 allowed_coords: list[dict] | dict | None = None,
                 free_cpus: int = 1, 
@@ -2478,7 +2481,7 @@ class Pipeline:
                 draw_mz_range: tuple[float, float] | None = None,
                 draw_spectrum_idx: int | None = None,
                 Ram_GB_limit: float = 2,
-                h5chunk_size_MB: int = 10,
+                h5chunk_size_MB: int = 1,
                 dtypeconv: np.dtype | str | None = None):
         """
         Process the spectra of every ROI and write them to an HDF5 file.
@@ -2507,63 +2510,116 @@ class Pipeline:
         dtypeconv : np.dtype | str | None, optional
             Data type conversion (default None).
         """
-        datasource = self._datasource
+        ds_samples = list(self.ds.sources.keys())
+        if sample_name is None:
+            sample_name = ds_samples
+        else: 
+            if isinstance(sample_name, str):
+                sample_name = [sample_name]
+            sample_name = list(dict.fromkeys(sample_name))
+            missing = set(sample_name) - self.ds.sources.keys()
+            if missing:
+                warnings.warn(
+                    f"Unknown sample_name(s): {sorted(missing)}. "
+                    f"Available: {list(self.ds.sources.keys())}"
+                )
+        cpu_num = max(1, cpu_count() - free_cpus)
         
-        hdf5_save_path = self._default_save_path("processed_spectra.hdf5")
-        if os.path.exists(hdf5_save_path):
-            os.remove(hdf5_save_path)
+        main_pbar = tqdm(total=len(sample_name), desc="Samples progress", unit="sample")
+        mp_man = MultiProcessorManager(main_pbar, cpu_num)
+        mp_man.set_batching_thread(Pipeline._datasources_batcher,
+                                   self.ds, 
+                                   sample_name, 
+                                   self._procfunc_wrapper,
+                                   'process',
+                                   cpu_num, 
+                                   allowed_indices, 
+                                   allowed_coords, 
+                                   Ram_GB_limit, 
+                                   dtypeconv)
+        try:
+            for file_id, roi,(loc_idxs, proc_intensity) in mp_man: # Getting results from the MultiProcessorManager by iter
+                job = mp_man.jobs.get(file_id)
+                if job is None:          # job already closed (close() from update())
+                    continue
+                part = job.parts[roi]
+                job_meta = job.meta
+                roi_meta = part.meta
+                # Choose the hdf5 file to write to
+                if job.writer is not None:
+                    hdf5 = job.writer
+                    datasource = job_meta['datasource']
+                else: # if the file_id's writer to hdf5 file is not created, create a new hdf5 file
+                    datasource = job_meta['datasource']
+                    
+                    hdf5_save_path = datasource._default_save_path("processed_spectra.hdf5")
+                    if os.path.exists(hdf5_save_path):
+                        os.remove(hdf5_save_path)
+                    os.makedirs(os.path.dirname(hdf5_save_path), exist_ok=True)
 
-        cpu_num = cpu_count()-free_cpus
-        roi_metadata = datasource.roi_metadata
-
-        if dtypeconv is None:
-            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
-        dtypeconv = np.dtype(dtypeconv)
-        bytes_flsize = dtypeconv.itemsize
-        chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
-        for roi in roi_metadata.index:
-            idxs = self._filter_roi_segments(roi,
-                                             allowed_indices = allowed_indices,
-                                             allowed_coords = allowed_coords)
-            if idxs is not None and not idxs:
-                warnings.warn(f"Skipping {roi}")
-                continue
-            processing_stream = self._multistream_pipeline(self._procfunc_wrapper,
-                                                           roi = roi,
-                                                           cpu_num = cpu_num,
-                                                           Ram_GB_limit = Ram_GB_limit,
-                                                           dtypeconv = dtypeconv,
-                                                           idxs= idxs)
-            gen_mz, headers_list = next(processing_stream)
-            if gen_mz is None:
-                processing_stream.close()
-                warnings.warn(f"Discontinuous data detected for sample '{datasource.sample_name}' (ROI: {roi}). "  
-                              "Resampling is required before writing to HDF5.")
+                    job.writer = hdf5 = File(hdf5_save_path, "a")
                 
-                continue
-            
-            with File(hdf5_save_path,"a") as hdf5:
-                dots_num = len(gen_mz)
-                hdf5.create_dataset(roi+"/int", (Indexator(roi_metadata.loc[roi,"idxroi"]).count, dots_num), chunks=(int(chunk_size_by_elements/dots_num), dots_num), dtype = dtypeconv)
-                hdf5.create_dataset(roi+"/mz", data = gen_mz, dtype = dtypeconv)
-                
-                for loc_idxs, proc_intensity in processing_stream:
-                
-                    hdf5[roi]["int"][next(loc_idxs.__iter__()),:] = proc_intensity
-                    # hdf5[roi]["int"][loc_idxs,:] = proc_intensity
+                if roi not in hdf5.keys():
+                    # spectra_count = Indexator(datasource.roi_metadata.loc[roi,"idxroi"]
+                    gen_mz = roi_meta["mz"]
+                    idxs = roi_meta["idxs"]
+                    dots_num  = len(gen_mz)
+                    loc_dtypeconv = roi_meta["dtypeconv"]
+                    bytes_flsize = loc_dtypeconv.itemsize
+                    chunk_size = int(max(1, np.ceil(h5chunk_size_MB*(1024**2)/(dots_num*bytes_flsize))))
 
-            if draw:
-                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
+                    hdf5.create_dataset(roi,(Indexator(idxs).count, dots_num), chunks=(chunk_size, dots_num), dtype=loc_dtypeconv)
+                    hdf5.create_dataset(roi+"/mz", data = gen_mz, dtype = loc_dtypeconv)
 
-        self.prepdata.save()
+                    mp_man.create_secondary_pbar(job_id=file_id, 
+                                                 part_id=roi, 
+                                                 desc=f"Sample name \"{datasource.sample_name}\" roi \"{roi}\"", 
+                                                 unit='batches')           
+                
+                hdf5[roi]["int"][next(loc_idxs.__iter__()),:] = proc_intensity
+                
+                if mp_man.secondary_pbar_update(job_id=file_id, part_id=roi):
+                    if mp_man.finish_part(file_id):
+                        mp_man.release_job(file_id)
+        finally:
+            mp_man.close()
+
+        if draw:
+            if draw_max_sources is None:
+                draw_max_sources = len(self.ds.sources)
+            for n_source, (source_name, prepdata) in enumerate(self.ds.sources.items()):
+                if n_source >= draw_max_sources:
+                    break
+                print(f"Datasource {source_name}")
+                for roi in prepdata.roi_metadata.index:
+                    Drawer(prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
+
+        
+
+        #     with File(hdf5_save_path,"a") as hdf5:
+        #         dots_num = len(gen_mz)
+        #         hdf5.create_dataset(roi+"/int", (Indexator(roi_metadata.loc[roi,"idxroi"]).count, dots_num), chunks=(int(chunk_size_by_elements/dots_num), dots_num), dtype = dtypeconv)
+        #         hdf5.create_dataset(roi+"/mz", data = gen_mz, dtype = dtypeconv)
+                
+        #         for loc_idxs, proc_intensity in processing_stream:
+                
+        #             hdf5[roi]["int"][next(loc_idxs.__iter__()),:] = proc_intensity
+        #             # hdf5[roi]["int"][loc_idxs,:] = proc_intensity
+
+        #     if draw:
+        #         Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
+
+        # self.prepdata.save()
         
 
     def peakpick(self,
+                 sample_name: str | list[str] | None = None,
                  allowed_indices: np.ndarray | None = None,
                  allowed_coords: np.ndarray | None = None,
                  free_cpus: int = 1,
                  draw: bool = False,
                  draw_mz_range: tuple[float, float] | None = None,
+                 draw_max_sources: int| None = 10,
                  draw_spectrum_idx: int | None = None,
                  Ram_GB_limit: float = 2,
                  h5chunk_size_MB: int = 10,
@@ -2593,63 +2649,184 @@ class Pipeline:
         dtypeconv : numpy.dtype | str | None, optional
             Data type conversion for processing (default None).
         """
-             
-        datasource = self._datasource
-        hdf5_save_path = self._default_save_path("peaklists.hdf5")
-        if os.path.exists(hdf5_save_path):
-            os.remove(hdf5_save_path)
-        os.makedirs(os.path.dirname(hdf5_save_path), exist_ok=True)
-        peaks_density_path = self._default_save_path("peaks_density.hdf5")
-        if os.path.exists(peaks_density_path):
-            os.remove(peaks_density_path)
+        ds_samples = list(self.ds.sources.keys())
+        if sample_name is None:
+            sample_name = ds_samples
+        else: 
+            if isinstance(sample_name, str):
+                sample_name = [sample_name]
+            sample_name = list(dict.fromkeys(sample_name))
+            available = self.ds.sources.keys()
+            missing = set(sample_name) - available
+            if missing:
+                warnings.warn(
+                    f"Unknown sample_name(s): {sorted(missing)}. "
+                    f"Available: {list(self.ds.sources.keys())}"
+                )
+            sample_name = [s for s in sample_name if s in available]
 
+        cpu_num = max(1, cpu_count() - free_cpus)
 
-        if dtypeconv is None:
-            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
-        dtypeconv = np.dtype(dtypeconv)
-        cpu_num = cpu_count()-free_cpus
-        bytes_flsize = dtypeconv.itemsize
-        chunk_size_by_elements = int(max(1,np.ceil(h5chunk_size_MB*(1024**2)/bytes_flsize)))
-        
-        roi_metadata = datasource.roi_metadata
-
-
-        for roi in roi_metadata.index:
-                 
-            idxs = self._filter_roi_segments(roi,
-                                             allowed_indices = allowed_indices,
-                                             allowed_coords = allowed_coords)
-
-            if idxs is not None and len(idxs) == 0:
-                warnings.warn(f"Skipping sample {datasource.sample_name} ROI {roi}")
-                continue
-            peakpicking_stream = self._multistream_pipeline(self._peakpick_wrapper,
-                                                           roi = roi,
-                                                           cpu_num = cpu_num,
-                                                           Ram_GB_limit = Ram_GB_limit,
-                                                           dtypeconv = dtypeconv,
-                                                           idxs = idxs)
-            _, headers_list = next(peakpicking_stream)
-            
-            with File(hdf5_save_path,"a") as hdf5:
+        main_pbar = tqdm(total=len(sample_name), desc="Samples peakpicking", unit="sample")
+        mp_man = MultiProcessorManager(main_pbar, cpu_num)
+        mp_man.set_batching_thread(Pipeline._datasources_batcher,
+                                   self.ds, 
+                                   sample_name, 
+                                   self._peakpick_wrapper,
+                                   'peakpick',
+                                   cpu_num, 
+                                   allowed_indices, 
+                                   allowed_coords, 
+                                   Ram_GB_limit, 
+                                   dtypeconv)
+        try:
+            for file_id, roi, peaklists in mp_man: # Getting results from the MultiProcessorManager by iter
+                job = mp_man.jobs.get(file_id)
+                if job is None:          # job already closed (close() from update())
+                    continue
+                if peaklists is None:    # Skipped ROI marker
+                    if mp_man.finish_part(file_id):
+                        mp_man.release_job(file_id)
+                    continue
+                part = job.parts[roi]
+                job_meta = job.meta
+                roi_meta = part.meta
+                headers_list = roi_meta["headers"]
+                jobs_sample_name = job_meta['sample_name']
                 n_heads = len(headers_list)
-                hdf5.create_dataset(roi,(0, n_heads), maxshape = (None, n_heads), chunks=(chunk_size_by_elements/n_heads, n_heads), dtype=dtypeconv)
-                hdf5[roi].attrs["Column headers"] = headers_list
-                for peaklists in peakpicking_stream:
-                    list_size = len(peaklists)
-                    if list_size == 0:
-                        continue
+
+                # Choose the hdf5 file to write to
+                if job.writer is not None:
+                    hdf5 = job.writer
+                    
+                else: # if the file_id's writer to hdf5 file is not created, create a new hdf5 file
+                    hdf5_save_path = job_meta['hdf5_save_path']
+                    if os.path.exists(hdf5_save_path):
+                        os.remove(hdf5_save_path)
+                    os.makedirs(os.path.dirname(hdf5_save_path), exist_ok=True)
+                    peaks_density_path = job_meta['peaks_density_save_path']
+                    if os.path.exists(peaks_density_path):
+                        os.remove(peaks_density_path)
+                    job.writer = hdf5 = File(hdf5_save_path, "a")
+                
+                if roi not in hdf5.keys():
+                    loc_dtypeconv = roi_meta["dtypeconv"]
+                    bytes_flsize = loc_dtypeconv.itemsize
+                    chunk_size = int(max(1, np.ceil(h5chunk_size_MB*(1024**2)/(n_heads*bytes_flsize))))
+                    hdf5.create_dataset(roi,(0, n_heads), maxshape = (None, n_heads), chunks=(chunk_size, n_heads), dtype=loc_dtypeconv)
+                    hdf5[roi].attrs["Column headers"] = headers_list
+                    mp_man.create_secondary_pbar(job_id=file_id, 
+                                                 part_id=roi, 
+                                                 desc=f"Sample name \"{jobs_sample_name}\" roi \"{roi}\"", 
+                                                 unit='batches')           
+                
+                list_size = len(peaklists)
+                if list_size != 0:    
                     hdf5[roi].resize((hdf5[roi].shape[0] + list_size, n_heads))
                     hdf5[roi][-list_size:,:] = peaklists
-            if draw:
-                Drawer(self.prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
+                
+                if mp_man.secondary_pbar_update(job_id=file_id, part_id=roi):
+                    if mp_man.finish_part(file_id):
+                        mp_man.release_job(file_id)
+        finally:
+            mp_man.close()
 
-        self.prepdata.save()
+        if draw:
+            if draw_max_sources is None:
+                draw_max_sources = len(self.ds.sources)
+            for n_source, source_name in enumerate(sample_name):
+                prepdata = self.ds.sources[source_name]
+                if n_source >= draw_max_sources:
+                    break
+                print(f"Datasource {source_name}")
+                for roi in prepdata.roi_metadata.index:
+                    Drawer(prepdata).draw_processed_data(roi, draw_mz_range, draw_spectrum_idx)
+
+            
+    @staticmethod
+    def _datasources_batcher(mp_man: MultiProcessorManager,
+                            ds: DataSet,
+                            sample_name: list[str],
+                            process_wrapper: Callable,
+                            process_wrapperType: ProcessType,
+                            cpu_num: int = 1,
+                            allowed_indices: list = None,
+                            allowed_coords: list = None,
+                            Ram_GB_limit: float = 2,
+                            dtypeconv: np.dtype | str | None = None):
+        
+        for sample, prepdata in ds.sources.items():
+
+            datasource = prepdata._datasource
+            if sample not in sample_name:
+                continue
+            
+            if dtypeconv is None:
+                source_dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
+            else:
+                source_dtypeconv = dtypeconv
+            source_dtypeconv = np.dtype(source_dtypeconv)            
+            roi_metadata = datasource.roi_metadata
+            file_id = mp_man.get_id()
+
+            mp_man.register_job(job_id = file_id,
+                                n_parts = len(roi_metadata.index),
+                                meta = {"hdf5_save_path": datasource._default_save_path("peaklists.hdf5"),
+                                        "peaks_density_save_path": datasource._default_save_path("peaks_density.hdf5"),
+                                        "sample_name": datasource.sample_name})
+            
+            for roi in roi_metadata.index:
+                size_per_spec = None
+                prepared_process_wrapper = partial(_run_with_file_ids, process_wrapper, (file_id, roi))
+                idxs = Pipeline._filter_roi_segments(datasource, 
+                                                     roi,
+                                                    allowed_indices = allowed_indices,
+                                                    allowed_coords = allowed_coords)
+
+                if idxs is not None and not isinstance(idxs, (int, np.integer)) and len(idxs) == 0:
+                    warnings.warn(f"Skipping sample {datasource.sample_name} ROI {roi}")
+                    if not mp_man.batch_queue_put((_skipped_roi_marker, [(file_id, roi)])):
+                        return
+                    continue 
+                if idxs is None:
+                    idxs = roi_metadata.loc[roi,"idxroi"]
+
+
+                mz, headers_list, partial_worker = Pipeline._prepare_roi_worker(prepdata, roi, 
+                                                                                prepared_process_wrapper,
+                                                                                process_wrapperType= process_wrapperType, # TODO слабое место - нужно как-то автоматизировать этот вопрос для универсальности батчера
+                                                                                dtypeconv = source_dtypeconv)
+
+                if isinstance(idxs, (int,np.integer)):
+                    idxs_batches = np.asarray([idxs, idxs + 1])
+                else:
+                    if mz is not None:
+                        size_per_spec = len(mz)
+                    idxs_batches = datasource.split_idxs(idxs = idxs,
+                                                            cpu_count=cpu_num, 
+                                                            Ramcap_GB = Ram_GB_limit, 
+                                                            size_per_spec = size_per_spec)
+                meta = {"headers": headers_list, 
+                       "dtypeconv": source_dtypeconv}
+                if process_wrapperType == "process":
+                    meta['mz'] = mz
+                    meta['idxs'] = idxs
+                mp_man.add_part(file_id, 
+                                roi, 
+                                len(idxs_batches), 
+                                meta = meta)
+                # mp_man._batch_queue.put((partial_worker, idxs_batches))
+                if not mp_man.batch_queue_put((partial_worker, idxs_batches)):
+                    return
+            prepdata.save()
+        mp_man.batch_queue_put(None)
 
     def estimate_peak_density_kde(self,
+                                  sample_name: str | list[str] | None = None,
                                   free_cpus: int = 1,
                                   draw: bool = True,
-                                  draw_borders: float = 1.5):
+                                  draw_borders: float = 1.5,
+                                  draw_max_sources: int | None = 10):
         """
         Estimate the peak density using KDE.
 
@@ -2673,30 +2850,177 @@ class Pipeline:
         FileNotFoundError
             If the peaklists file does not exist; run :meth:`peakpick` first.
         """
-        prepdata = self.prepdata
-        source = prepdata._datasource
-        save_path = prepdata._default_save_path('peaks_density.hdf5')
+        ds_samples = list(self.ds.sources.keys())
+        if sample_name is None:
+            sample_name = ds_samples
+        else: 
+            if isinstance(sample_name, str):
+                sample_name = [sample_name]
+            sample_name = list(dict.fromkeys(sample_name))
+            available = self.ds.sources.keys()
+            missing = set(sample_name) - available
+            if missing:
+                warnings.warn(
+                    f"Unknown sample_name(s): {sorted(missing)}. "
+                    f"Available: {list(self.ds.sources.keys())}"
+                )
+            sample_name = [s for s in sample_name if s in available]
+        missing_peaklists = [
+            name for name in sample_name
+            if not os.path.exists(self.ds.sources[name].peaklists_path)
+        ]
+        if missing_peaklists:
+            raise FileNotFoundError(
+                "Peaklists are missing for: "
+                f"{missing_peaklists}. Run peakpick() first."
+            )
         
-        if os.path.exists(save_path):
-            os.remove(save_path)
+        cpu_num = max(1, cpu_count() - free_cpus)
+
+        main_pbar = tqdm(total=len(sample_name), desc="Samples peak density estimates", unit="sample")
+        mp_man = MultiProcessorManager(main_pbar, cpu_num)
+        mp_man.set_batching_thread(Pipeline._peaklists_batcher,
+                                   self.ds,
+                                   sample_name)
+        X_buff = {}
+        Y_buff = {}
+        try:
+            for file_id, roi, segment in mp_man:
+                job = mp_man.jobs.get(file_id)
+                jmeta = job.meta
+                path = jmeta["peaks_density_save_path"]
+                if job is None:
+                    continue
+
+                if job.writer is None:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    if os.path.exists(path):
+                        os.remove(path)
+                    job.writer = File(path, "a")
+                
+                if segment is None: # Skipped ROI marker
+                    job.writer.create_dataset(f"{roi}/mz", data=np.array([]))
+                    job.writer.create_dataset(f"{roi}/peaks_density", data=np.array([]))
+                    if mp_man.finish_part(file_id):
+                        mp_man.release_job(file_id)
+                    continue
+
+                part = job.parts[roi]
+                if part is None:
+                    continue
+
+                if part.pbar is None:
+                    mp_man.create_secondary_pbar(
+                        file_id, roi,
+                        desc=f"{jmeta['sample_name']} roi {roi} KDE",
+                        unit="segments",
+                    )
+                key = (file_id, roi)
+                X_buff.setdefault(key, {})
+                Y_buff.setdefault(key, {})
+                n = len(X_buff[key])
+                X_buff[key][n], Y_buff[key][n] = segment
+                if mp_man.secondary_pbar_update(file_id, roi):
+                    X, Y = _merge_kde_segments(X_buff.pop(key), Y_buff.pop(key))
+                    job.writer.create_dataset(f"{roi}/mz", data=X)
+                    job.writer.create_dataset(f"{roi}/peaks_density", data=Y)
+
+                    if mp_man.finish_part(file_id):
+                        self.ds.sources[jmeta['sample_name']].dump_kde_configs()
+                        mp_man.release_job(file_id)
+        finally:
+            mp_man.close()
         
-        peaklists_path = prepdata._default_save_path('peaklists.hdf5')
+        if draw:
+            if draw_max_sources is None:
+                draw_max_sources = len(self.ds.sources)
+            for n_source, source_name in enumerate(sample_name):
+                prepdata = self.ds.sources[source_name]
+                if n_source >= draw_max_sources:
+                    break
+                print(f"Drawing peak density for {source_name}")
+                for roi in prepdata.rois:
+                    Drawer(prepdata).draw_peak_density(roi, draw_borders)        
+                    
+
+        # prepdata = self.prepdata
+        # source = prepdata._datasource
+        # save_path = prepdata._default_save_path('peaks_density.hdf5')
         
-        if not os.path.exists(peaklists_path):
-            raise FileNotFoundError(f"Peaklists file {peaklists_path} does not exist. Please run peakpicking first")
-        roi_metadata = source.roi_metadata
-        cpu_num = cpu_count() - free_cpus
-        roi_kde_configs = prepdata.roi_kde_configs
-        with File(save_path, 'w') as f:
+        # if os.path.exists(save_path):
+        #     os.remove(save_path)
+        
+        # peaklists_path = prepdata._default_save_path('peaklists.hdf5')
+        
+        # if not os.path.exists(peaklists_path):
+        #     raise FileNotFoundError(f"Peaklists file {peaklists_path} does not exist. Please run peakpicking first")
+        # roi_metadata = source.roi_metadata
+        # cpu_num = cpu_count() - free_cpus
+        # roi_kde_configs = prepdata.roi_kde_configs
+        # with File(save_path, 'w') as f:
+        #     for roi in prepdata.rois:
+        #         peaklist = source.peaklists(roi)
+        #         roi_peak_density = _compute_KDE(peaklist, roi_metadata.loc[roi,"discret_coeffs"], cpu_num, **roi_kde_configs[roi].to_dict)
+        #         f.create_dataset(f"{roi}/mz", data=roi_peak_density[0])
+        #         f.create_dataset(f"{roi}/peaks_density", data=roi_peak_density[1])
+        # prepdata.dump_kde_configs()
+        # for roi in prepdata.rois:
+        #     if draw:
+        #         Drawer(self.prepdata).draw_peak_density(roi, draw_borders)
+    
+    @staticmethod
+    def _peaklists_batcher(mp_man: MultiProcessorManager, 
+                            ds: DataSet,
+                            sample_name: list[str]): 
+        
+        for sample, prepdata in ds.sources.items():
+
+            datasource = prepdata._datasource
+            if sample not in sample_name:
+                continue
+            roi_metadata = datasource.roi_metadata
+            file_id = mp_man.get_id()
+            mp_man.register_job(job_id = file_id,
+                    n_parts = len(prepdata.rois),
+                    meta = {"peaks_density_save_path": datasource._default_save_path("peaks_density.hdf5"),
+                            "sample_name": datasource.sample_name})
             for roi in prepdata.rois:
-                peaklist = source.peaklists(roi)
-                roi_peak_density = _compute_KDE(peaklist, roi_metadata.loc[roi,"discret_coeffs"], cpu_num, **roi_kde_configs[roi].to_dict)
-                f.create_dataset(f"{roi}/mz", data=roi_peak_density[0])
-                f.create_dataset(f"{roi}/peaks_density", data=roi_peak_density[1])
-        prepdata.dump_kde_configs()
-        for roi in prepdata.rois:
-            if draw:
-                Drawer(self.prepdata).draw_peak_density(roi, draw_borders)
+                prepared_segment_probability_distribution = partial(_run_with_file_ids, segment_probability_distribution, (file_id, roi))
+                roi_kde_configs = prepdata.roi_kde_configs[roi]
+                KDE_func = _get_kde_func(roi_kde_configs.KDE_algo)
+                KD_kernel = roi_kde_configs.KD_kernel
+
+                discret_coeffs = roi_metadata.loc[roi,"discret_coeffs"]
+                peaklists = datasource.peaklists(roi)
+                
+                if peaklists.empty:
+                    warnings.warn(f"Peaks list is empty for sample {datasource.sample_name} ROI {roi}")
+                    if not mp_man.batch_queue_put((_skipped_roi_marker, [(file_id, roi)])):
+                        return
+                    continue
+
+                segments = _prepare_kde_segments(peaklists, 
+                                                 discret_coeffs,
+                                                 KD_bandwidth=roi_kde_configs.KD_bandwidth, 
+                                                 bwc=roi_kde_configs.bwc,
+                                                 account_mzscale=roi_kde_configs.account_mzscale,
+                                                 split_mz_min=roi_kde_configs.split_mz_min,
+                                                 split_peaks_min=roi_kde_configs.split_peaks_min)
+                if not segments:
+                    warnings.warn(f"No KDE segments for {datasource.sample_name} ROI {roi}")
+                    mp_man.add_part(file_id, roi, 0)
+                    if not mp_man.batch_queue_put((_skipped_roi_marker, [(file_id, roi)])):
+                        return
+                    continue
+                
+                mp_man.add_part(file_id, 
+                                roi, 
+                                len(segments))
+                partial_worker = partial(prepared_segment_probability_distribution, KDE_func, KD_kernel, discret_coeffs)
+                if not mp_man.batch_queue_put((partial_worker, segments)):
+                    return
+            prepdata.dump_kde_configs()
+        mp_man.batch_queue_put(None)
 
     @staticmethod
     def feature_matrix(dataset: DataSet,
@@ -3151,47 +3475,15 @@ class Pipeline:
             values are the per-batch results returned by ``process_wrapper``.
         """
         datasource = self._datasource
-        if dtypeconv is None:
-            dtypeconv = datasource.metadata.iloc[0]["dtype_raw"]
-        dtypeconv = np.dtype(dtypeconv)
-        roi_metadata = datasource.roi_metadata
-        rmeta = roi_metadata.loc[roi]
-        if idxs is None:
-            idxs = rmeta["idxroi"]
-        # Get per-ROI PipelineConfigurator pipeline functions and its configs from PreparedDataSource
-        roi_configs = self.roi_configs[roi]
-        preprocess_function = roi_configs._preprocess_function
-        
-        mz = None
-        headers_list = None
-        size_per_spec = None
-        if preprocess_function:
-            mz, headers_list, internal_configs = preprocess_function(datasource, roi, rmeta, roi_configs)
-            if mz is None and datasource.loader.dcont:
-                mz = datasource.loader.mz_scale_cont
-        else:
-            if datasource.loader.dcont:
-                mz = datasource.loader.mz_scale_cont
 
-        if process_wrapper.__name__ == "_procfunc_wrapper":
-            internal_configs['process_pipeline']= roi_configs._process_function
-            wrapper_configs = roi_configs.get_step_configs("process")
-        elif process_wrapper.__name__ in ["_peakpick_wrapper","_alldata_wrapper"]:
-            internal_configs['process_pipeline']  = roi_configs._process_function
-            internal_configs['peakpick_function']  = roi_configs._peakpick_function
-            wrapper_configs = {"peakpick":roi_configs.get_step_configs("peakpick"), 
-                               "process":roi_configs.get_step_configs("process")}
-        else:
-            raise ValueError("Unknown process_wrapper function")
+
+        # Get per-ROI PipelineConfigurator pipeline functions and its configs from PreparedDataSource
+        
+        
 
         yield mz, headers_list # mz common mz to spectra, if mz is not common, None is returned. Headers list for peaklists.
 
-        partial_worker = partial(process_wrapper,
-            datasource = datasource,
-            configs = wrapper_configs,
-            dtypeconv = dtypeconv,
-            **internal_configs
-            )
+
         
 
         if isinstance(idxs, (int,np.integer)):
@@ -3207,24 +3499,25 @@ class Pipeline:
                 for data in tqdm(p.imap_unordered(partial_worker, idxs_batches), total=len(idxs_batches), unit = 'batch', desc = f'Processing ROI {roi}'):
                     yield data
 
-    def _default_save_path(self, suffix = "", prefix = ""):
-        """
-        Delegate to the underlying datasource's default save-path helper.
+    # def _default_save_path(self, suffix = "", prefix = ""):
+    #     """
+    #     Delegate to the underlying datasource's default save-path helper.
 
-        Parameters
-        ----------
-        suffix : str, optional
-            File suffix/name appended to the base path (default ``""``).
-        prefix : str, optional
-            File prefix prepended to the base path (default ``""``).
+    #     Parameters
+    #     ----------
+    #     suffix : str, optional
+    #         File suffix/name appended to the base path (default ``""``).
+    #     prefix : str, optional
+    #         File prefix prepended to the base path (default ``""``).
 
-        Returns
-        -------
-        str
-            The resolved output file path.
-        """
-        return self._datasource._default_save_path(suffix, prefix)
-    def _filter_roi_segments(self,
+    #     Returns
+    #     -------
+    #     str
+    #         The resolved output file path.
+    #     """
+    #     return self._datasource._default_save_path(suffix, prefix)
+    
+    def _filter_roi_segments(datasource: DataSource,
                              roi: str,
                              allowed_indices: np.ndarray | None = None,
                              allowed_coords: list[dict]| dict | None = None):
@@ -3243,7 +3536,7 @@ class Pipeline:
         np.ndarray
             The filtered ROI index segments.
         """
-        datasource = self._datasource
+        # datasource = self._datasource
         roi_metadata = datasource.roi_metadata
 
         idxs = None
@@ -3378,9 +3671,10 @@ class Pipeline:
         batch_iter = datasource.get_spectra_stream(Indexator(idxs))
         for n, (_mz, raw_intensity) in enumerate(batch_iter):
             _mz, proc_intensity = process_function(_mz, raw_intensity, proc_configs, **internal_proc_configs)
-            peaklists[n] = peakpick_function(_mz, np.asarray(proc_intensity, dtype=dtypeconv).squeeze(), idxs_list[n], peakpick_configs, **internal_peakpick_configs)
+            proc_intensity = np.atleast_1d(np.asarray(proc_intensity, dtype=dtypeconv))
+            peaklists[n] = peakpick_function(_mz, proc_intensity, idxs_list[n], peakpick_configs, **internal_peakpick_configs)
 
-        return np.vstack(tuple(peaklists.values()))
+        return np.vstack(tuple(peaklists.values())) if len(peaklists) > 0 else np.array([])
     
     @staticmethod
     def _alldata_wrapper(idx: Indexator | SliceIndexator | tuple| np.ndarray | int,
@@ -3425,7 +3719,7 @@ class Pipeline:
         internal_peakpick_configs = internal_configs['peakpick']
 
         peaklists = {}
-        if isinstance(idx, int):
+        if isinstance(idx, (int,np.integer)):
             idx = np.asarray([idx,idx+1], dtype=np.int64)
         idxs_list = list(Indexator(idx))
         batch_iter = datasource.get_spectra_stream(Indexator(idx))
@@ -3438,3 +3732,43 @@ class Pipeline:
             proc_intensity[i] = _intensity
             peaklists[i] = peakpick_function(_mz, np.asarray(_intensity, dtype=dtypeconv).squeeze(), idxs_list[n], peakpick_configs, **internal_peakpick_configs)
         return proc_mz, proc_intensity, np.vstack(tuple(peaklists.values()))
+    @staticmethod
+    def _prepare_roi_worker(prepdata: PreparedDataSource,
+                       roi: str,
+                        process_wrapper: Callable,
+                        process_wrapperType: ProcessType,
+                        **kwargs):
+        datasource = prepdata._datasource
+        rmeta = datasource.roi_metadata.loc[roi]
+        roi_configs = prepdata.roi_configs[roi]
+        preprocess_function = roi_configs._preprocess_function
+        mz = None
+        headers_list = None
+        internal_configs = {}
+        if preprocess_function:
+            mz, headers_list, internal_configs = preprocess_function(datasource, roi, rmeta, roi_configs)
+            if mz is None and datasource.loader.dcont:
+                mz = datasource.loader.mz_scale_cont
+        else:
+            if datasource.loader.dcont:
+                mz = datasource.loader.mz_scale_cont
+        
+        if process_wrapperType == "process":
+            internal_configs['process_pipeline']= roi_configs._process_function
+            wrapper_configs = roi_configs.get_step_configs("process")
+
+        elif process_wrapperType in ['peakpick','alldata']:
+            internal_configs['process_pipeline']  = roi_configs._process_function
+            internal_configs['peakpick_function']  = roi_configs._peakpick_function
+            wrapper_configs = {"peakpick":roi_configs.get_step_configs("peakpick"), 
+                                "process":roi_configs.get_step_configs("process")}
+        else:
+            raise ValueError("Unknown process_wrapper function")
+        partial_worker = partial(process_wrapper,
+                        datasource = datasource,
+                        configs = wrapper_configs,
+                        **internal_configs,
+                        **kwargs
+                        )
+        return mz, headers_list, partial_worker
+

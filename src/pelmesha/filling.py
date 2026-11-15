@@ -1,6 +1,5 @@
 import os
 import re
-
 import numpy as np
 from numpy.polynomial.polynomial import polyval
 from numpy.polynomial import Polynomial
@@ -739,7 +738,9 @@ class DataSource:
                 # return mz_scale, mean_intensity
 
             else:
-                stats = pd.DataFrame(np.vstack([np.concatenate(batch_mz, axis=0), np.concatenate(batch_intens, axis=0)]).T, columns=['mz','intensities']).groupby('mz')['intensities'].agg(['sum', 'count'])
+                stats = pd.DataFrame(np.vstack([np.concatenate(batch_mz, axis=0), 
+                                                np.concatenate(batch_intens, axis=0)]).T, 
+                                    columns=['mz','intensities']).groupby('mz')['intensities'].agg(['sum', 'count'])
                 batch_mz = []
                 batch_intens = []
                 for idxs_batch in idxs_batches:
@@ -752,7 +753,10 @@ class DataSource:
                             intens = intens[mz_range_slice]
                         batch_mz.append(mz)
                         batch_intens.append(intens)
-                    stats = stats.add(pd.DataFrame(np.vstack([np.concatenate(batch_mz, axis=0), np.concatenate(batch_intens, axis=0)]).T, columns=['mz','intensities']).groupby('mz')['intensities'].agg(['sum', 'count']), fill_value=0)
+                    stats = stats.add(pd.DataFrame(np.vstack([np.concatenate(batch_mz, axis=0), 
+                                                              np.concatenate(batch_intens, axis=0)]).T, 
+                                                   columns=['mz','intensities']).groupby('mz')['intensities'].agg(['sum', 'count']), 
+                                                   fill_value=0)
                 mz_scale = stats.index
                 mean_intensity = stats['sum']/stats['count']
                 # return stats.index, stats['sum']/stats['count']
@@ -762,7 +766,12 @@ class DataSource:
                 hdf5.create_dataset(f'mean_spectrum/{roi}', data = np.vstack((mz_scale, mean_intensity)))
         return mz_scale, mean_intensity
        
-    def split_idxs(self, idxs = None, d = None, cpu_count = 1, Ramcap_GB = None, size_per_spec = None):
+    def split_idxs(self, 
+                   idxs = None, 
+                   d = None, 
+                   cpu_count = 1, 
+                   Ramcap_GB = None, 
+                   size_per_spec = None):
         """
         Split spectrum indices into batches that fit within the RAM budget.
 
